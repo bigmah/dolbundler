@@ -1,0 +1,3 @@
+[submodule "ModernGekko"]
+	path = ModernGekko
+	url = https://github.com/ExpansionPak/ModernGekko.git

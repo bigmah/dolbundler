@@ -1,0 +1,4 @@
+# Build artifacts. *.app rather than DolBundler.app so a rename cannot
+# silently un-ignore a stale bundle from a previous name.
+*.app/
+gui/target/

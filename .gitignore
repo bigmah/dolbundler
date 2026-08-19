@@ -1,0 +1,23 @@
+# Game data. Nothing in this project ships or accepts a disc image into git.
+# Users bring their own dump; see the legal notice in README.md.
+*.iso
+*.gcm
+*.wbfs
+*.rvz
+*.ciso
+*.gcz
+*.nkit.*
+*.dol
+*.rel
+*.bnr
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Rust / CMake build output
+target/
+build/

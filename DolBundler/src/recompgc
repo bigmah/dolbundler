@@ -1,0 +1,238 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# RecompGC - turn a GameCube/Wii disc image into a native macOS app.
+#
+#   1. extract the disc with Dolphin's DiscIO (ModernGekko --extract)
+#   2. statically recompile its DOL to native arm64 (moderngekko-port build)
+#   3. emit a double-clickable .app that runs the result
+#
+# Usage: recompgc [--porcelain] [--app] [--no-open] <disc-image> [more images...]
+#        recompgc play     --disc-id <id> --game-root <dir> --module <lib> --title <s>
+#        recompgc make-app --disc-id <id> --game-root <dir> --module <lib> --title <s>
+#                          [--platform <s>]
+#
+# By default a disc is extracted, recompiled, and added to the library; it is
+# played from DolBundler's list. --app additionally builds a .app in
+# ~/Applications. `play` and `make-app` are what the window calls for an
+# already-recompiled game.
+#
+# --porcelain adds machine-readable event lines for the GUI and drops the
+# colour codes. Everything else on stdout is log text. The events are:
+#
+#   @@step <index> <total> <title>
+#   @@info <key>=<value>        key in: image game_root disc_id name platform
+#                                       module app
+#   @@ok
+#   @@fail <message>
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONF="$SELF_DIR/toolchain.conf"
+
+MODE=pipeline
+case "${1-}" in
+  play|make-app) MODE="$1"; shift ;;
+esac
+
+PORCELAIN=0
+AUTO_OPEN=1
+MAKE_APP=0
+IMAGES=()
+# Subcommand fields, unused by the pipeline.
+ARG_DISC_ID=''; ARG_GAME_ROOT=''; ARG_MODULE=''; ARG_TITLE=''; ARG_PLATFORM=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --porcelain) PORCELAIN=1; AUTO_OPEN=0 ;;
+    --app)       MAKE_APP=1 ;;
+    --no-open)   AUTO_OPEN=0 ;;
+    --open)      AUTO_OPEN=1 ;;
+    --disc-id)   ARG_DISC_ID="${2-}"; shift ;;
+    --game-root) ARG_GAME_ROOT="${2-}"; shift ;;
+    --module)    ARG_MODULE="${2-}"; shift ;;
+    --title)     ARG_TITLE="${2-}"; shift ;;
+    --platform)  ARG_PLATFORM="${2-}"; shift ;;
+    -*)          echo "unknown option: $1" >&2; exit 2 ;;
+    *)           IMAGES+=("$1") ;;
+  esac
+  shift
+done
+
+if [ "$PORCELAIN" -eq 1 ]; then
+  bold=''; dim=''; red=''; green=''; off=''
+else
+  bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; green=$'\033[32m'; off=$'\033[0m'
+fi
+
+emit()  { [ "$PORCELAIN" -eq 1 ] && printf '@@%s\n' "$*"; return 0; }
+# In porcelain mode the GUI renders its own heading from the event, so the
+# human-readable copy would show up twice.
+step()  { emit "step $1 $2 $3"
+          [ "$PORCELAIN" -eq 1 ] && return 0
+          printf '\n%s==> %s/%s  %s%s\n' "$bold" "$1" "$2" "$3" "$off"; }
+info()  { emit "info $1=$2"; }
+note()  { printf '%s    %s%s\n' "$dim" "$*" "$off"; }
+ok()    { printf '%s    %s%s\n' "$green" "$*" "$off"; }
+die()   { emit "fail $*"; printf '\n%serror: %s%s\n' "$red" "$*" "$off" >&2; exit 1; }
+
+[ -f "$CONF" ] || die "missing $CONF; re-run DolBundler/build.sh"
+# shellcheck source=/dev/null
+source "$CONF"
+
+: "${MG_BUILD:?toolchain.conf did not set MG_BUILD}"
+: "${APPS_DIR:=$HOME/Applications}"
+: "${GRAPHICS_BACKEND:=Metal}"
+USER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/moderngekko"
+SUPPORT_DIR="$HOME/Library/Application Support/DolBundler"
+LIBRARY="$SUPPORT_DIR/library.json"
+COVERS="$SUPPORT_DIR/covers"
+
+for tool in ModernGekko moderngekko-port moderngekko-run dolrecomp; do
+  [ -x "$MG_BUILD/$tool" ] || die "$MG_BUILD/$tool is missing; re-run DolBundler/build.sh"
+done
+# --- subcommands -------------------------------------------------------------
+# Both act on a game that is already recompiled, so they need neither the disc
+# image nor a compiler.
+
+require_fields() {
+  [ -n "$ARG_DISC_ID" ]   || die "$1 needs --disc-id"
+  [ -n "$ARG_GAME_ROOT" ] || die "$1 needs --game-root"
+  [ -n "$ARG_MODULE" ]    || die "$1 needs --module"
+  [ -n "$ARG_TITLE" ]     || die "$1 needs --title"
+  [ -d "$ARG_GAME_ROOT" ] || die "the extracted disc is missing from $ARG_GAME_ROOT"
+  [ -f "$ARG_MODULE" ]    || die "the recompiled module is missing from $ARG_MODULE"
+}
+
+register_game() {
+  /usr/bin/python3 "$SELF_DIR/make_game_app.py" \
+    --name "$ARG_TITLE" --disc-id "$ARG_DISC_ID" --game-root "$ARG_GAME_ROOT" \
+    --module "$ARG_MODULE" --runtime "$MG_BUILD" --user-dir "$USER_DIR" \
+    --graphics "$GRAPHICS_BACKEND" --platform "$ARG_PLATFORM" \
+    --library "$LIBRARY" --covers "$COVERS" "$@"
+}
+
+if [ "$MODE" = play ]; then
+  require_fields play
+  mkdir -p "$USER_DIR/Logs"
+  # Mirrors the generated .app's launcher. The bundle keeps its own copy on
+  # purpose: it has to run with DolBundler uninstalled.
+  exec "$MG_BUILD/moderngekko-run" \
+    --game "$ARG_GAME_ROOT" \
+    --module "$ARG_MODULE" \
+    --user-dir "$USER_DIR" \
+    --title "$ARG_TITLE" \
+    --graphics "$GRAPHICS_BACKEND" \
+    >>"$USER_DIR/Logs/$ARG_DISC_ID.log" 2>&1
+fi
+
+if [ "$MODE" = make-app ]; then
+  require_fields make-app
+  mkdir -p "$APPS_DIR"
+  app="$(register_game --app --out-dir "$APPS_DIR")" \
+    || die "could not build the app bundle"
+  info app "$app"
+  ok "$app"
+  exit 0
+fi
+
+command -v cmake >/dev/null || die "cmake is required to compile the recompiled module"
+command -v ninja >/dev/null || die "ninja is required to compile the recompiled module"
+
+# "MarioParty4" -> "Mario Party 4". Only splits lower->upper and lower->digit,
+# so all-caps IDs and names like NBA2K3 are left alone.
+prettify() {
+  printf '%s' "$1" | sed -E 's/([a-z])([A-Z])/\1 \2/g; s/([a-z])([0-9])/\1 \2/g'
+}
+
+process_one() {
+  local image="$1"
+  [ -f "$image" ] || die "no such file: $image"
+  info image "$image"
+
+  printf '%s%s%s\n' "$bold" "RecompGC - $(basename "$image")" "$off"
+
+  step 1 4 "Extracting the disc"
+  local extract_log; extract_log="$(mktemp -t recompgc-extract)"
+  "$MG_BUILD/ModernGekko" --extract "$image" 2>&1 | tee "$extract_log"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || die "extraction failed (see the log above)"
+  local game_root
+  game_root="$(sed -n 's/^.*: "\(.*\)"$/\1/p' "$extract_log" | tail -1)"
+  rm -f "$extract_log"
+  [ -d "$game_root" ] || die "could not determine where the disc was extracted"
+  info game_root "$game_root"
+  ok "$game_root"
+
+  step 2 4 "Reading the game header"
+  local info_text; info_text="$("$MG_BUILD/moderngekko-port" inspect "$game_root")" \
+    || die "the extracted disc did not validate"
+  printf '%s\n' "$info_text" | sed 's/^/    /'
+  local raw_name disc_id platform
+  raw_name="$(sed -n 's/^Game name: *//p' <<<"$info_text")"
+  disc_id="$(sed -n 's/^Disc ID: *//p' <<<"$info_text")"
+  platform="$(sed -n 's/^Platform: *//p' <<<"$info_text")"
+  [ -n "$disc_id" ] || die "the disc header had no game ID"
+
+  local name
+  if [[ "$raw_name" == *" "* ]]; then name="$raw_name"; else name="$(prettify "$raw_name")"; fi
+  name="${name//\//-}"; name="${name//:/-}"
+  [ -n "$name" ] || name="$disc_id"
+  info disc_id "$disc_id"
+  info name "$name"
+  info platform "$platform"
+
+  step 3 4 "Recompiling $name to native code"
+  note "PowerPC -> C -> native. The first pass takes a few minutes; later ones are cached."
+  local port_log; port_log="$(mktemp -t recompgc-port)"
+  "$MG_BUILD/moderngekko-port" build "$game_root" 2>&1 | tee "$port_log"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || { rm -f "$port_log"; die "recompilation failed (see the log above)"; }
+  local module
+  module="$(grep -E '^(built module|cache hit): ' "$port_log" | tail -1 | sed 's/^[^:]*: "//; s/"$//')"
+  rm -f "$port_log"
+  [ -f "$module" ] || die "the recompiler did not report a module path"
+  info module "$module"
+  ok "$(du -h "$module" | cut -f1 | tr -d ' ') native module"
+
+  # Also park it where a bare `moderngekko-run --game ...` looks, so the game is
+  # playable without going through the generated app.
+  mkdir -p "$USER_DIR/StaticRecompModules"
+  cp -f "$module" "$USER_DIR/StaticRecompModules/g${disc_id}_recomp.dylib"
+
+  # register_game reads these; the pipeline and the subcommands share one path
+  # into make_game_app.py.
+  ARG_TITLE="$name"; ARG_DISC_ID="$disc_id"; ARG_GAME_ROOT="$game_root"
+  ARG_MODULE="$module"; ARG_PLATFORM="$platform"
+
+  local app=""
+  if [ "$MAKE_APP" -eq 1 ]; then
+    step 4 4 "Building $name.app"
+    mkdir -p "$APPS_DIR"
+    app="$(register_game --source-image "$image" --app --out-dir "$APPS_DIR")" \
+      || die "could not build the app bundle"
+    info app "$app"
+    ok "$app"
+  else
+    step 4 4 "Adding $name to the library"
+    register_game --source-image "$image" >/dev/null \
+      || die "could not add the game to the library"
+    ok "in the library - play it from DolBundler"
+  fi
+
+  printf '\n%s%s is ready.%s %s(%s, %s)%s\n' \
+    "$green" "$name" "$off" "$dim" "$disc_id" "$platform" "$off"
+  if [ -n "$app" ] && [ "$AUTO_OPEN" -eq 1 ]; then
+    printf '%sOpening it now. It also lives in %s.%s\n' "$dim" "$APPS_DIR" "$off"
+    open "$app"
+  elif [ -z "$app" ]; then
+    printf '%sPlay it from DolBundler, or add --app to build a .app in %s.%s\n' \
+      "$dim" "$APPS_DIR" "$off"
+  fi
+  emit ok
+}
+
+if [ "${#IMAGES[@]}" -eq 0 ]; then
+  echo "usage: $(basename "$0") [--porcelain] [--app] [--no-open] <disc-image.iso> [...]" >&2
+  exit 2
+fi
+
+for image in "${IMAGES[@]}"; do
+  process_one "$image"
+done

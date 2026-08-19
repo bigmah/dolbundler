@@ -1,0 +1,27 @@
+[package]
+name = "dolbundler-gui"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "The DolBundler window: drop in a GameCube or Wii disc image, get a native macOS app."
+
+[[bin]]
+name = "DolBundler"
+path = "src/main.rs"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["desktop"] }
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-channel = "0.3"
+futures-util = "0.3"
+base64 = "0.22"
+url = "2"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+strip = true
