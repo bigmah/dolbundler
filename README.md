@@ -67,6 +67,14 @@ recomp_gc/
       DolRecomp/                submodule → ExpansionPak/DolRecomp
 ```
 
+One further project is **optional** and not pinned at all:
+[`gc_controller`](https://github.com/bigmah/nso_gc_macos), a driver for the
+Nintendo Switch Online GameCube controller. `build.sh` picks up a checkout
+sitting beside this one, or wherever `GC_CONTROLLER_DIR` points, and DolBundler
+then offers that pad as a controller. Nothing here needs it; without one the
+controller picker just offers SDL gamepads. See
+[`DolBundler/README.md`](DolBundler/README.md#gamecube-controllers).
+
 **DolRecomp is not a direct dependency of this repo.** It is built from
 `ModernGekko/vendor/dolphin/DolRecomp` through that chain. If you need to hack
 on the recompiler, that is the tree to edit — a separate top-level checkout

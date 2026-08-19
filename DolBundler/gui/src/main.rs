@@ -218,6 +218,9 @@ fn app() -> Element {
     // a pad plugged in while the window was already up shows up in the picker.
     let mut pads = use_signal(Vec::<settings::Controller>::new);
     let mut editing = use_signal(|| None::<Editing>);
+    // Disc ID of a game waiting on its controller driver, so Play cannot be
+    // pressed twice into two driver starts.
+    let mut launching = use_signal(|| None::<String>);
 
     // Keep the console pinned to the newest line.
     use_effect(move || {
@@ -242,6 +245,50 @@ fn app() -> Element {
             }
         };
     }
+
+    // Actually starting a game, with whatever settings it resolved to. Split
+    // out of the Play handler because a port driven by a pipe has to wait for
+    // its driver, so the launch can happen a moment later and asynchronously.
+    let mut launch = move |target: Game| {
+        let resolved = store.read().resolve(&target.disc_id);
+        // With a bundle, launch it so the game gets its own Dock icon; without
+        // one, run the same command the bundle would have run.
+        let launched = if target.has_app {
+            std::process::Command::new("open")
+                .arg(&target.app)
+                .spawn()
+                .map(|_| ())
+        } else {
+            let tool = recompgc.peek().clone();
+            let mut args = vec![
+                "play".to_string(),
+                "--disc-id".into(), target.disc_id.clone(),
+                "--game-root".into(), target.game_root.clone(),
+                "--module".into(), target.module.clone(),
+                "--title".into(), target.name.clone(),
+                "--graphics".into(), resolved.graphics.clone(),
+            ];
+            if !resolved.audio.is_empty() {
+                args.push("--audio".into());
+                args.push(resolved.audio.clone());
+            }
+            std::process::Command::new(tool)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .map(|_| ())
+        };
+        match launched {
+            Ok(()) => log.write().push(Line {
+                text: format!("Launched {}.", target.name),
+                kind: "good",
+            }),
+            Err(err) => log.write().push(Line {
+                text: format!("Could not launch {}: {err}", target.name),
+                kind: "bad",
+            }),
+        }
+    };
 
     // Enumerating gamepads spins up SDL in a child process, so it happens off
     // the UI thread the same way the pipeline does.
@@ -442,6 +489,7 @@ fn app() -> Element {
                             game: game.clone(),
                             busy,
                             making_app: making_app.read().as_deref() == Some(game.disc_id.as_str()),
+                            launching: launching.read().as_deref() == Some(game.disc_id.as_str()),
                             customised: !store.read().overrides(&game.disc_id).is_empty(),
                             on_settings: move |target: Game| {
                                 rescan();
@@ -465,44 +513,60 @@ fn app() -> Element {
                                 if let Err(err) = settings::sync_bundle(&target.app, &resolved) {
                                     log.write().push(Line { text: err, kind: "bad" });
                                 }
-                                // With a bundle, launch it so the game gets its
-                                // own Dock icon; without one, run the same
-                                // command the bundle would have run.
-                                let launched = if target.has_app {
-                                    std::process::Command::new("open")
-                                        .arg(&target.app)
-                                        .spawn()
-                                        .map(|_| ())
-                                } else {
-                                    let tool = recompgc.peek().clone();
-                                    let mut args = vec![
-                                        "play".to_string(),
-                                        "--disc-id".into(), target.disc_id.clone(),
-                                        "--game-root".into(), target.game_root.clone(),
-                                        "--module".into(), target.module.clone(),
-                                        "--title".into(), target.name.clone(),
-                                        "--graphics".into(), resolved.graphics.clone(),
-                                    ];
-                                    if !resolved.audio.is_empty() {
-                                        args.push("--audio".into());
-                                        args.push(resolved.audio.clone());
-                                    }
-                                    std::process::Command::new(tool)
-                                        .args(args)
-                                        .stdin(std::process::Stdio::null())
-                                        .spawn()
-                                        .map(|_| ())
-                                };
-                                match launched {
-                                    Ok(()) => log.write().push(Line {
-                                        text: format!("Launched {}.", target.name),
-                                        kind: "good",
-                                    }),
-                                    Err(err) => log.write().push(Line {
-                                        text: format!("Could not launch {}: {err}", target.name),
-                                        kind: "bad",
-                                    }),
+                                // A pipe device is fed by a driver outside the
+                                // runtime, and Dolphin only scans for pipes
+                                // once at startup, so that driver has to be up
+                                // first. recompgc does this for itself too;
+                                // running it here is what puts its output — the
+                                // "plug the controller in" case above all — in
+                                // front of whoever pressed Play.
+                                if let Some(pipe) = resolved.pipe_name() {
+                                    launching.set(Some(target.disc_id.clone()));
+                                    let (tx, mut rx) =
+                                        futures_channel::mpsc::unbounded::<Msg>();
+                                    pipeline::run_args(
+                                        recompgc.peek().clone(),
+                                        vec![
+                                            "driver".into(),
+                                            "--ensure".into(),
+                                            "--pipe".into(), pipe,
+                                        ],
+                                        tx,
+                                    );
+                                    spawn(async move {
+                                        let mut ready = false;
+                                        while let Some(message) = rx.next().await {
+                                            match message {
+                                                Msg::Line(text) if !text.trim().is_empty() => {
+                                                    log.write().push(Line::from_output(text));
+                                                }
+                                                Msg::Failed(reason) => log.write().push(Line {
+                                                    text: reason,
+                                                    kind: "bad",
+                                                }),
+                                                Msg::Finished(success) => {
+                                                    ready = success;
+                                                    break;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        launching.set(None);
+                                        if ready {
+                                            launch(target.clone());
+                                        } else {
+                                            log.write().push(Line {
+                                                text: format!(
+                                                    "{} was not started: its controller is not ready.",
+                                                    target.name,
+                                                ),
+                                                kind: "bad",
+                                            });
+                                        }
+                                    });
+                                    return;
                                 }
+                                launch(target);
                             },
                             on_make_app: move |target: Game| {
                                 if making_app.peek().is_some() {
@@ -757,6 +821,7 @@ fn GameCard(
     game: Game,
     busy: bool,
     making_app: bool,
+    launching: bool,
     customised: bool,
     on_play: EventHandler<Game>,
     on_settings: EventHandler<Game>,
@@ -787,12 +852,12 @@ fn GameCard(
             div { class: "card-actions",
                 button {
                     class: "play",
-                    disabled: !game.ready || busy,
+                    disabled: !game.ready || busy || launching,
                     onclick: {
                         let game = game.clone();
                         move |_| on_play.call(game.clone())
                     },
-                    "Play"
+                    if launching { "Waiting…" } else { "Play" }
                 }
                 button {
                     title: "Resolution, backends, and controllers for this game",

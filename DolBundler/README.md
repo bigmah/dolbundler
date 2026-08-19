@@ -113,13 +113,21 @@ back on the defaults.
 | **Fullscreen**, **Show FPS in the title bar** | on or off |
 | **Ports 1–4** | which gamepad drives each controller port |
 
-Only gamepads SDL recognises are offered; **Rescan** picks up one plugged in
-after the window opened. Choosing one writes a full button profile for it —
-`Config/GCPadNew.ini` for a GameCube game, `Config/WiimoteNew.ini` for a Wii
-one — using ModernGekko's own standard mapping. Leave every port on *None* and
-nothing is bound, which is what you want if you keep a hand-written profile:
-DolBundler only overwrites a profile it wrote itself, marked by a
-`# Written by DolBundler.` first line.
+Two kinds of controller are offered. **Rescan** picks up either after the
+window has opened.
+
+- **SDL gamepads** — anything macOS presents as a gamepad. Choosing one writes
+  ModernGekko's standard mapping for it.
+- **Pipe devices** — a FIFO in `~/.local/share/moderngekko/Pipes` that an
+  outside driver writes controller state into. This is how a controller SDL
+  cannot drive gets in; see [GameCube controllers](#gamecube-controllers).
+
+Either way, choosing one writes a full button profile — `Config/GCPadNew.ini`
+for a GameCube game, `Config/WiimoteNew.ini` for a Wii one, and the mapping
+inside is picked per port, since a pipe device's inputs are named nothing like
+a gamepad's. Leave every port on *None* and nothing is bound, which is what you
+want if you keep a hand-written profile: DolBundler only overwrites a profile
+it wrote itself, marked by a `# Written by DolBundler.` first line.
 
 Settings live in `settings.json` beside `library.json`. Nothing is stored in
 the runtime's own configuration, because it has no per-game layer: the
@@ -132,6 +140,44 @@ last game DolBundler started. Its graphics and audio backends are its own —
 they are baked into `Contents/Resources/game.conf` and kept in step whenever
 that game's settings change — but its resolution, fullscreen, and controllers
 are not. Start it from the library and it always gets its own.
+
+### GameCube controllers
+
+The Nintendo Switch Online GameCube controller does not work over SDL. macOS
+enumerates it, Dolphin lists it as an `SDL/…` device, and nothing streams —
+the pad needs a proprietary handshake before it sends anything, and the
+bundled SDL does not perform it. That is a worse failure than not appearing at
+all, because it reads as a binding problem.
+
+[`gc_controller`](https://github.com/bigmah/nso_gc_macos) is a separate
+project that does the handshake and feeds Dolphin's Pipe input backend instead.
+DolBundler drives it for you when it can find one:
+
+- `build.sh` looks for a checkout beside this repo (`../gc_controller`), or
+  wherever `GC_CONTROLLER_DIR` points, builds it, and records the path in
+  `toolchain.conf`. None found is a note, not an error — nothing here needs it.
+- With one, the controller picker offers **GameCube controller
+  (gc_controller)** on every port.
+- Pressing **Play** on a game whose port is set to it starts the driver first,
+  pointed at ModernGekko's own `Pipes` directory, and waits for the controller
+  to answer. Dolphin only scans for pipes once at startup, so this ordering is
+  not optional — it is why DolBundler starts the driver rather than leaving it
+  to you.
+- Plug the pad in over USB, or hold sync to reach it over Bluetooth. If neither
+  answers within fifteen seconds the launch is called off and the driver's own
+  last words go to the console, which is usually the whole explanation.
+
+The driver keeps running between games, and reconnects on its own if you pull
+the cable. DolBundler only ever stops one it started itself — a driver you
+launched from `start.sh` or the menu bar app is left alone, though note that
+only one process can own the controller, so a driver of yours pointed at
+Dolphin's own `Pipes` directory will block DolBundler from starting its own.
+`recompgc driver --stop` ends the one DolBundler started.
+
+Buttons, both sticks and both analog triggers map one to one onto a GameCube
+pad, which is the whole point. On a Wii game the same controller drives a Wii
+Remote as best a GameCube pad can — the C stick stands in for the pointer and
+the triggers for shakes, with no Home button and no real motion.
 
 ### Without the window
 
@@ -159,6 +205,15 @@ controller port has to be set to:
 
 ```sh
 $R/recompgc list-controllers
+```
+
+And a fourth manages the GameCube controller driver — `--ensure` is what `play`
+runs for itself when a port is set to a pipe:
+
+```sh
+$R/recompgc driver            # is one running, and where is its pipe
+$R/recompgc driver --ensure   # start it if it is not, and wait for the pad
+$R/recompgc driver --stop     # stop the one DolBundler started
 ```
 
 Add `--porcelain` for the machine-readable event stream the window consumes;
@@ -201,6 +256,12 @@ the protocol is documented at the top of the script.
     a controller profile needs is SDL's own name for the pad, so guessing it
     from outside is not an option; the runner already links SDL, and this is
     the same enumeration the ModernGekko launcher does for its own picker.
+- **The GameCube controller driver is optional and external.** It lives in its
+  own checkout, is built by `build.sh` only if one is found, and nothing else
+  here depends on it. Without one the controller picker simply offers SDL
+  gamepads. Its own limitations — Bluetooth runs at 33 Hz against USB's 250 Hz,
+  and the pad will not remember this Mac over Bluetooth — are documented in
+  that project.
 - **Neither app is signed or notarized.** They are built locally and run
   locally. Gatekeeper may want a right-click → Open the first time.
 - **Not every game will work.** DolRecomp covers 236 opcodes and does not
@@ -222,6 +283,8 @@ the protocol is documented at the top of the script.
 ~/.local/share/moderngekko/config.ini               written per launch
 ~/.local/share/moderngekko/Config/GCPadNew.ini      controller profile, GameCube
 ~/.local/share/moderngekko/Config/WiimoteNew.ini    controller profile, Wii
+~/.local/share/moderngekko/Pipes/<name>             FIFO a pipe controller feeds
+~/.local/share/moderngekko/Logs/gc_controller.log   the driver's own output
 ~/.cache/moderngekko/modules/<DISC_ID>/             recompiled modules
 ```
 

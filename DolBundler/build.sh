@@ -91,6 +91,27 @@ for tool in ModernGekko moderngekko-run moderngekko-port dolrecomp; do
   [ -x "$MG_BUILD/$tool" ] || { echo "expected $MG_BUILD/$tool to exist" >&2; exit 1; }
 done
 
+# gc_controller is an optional, separate project: a driver for the Nintendo
+# Switch Online GameCube controller, which SDL enumerates but cannot drive. It
+# feeds Dolphin's Pipe input backend instead. Nothing here depends on it, so a
+# missing or unbuildable checkout is a note rather than a failure.
+step "Looking for the GameCube controller driver"
+GC_CONTROLLER=""
+for candidate in "${GC_CONTROLLER_DIR:-}" "$(dirname "$ROOT")/gc_controller"; do
+  [ -n "$candidate" ] || continue
+  if grep -q '^name = "gc_controller"' "$candidate/Cargo.toml" 2>/dev/null; then
+    GC_CONTROLLER="$(cd "$candidate" && pwd)"
+    break
+  fi
+done
+if [ -z "$GC_CONTROLLER" ]; then
+  echo "    none found; set GC_CONTROLLER_DIR=<path> and re-run to use one"
+elif cargo build --release --manifest-path "$GC_CONTROLLER/Cargo.toml" 2>&1 | tail -3; then
+  echo "    $GC_CONTROLLER"
+else
+  echo "    $GC_CONTROLLER did not build; the pipe controller option will not work" >&2
+fi
+
 step "Building the DolBundler window"
 cargo build --release --manifest-path "$HERE/gui/Cargo.toml"
 GUI_BIN="$HERE/gui/target/release/DolBundler"
@@ -114,6 +135,7 @@ MG_SRC=$(printf '%q' "$MG_SRC")
 MG_BUILD=$(printf '%q' "$MG_BUILD")
 APPS_DIR=$(printf '%q' "$INSTALL_DIR")
 GRAPHICS_BACKEND=Metal
+GC_CONTROLLER=$(printf '%q' "$GC_CONTROLLER")
 CONF
 
 # Written whole rather than patched: PlistBuddy has no upsert and the key set

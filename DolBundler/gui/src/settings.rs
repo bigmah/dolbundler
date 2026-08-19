@@ -178,6 +178,18 @@ pub struct Resolved {
     pub controllers: [String; 4],
 }
 
+impl Resolved {
+    /// The pipe a port is driven from, if any — the name after `Pipe/<index>/`,
+    /// which is the FIFO's filename and what the driver has to be told to
+    /// create. Only the first is returned: one driver, one controller.
+    pub fn pipe_name(&self) -> Option<String> {
+        self.controllers
+            .iter()
+            .find_map(|device| device.rsplit_once('/').filter(|_| device.starts_with("Pipe/")))
+            .map(|(_, name)| name.to_string())
+    }
+}
+
 pub fn store_path() -> PathBuf {
     library::support_dir().join("settings.json")
 }
@@ -433,7 +445,16 @@ fn render_profile(controllers: &[String; 4], wii: bool) -> String {
             continue;
         }
         let _ = writeln!(out, "Device = {device}");
-        out.push_str(if wii { WIIMOTE_MAPPING } else { GCPAD_MAPPING });
+        // A pipe device's inputs are named nothing like a gamepad's, so the
+        // mapping is chosen by what the port is driven from, not just by the
+        // game's platform.
+        let pipe = device.starts_with("Pipe/");
+        out.push_str(match (pipe, wii) {
+            (false, false) => GCPAD_MAPPING,
+            (false, true) => WIIMOTE_MAPPING,
+            (true, false) => PIPE_GCPAD_MAPPING,
+            (true, true) => PIPE_WIIMOTE_MAPPING,
+        });
     }
     if wii {
         out.push_str("[BalanceBoard]\n");
@@ -467,6 +488,63 @@ D-Pad/Down = `Pad S`
 D-Pad/Left = `Pad W`
 D-Pad/Right = `Pad E`
 Rumble/Motor = `Motor L` | `Motor R`
+";
+
+/// Dolphin's pipe device exposes `Button <TOKEN>` for each of the twelve tokens
+/// its protocol accepts and a split `Axis <NAME> +`/`-` pair per stick axis and
+/// trigger. The tokens are a GameCube pad's, so this is a straight one-to-one
+/// map — the only one in this file that loses nothing in translation.
+const PIPE_GCPAD_MAPPING: &str = "\
+Buttons/A = `Button A`
+Buttons/B = `Button B`
+Buttons/X = `Button X`
+Buttons/Y = `Button Y`
+Buttons/Z = `Button Z`
+Buttons/Start = `Button START`
+Main Stick/Up = `Axis MAIN Y +`
+Main Stick/Down = `Axis MAIN Y -`
+Main Stick/Left = `Axis MAIN X -`
+Main Stick/Right = `Axis MAIN X +`
+Main Stick/Calibration = 100.00
+C-Stick/Up = `Axis C Y +`
+C-Stick/Down = `Axis C Y -`
+C-Stick/Left = `Axis C X -`
+C-Stick/Right = `Axis C X +`
+C-Stick/Calibration = 100.00
+Triggers/L = `Button L`
+Triggers/R = `Button R`
+Triggers/L-Analog = `Axis L +`
+Triggers/R-Analog = `Axis R +`
+D-Pad/Up = `Button D_UP`
+D-Pad/Down = `Button D_DOWN`
+D-Pad/Left = `Button D_LEFT`
+D-Pad/Right = `Button D_RIGHT`
+";
+
+/// A GameCube pad driving a Wii Remote, which is a genuine translation rather
+/// than a relabelling: the pipe protocol has no pointer, no motion, and no Home,
+/// so the C stick stands in for IR and the triggers for shakes. Playable, not
+/// faithful — a Wii game that wants real pointing wants a real Wii Remote.
+const PIPE_WIIMOTE_MAPPING: &str = "\
+Buttons/A = `Button A`
+Buttons/B = `Button B`
+Buttons/1 = `Button X`
+Buttons/2 = `Button Y`
+Buttons/- = `Button Z`
+Buttons/+ = `Button START`
+D-Pad/Up = `Button D_UP` | `Axis MAIN Y +`
+D-Pad/Down = `Button D_DOWN` | `Axis MAIN Y -`
+D-Pad/Left = `Button D_LEFT` | `Axis MAIN X -`
+D-Pad/Right = `Button D_RIGHT` | `Axis MAIN X +`
+IR/Up = `Axis C Y +`
+IR/Down = `Axis C Y -`
+IR/Left = `Axis C X -`
+IR/Right = `Axis C X +`
+Shake/X = `Axis L +`
+Shake/Y = `Axis R +`
+Shake/Z = `Axis L +`
+Extension = None
+Options/Sideways Wiimote = True
 ";
 
 const WIIMOTE_MAPPING: &str = "\
@@ -622,6 +700,30 @@ mod tests {
 
         std::env::remove_var("XDG_DATA_HOME");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pipe_port_gets_pipe_input_names() {
+        let mut piped = resolved();
+        piped.controllers[0] = "Pipe/0/gcc1".into();
+        piped.controllers[1] = "SDL/0/Some Pad".into();
+        let text = render_profile(&piped.controllers, false);
+        assert!(text.contains("[GCPad1]\nDevice = Pipe/0/gcc1\n"));
+        // The pipe protocol's own token names, not a gamepad's.
+        assert!(text.contains("Buttons/Start = `Button START`\n"));
+        assert!(text.contains("Main Stick/Up = `Axis MAIN Y +`\n"));
+        assert!(text.contains("Triggers/L-Analog = `Axis L +`\n"));
+        // Port 2 is an SDL pad and keeps the gamepad mapping in the same file.
+        assert!(text.contains("[GCPad2]\nDevice = SDL/0/Some Pad\n"));
+        assert!(text.contains("Main Stick/Up = `Left Y+`\n"));
+    }
+
+    #[test]
+    fn the_pipe_name_is_the_fifos_filename() {
+        assert_eq!(resolved().pipe_name(), None);
+        let mut piped = resolved();
+        piped.controllers[1] = "Pipe/0/gcc1".into();
+        assert_eq!(piped.pipe_name().as_deref(), Some("gcc1"));
     }
 
     #[test]

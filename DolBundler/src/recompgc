@@ -12,6 +12,7 @@
 #        recompgc make-app --disc-id <id> --game-root <dir> --module <lib> --title <s>
 #                          [--platform <s>] [--graphics <backend>] [--audio <backend>]
 #        recompgc list-controllers
+#        recompgc driver [--ensure|--stop|--status] [--pipe <name>]
 #
 # By default a disc is extracted, recompiled, and added to the library; it is
 # played from DolBundler's list. --app additionally builds a .app in
@@ -24,9 +25,16 @@
 # controller ports - lives in the ModernGekko config.ini the window writes
 # before it starts a game.
 #
-# `list-controllers` prints the gamepads the runtime can see, one per line, as
-# "SDL/<index>/<name><TAB><label>". The first field is what a controller port
-# has to be set to.
+# `list-controllers` prints the controllers the runtime can see, one per line,
+# as "<device><TAB><label>". The first field is what a controller port has to be
+# set to. Two kinds show up: SDL gamepads, and Dolphin "Pipe" devices - a FIFO
+# in <user-dir>/Pipes that an external driver writes controller state into.
+#
+# `driver` manages one such driver, gc_controller, which is what makes a Nintendo
+# Switch Online GameCube controller usable: the pad needs a proprietary
+# handshake before it streams anything, so SDL enumerates it and then sees
+# nothing. Its checkout is found by build.sh and recorded as GC_CONTROLLER in
+# toolchain.conf; with none, everything here degrades to "no pipe devices".
 #
 # --porcelain adds machine-readable event lines for the GUI and drops the
 # colour codes. Everything else on stdout is log text. The events are:
@@ -43,7 +51,7 @@ CONF="$SELF_DIR/toolchain.conf"
 
 MODE=pipeline
 case "${1-}" in
-  play|make-app|list-controllers) MODE="$1"; shift ;;
+  play|make-app|list-controllers|driver) MODE="$1"; shift ;;
 esac
 
 PORCELAIN=0
@@ -53,6 +61,7 @@ IMAGES=()
 # Subcommand fields, unused by the pipeline.
 ARG_DISC_ID=''; ARG_GAME_ROOT=''; ARG_MODULE=''; ARG_TITLE=''; ARG_PLATFORM=''
 ARG_GRAPHICS=''; ARG_AUDIO=''
+DRIVER_ACTION=status; ARG_PIPE=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --porcelain) PORCELAIN=1; AUTO_OPEN=0 ;;
@@ -66,6 +75,10 @@ while [ "$#" -gt 0 ]; do
     --platform)  ARG_PLATFORM="${2-}"; shift ;;
     --graphics)  ARG_GRAPHICS="${2-}"; shift ;;
     --audio)     ARG_AUDIO="${2-}"; shift ;;
+    --pipe)      ARG_PIPE="${2-}"; shift ;;
+    --ensure)    DRIVER_ACTION=ensure ;;
+    --stop)      DRIVER_ACTION=stop ;;
+    --status)    DRIVER_ACTION=status ;;
     -*)          echo "unknown option: $1" >&2; exit 2 ;;
     *)           IMAGES+=("$1") ;;
   esac
@@ -108,11 +121,140 @@ for tool in ModernGekko moderngekko-port moderngekko-run dolrecomp; do
   [ -x "$MG_BUILD/$tool" ] || die "$MG_BUILD/$tool is missing; re-run DolBundler/build.sh"
 done
 
+# --- Dolphin pipe devices ----------------------------------------------------
+# Dolphin scans <user-dir>/Pipes once at startup and offers every FIFO there as
+# an input device called Pipe/0/<filename>, fed by whatever writes to it. That
+# is how a controller SDL cannot drive - the NSO GameCube pad - reaches a game.
+
+: "${GC_CONTROLLER:=}"
+PIPE_DIR="$USER_DIR/Pipes"
+DRIVER_BIN="${GC_CONTROLLER:+$GC_CONTROLLER/target/release/gc_controller}"
+DRIVER_PID_FILE="$USER_DIR/gc_controller.pid"
+DRIVER_LOG="$USER_DIR/Logs/gc_controller.log"
+DEFAULT_PIPE=gcc1
+
+# The instance we started, if it is still alive. Deliberately narrow: a driver
+# the user started themselves is never something this script stops.
+driver_pid() {
+  local pid comm
+  pid="$(cat "$DRIVER_PID_FILE" 2>/dev/null)" || return 1
+  [ -n "$pid" ] || return 1
+  # Guard against the PID having been recycled by something else entirely.
+  comm="$(ps -o comm= -p "$pid" 2>/dev/null)" || return 1
+  [ -n "$comm" ] && [ "$(basename "$comm")" = gc_controller ] || return 1
+  printf '%s' "$pid"
+}
+
+driver_start() {
+  local name="$1"
+  [ -n "$DRIVER_BIN" ] || die "no gc_controller checkout was found when DolBundler was built; re-run build.sh with GC_CONTROLLER_DIR=<path>"
+  [ -x "$DRIVER_BIN" ] || die "$DRIVER_BIN is missing; build it with: cargo build --release --manifest-path $GC_CONTROLLER/Cargo.toml"
+  mkdir -p "$PIPE_DIR" "$USER_DIR/Logs"
+
+  # Someone else's instance owns the controller, and only one process can. If
+  # its pipe landed here anyway there is nothing to do; if not, say so rather
+  # than starting a second one that cannot claim the device.
+  if pgrep -x gc_controller >/dev/null 2>&1; then
+    [ -p "$PIPE_DIR/$name" ] && { note "using the gc_controller already running"; return 0; }
+    die "gc_controller is already running, but its pipe is not in $PIPE_DIR. Stop it ($GC_CONTROLLER/stop.sh) and let DolBundler start it, or run it with --pipe-dir $PIPE_DIR"
+  fi
+
+  note "starting gc_controller"
+  # --reconnect so pulling the cable moves to Bluetooth instead of ending the
+  # session. nohup because recompgc exits well before the game does.
+  nohup "$DRIVER_BIN" --pipe-dir "$PIPE_DIR" --pipe-name "$name" --reconnect \
+    >>"$DRIVER_LOG" 2>&1 &
+  echo $! > "$DRIVER_PID_FILE"
+
+  # The FIFO is only created once the controller answers, so waiting for it is
+  # waiting for the controller. 15s covers a Bluetooth scan.
+  local waited=0
+  while [ "$waited" -lt 150 ]; do
+    [ -p "$PIPE_DIR/$name" ] && { ok "pipe ready: $PIPE_DIR/$name"; return 0; }
+    driver_pid >/dev/null || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  driver_stop >/dev/null 2>&1
+  printf '%s' "$dim"; tail -4 "$DRIVER_LOG" 2>/dev/null | sed 's/^/    /'; printf '%s' "$off"
+  die "no GameCube controller answered. Plug it in over USB, or hold sync to pair over Bluetooth, then try again"
+}
+
+driver_stop() {
+  local pid
+  # A pid file left behind by a driver that exited on its own is stale, not a
+  # process to signal, so clear it either way.
+  pid="$(driver_pid)" || {
+    rm -f "$DRIVER_PID_FILE"
+    note "no gc_controller of ours is running"
+    return 0
+  }
+  kill -INT "$pid" 2>/dev/null || true
+  local waited=0
+  while [ "$waited" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null
+  rm -f "$DRIVER_PID_FILE"
+  ok "gc_controller stopped"
+}
+
+# Makes sure something is feeding the pipe a port has been set to.
+driver_ensure() {
+  local name="$1"
+  driver_pid >/dev/null && { note "gc_controller is already running"; return 0; }
+  driver_start "$name"
+}
+
+# Every distinct pipe device the written config.ini assigns to a port. This is
+# what makes `play` self-contained: the window has already recorded the choice,
+# so nothing extra has to be passed down here.
+configured_pipes() {
+  sed -n 's|^controller[1-4]=Pipe/0/||p' "$USER_DIR/config.ini" 2>/dev/null | sort -u
+}
+
 if [ "$MODE" = list-controllers ]; then
-  # Straight passthrough. A build predating the --list-controllers patch prints
-  # its usage to stderr and exits 2; an empty list and a failure are the same
-  # thing to the caller, which is "no controller picker".
-  exec "$MG_BUILD/moderngekko-run" --list-controllers
+  # SDL first. A build predating the --list-controllers patch prints its usage
+  # to stderr and exits 2; an empty list and a failure are the same thing to the
+  # caller, which is "no gamepads to offer".
+  "$MG_BUILD/moderngekko-run" --list-controllers 2>/dev/null || true
+
+  # Then the pipes, which Dolphin names after the file.
+  for fifo in "$PIPE_DIR"/*; do
+    [ -p "$fifo" ] || continue
+    name="$(basename "$fifo")"
+    printf 'Pipe/0/%s\t%s (pipe)\n' "$name" "$name"
+  done
+
+  # A driver that is installed but has never run has no FIFO yet, so offer it
+  # anyway: choosing it is what tells `play` to start the driver.
+  if [ -n "$DRIVER_BIN" ] && [ ! -p "$PIPE_DIR/$DEFAULT_PIPE" ]; then
+    printf 'Pipe/0/%s\tGameCube controller (gc_controller)\n' "$DEFAULT_PIPE"
+  fi
+  exit 0
+fi
+
+if [ "$MODE" = driver ]; then
+  pipe="${ARG_PIPE:-$DEFAULT_PIPE}"
+  case "$DRIVER_ACTION" in
+    ensure) driver_ensure "$pipe" ;;
+    stop)   driver_stop ;;
+    status)
+      running="$(driver_pid)" || running=''
+      if [ -n "$running" ]; then
+        ok "gc_controller is running (pid $running), pipe $PIPE_DIR/$pipe"
+      elif [ -z "$DRIVER_BIN" ]; then
+        note "no gc_controller checkout is configured"
+        exit 1
+      else
+        note "gc_controller is not running"
+        exit 1
+      fi
+      ;;
+  esac
+  exit 0
 fi
 
 # --- subcommands -------------------------------------------------------------
@@ -140,6 +282,12 @@ register_game() {
 if [ "$MODE" = play ]; then
   require_fields play
   mkdir -p "$USER_DIR/Logs"
+  # Dolphin only scans Pipes at startup, so any pipe a port was set to has to
+  # exist before the runtime does. The window runs this step first so its output
+  # is visible; doing it here too is what makes the bare command line work.
+  while read -r pipe; do
+    [ -n "$pipe" ] && driver_ensure "$pipe"
+  done <<<"$(configured_pipes)"
   # Mirrors the generated .app's launcher. The bundle keeps its own copy on
   # purpose: it has to run with DolBundler uninstalled.
   audio_args=()
