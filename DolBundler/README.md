@@ -85,16 +85,53 @@ own `opening.bnr`. Per game:
 | Button | What it does |
 |---|---|
 | **Play** | runs the game |
+| **Settings** | resolution, backends, and controllers for this game alone |
 | **Create App** | builds `~/Applications/<Game>.app`; disappears once one exists |
 | **Log** | loads that game's last 200 runtime log lines into the console |
 | **Reveal** | shows the app in Finder, or the extracted disc if there is none |
-| **Remove** | drops the library entry; nothing on disk is deleted |
+| **Remove** | drops the library entry and its settings; nothing on disk is deleted |
 
 The generated apps are ordinary macOS apps. They hold no game data — each one
 points at the extracted disc, the cached module, and this ModernGekko build —
 so you can launch them straight from Launchpad or the Dock without DolBundler
 running. That independence is the reason to make one; if you are happy
 launching from the library, you never need to.
+
+### Settings
+
+**Settings** in the top right holds the defaults every game starts from.
+**Settings** on a card overrides any of them for that game alone; each control
+there reads `Default (…)` until you change it, and the card is tagged *custom
+settings* once something differs. **Use defaults for everything** puts a game
+back on the defaults.
+
+| Setting | |
+|---|---|
+| **Internal resolution** | what the game renders at, not the window size — `640x528` (native) through `7680x4320` |
+| **Graphics backend** | Metal, Vulkan through MoltenVK, or OpenGL |
+| **Audio backend** | Automatic, Cubeb, or muted |
+| **Fullscreen**, **Show FPS in the title bar** | on or off |
+| **Ports 1–4** | which gamepad drives each controller port |
+
+Only gamepads SDL recognises are offered; **Rescan** picks up one plugged in
+after the window opened. Choosing one writes a full button profile for it —
+`Config/GCPadNew.ini` for a GameCube game, `Config/WiimoteNew.ini` for a Wii
+one — using ModernGekko's own standard mapping. Leave every port on *None* and
+nothing is bound, which is what you want if you keep a hand-written profile:
+DolBundler only overwrites a profile it wrote itself, marked by a
+`# Written by DolBundler.` first line.
+
+Settings live in `settings.json` beside `library.json`. Nothing is stored in
+the runtime's own configuration, because it has no per-game layer: the
+resolved settings are written into `config.ini` and the controller profile in
+the moment before a game starts, and rewritten for the next game.
+
+That last part is the one limitation worth knowing. A generated `.app`
+launched from Finder or the Dock reads whatever those two files hold from the
+last game DolBundler started. Its graphics and audio backends are its own —
+they are baked into `Contents/Resources/game.conf` and kept in step whenever
+that game's settings change — but its resolution, fullscreen, and controllers
+are not. Start it from the library and it always gets its own.
 
 ### Without the window
 
@@ -114,6 +151,16 @@ $R/recompgc play     --disc-id GGVE78 --game-root <dir> --module <lib> --title <
 $R/recompgc make-app --disc-id GGVE78 --game-root <dir> --module <lib> --title <name>
 ```
 
+Both take `--graphics <backend>` and `--audio <backend>`, which is how the
+window hands a game its own; without them the build-wide default from
+`toolchain.conf` applies. A third subcommand lists the gamepads the runtime can
+see, one `SDL/<index>/<name><TAB><label>` per line — that first field is what a
+controller port has to be set to:
+
+```sh
+$R/recompgc list-controllers
+```
+
 Add `--porcelain` for the machine-readable event stream the window consumes;
 the protocol is documented at the top of the script.
 
@@ -124,11 +171,13 @@ the protocol is documented at the top of the script.
   per-game Dolphin settings from there. Generated apps also reference
   `ModernGekko/build` by absolute path. If you move or delete either, re-run
   `build.sh` and re-add your discs.
-- **Metal, not Vulkan.** ModernGekko's frontend only offers Vulkan and OpenGL,
-  neither of which exists on macOS, so the pipeline passes `--graphics Metal`
-  explicitly. Change `GRAPHICS_BACKEND` in
-  `DolBundler.app/Contents/Resources/toolchain.conf` if you want something else.
-- **Two upstream patches**, in `patches/`, applied by `build.sh` (idempotently
+- **Metal, not Vulkan.** ModernGekko's `config.ini` only accepts Vulkan and
+  OpenGL, neither of which exists on macOS, so the backend travels on the
+  command line as `--graphics Metal` instead and that key is left at a value
+  the config parser will accept. Pick a different one per game in Settings, or
+  change `GRAPHICS_BACKEND` in
+  `DolBundler.app/Contents/Resources/toolchain.conf` for the build-wide default.
+- **Three upstream patches**, in `patches/`, applied by `build.sh` (idempotently
   — a patch that reverse-applies cleanly is treated as already in the tree):
   - `0001-accept-unpinned-discs` — an unbranded ModernGekko build pins no disc
     ID and ships no disc preparer, so `PrepareDisc()` falls into a branch that
@@ -147,6 +196,11 @@ the protocol is documented at the top of the script.
 
   Run `./src/check_game_patches.py` after bumping the vendored Dolphin tree to
   see whether any newly shipped INI uses a form the patcher still rejects.
+  - `0003-list-controllers` — adds `moderngekko-run --list-controllers`, which
+    prints the SDL gamepads Dolphin's input backend will see. The device string
+    a controller profile needs is SDL's own name for the pad, so guessing it
+    from outside is not an option; the runner already links SDL, and this is
+    the same enumeration the ModernGekko launcher does for its own picker.
 - **Neither app is signed or notarized.** They are built locally and run
   locally. Gatekeeper may want a right-click → Open the first time.
 - **Not every game will work.** DolRecomp covers 236 opcodes and does not
@@ -161,9 +215,13 @@ the protocol is documented at the top of the script.
 ~/Applications/<Game>.app                           one per recompiled game
 ~/Library/Application Support/DolBundler/
     library.json                                    the library index
+    settings.json                                   defaults and per-game overrides
     covers/<DISC_ID>.png                            banner art for the list
 ~/.local/share/moderngekko/games/<DISC_ID>/         extracted disc
 ~/.local/share/moderngekko/Logs/<DISC_ID>.log       runtime log
+~/.local/share/moderngekko/config.ini               written per launch
+~/.local/share/moderngekko/Config/GCPadNew.ini      controller profile, GameCube
+~/.local/share/moderngekko/Config/WiimoteNew.ini    controller profile, Wii
 ~/.cache/moderngekko/modules/<DISC_ID>/             recompiled modules
 ```
 
@@ -176,6 +234,8 @@ DolBundler/
     src/main.rs            UI, job state, drop and open handling
     src/pipeline.rs        runs recompgc, parses its porcelain output
     src/library.rs         library.json, cover art, log tailing
+    src/settings.rs        settings.json, and the config.ini and pad profile
+                           it renders into before each launch
     assets/style.css
   patches/                 the ModernGekko fixes build.sh applies
   src/

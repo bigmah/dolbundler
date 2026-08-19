@@ -8,13 +8,25 @@
 #
 # Usage: recompgc [--porcelain] [--app] [--no-open] <disc-image> [more images...]
 #        recompgc play     --disc-id <id> --game-root <dir> --module <lib> --title <s>
+#                          [--graphics <backend>] [--audio <backend>]
 #        recompgc make-app --disc-id <id> --game-root <dir> --module <lib> --title <s>
-#                          [--platform <s>]
+#                          [--platform <s>] [--graphics <backend>] [--audio <backend>]
+#        recompgc list-controllers
 #
 # By default a disc is extracted, recompiled, and added to the library; it is
 # played from DolBundler's list. --app additionally builds a .app in
 # ~/Applications. `play` and `make-app` are what the window calls for an
 # already-recompiled game.
+#
+# --graphics and --audio override the defaults from toolchain.conf for one
+# launch; the window passes whatever the game's settings resolved to. Everything
+# else the runtime is configured with - internal resolution, fullscreen, the
+# controller ports - lives in the ModernGekko config.ini the window writes
+# before it starts a game.
+#
+# `list-controllers` prints the gamepads the runtime can see, one per line, as
+# "SDL/<index>/<name><TAB><label>". The first field is what a controller port
+# has to be set to.
 #
 # --porcelain adds machine-readable event lines for the GUI and drops the
 # colour codes. Everything else on stdout is log text. The events are:
@@ -31,7 +43,7 @@ CONF="$SELF_DIR/toolchain.conf"
 
 MODE=pipeline
 case "${1-}" in
-  play|make-app) MODE="$1"; shift ;;
+  play|make-app|list-controllers) MODE="$1"; shift ;;
 esac
 
 PORCELAIN=0
@@ -40,6 +52,7 @@ MAKE_APP=0
 IMAGES=()
 # Subcommand fields, unused by the pipeline.
 ARG_DISC_ID=''; ARG_GAME_ROOT=''; ARG_MODULE=''; ARG_TITLE=''; ARG_PLATFORM=''
+ARG_GRAPHICS=''; ARG_AUDIO=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --porcelain) PORCELAIN=1; AUTO_OPEN=0 ;;
@@ -51,6 +64,8 @@ while [ "$#" -gt 0 ]; do
     --module)    ARG_MODULE="${2-}"; shift ;;
     --title)     ARG_TITLE="${2-}"; shift ;;
     --platform)  ARG_PLATFORM="${2-}"; shift ;;
+    --graphics)  ARG_GRAPHICS="${2-}"; shift ;;
+    --audio)     ARG_AUDIO="${2-}"; shift ;;
     -*)          echo "unknown option: $1" >&2; exit 2 ;;
     *)           IMAGES+=("$1") ;;
   esac
@@ -81,6 +96,9 @@ source "$CONF"
 : "${MG_BUILD:?toolchain.conf did not set MG_BUILD}"
 : "${APPS_DIR:=$HOME/Applications}"
 : "${GRAPHICS_BACKEND:=Metal}"
+# A per-game choice from the window wins over the build-wide default.
+[ -n "$ARG_GRAPHICS" ] && GRAPHICS_BACKEND="$ARG_GRAPHICS"
+AUDIO_BACKEND="$ARG_AUDIO"
 USER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/moderngekko"
 SUPPORT_DIR="$HOME/Library/Application Support/DolBundler"
 LIBRARY="$SUPPORT_DIR/library.json"
@@ -89,6 +107,14 @@ COVERS="$SUPPORT_DIR/covers"
 for tool in ModernGekko moderngekko-port moderngekko-run dolrecomp; do
   [ -x "$MG_BUILD/$tool" ] || die "$MG_BUILD/$tool is missing; re-run DolBundler/build.sh"
 done
+
+if [ "$MODE" = list-controllers ]; then
+  # Straight passthrough. A build predating the --list-controllers patch prints
+  # its usage to stderr and exits 2; an empty list and a failure are the same
+  # thing to the caller, which is "no controller picker".
+  exec "$MG_BUILD/moderngekko-run" --list-controllers
+fi
+
 # --- subcommands -------------------------------------------------------------
 # Both act on a game that is already recompiled, so they need neither the disc
 # image nor a compiler.
@@ -106,7 +132,8 @@ register_game() {
   /usr/bin/python3 "$SELF_DIR/make_game_app.py" \
     --name "$ARG_TITLE" --disc-id "$ARG_DISC_ID" --game-root "$ARG_GAME_ROOT" \
     --module "$ARG_MODULE" --runtime "$MG_BUILD" --user-dir "$USER_DIR" \
-    --graphics "$GRAPHICS_BACKEND" --platform "$ARG_PLATFORM" \
+    --graphics "$GRAPHICS_BACKEND" --audio "$AUDIO_BACKEND" \
+    --platform "$ARG_PLATFORM" \
     --library "$LIBRARY" --covers "$COVERS" "$@"
 }
 
@@ -115,12 +142,15 @@ if [ "$MODE" = play ]; then
   mkdir -p "$USER_DIR/Logs"
   # Mirrors the generated .app's launcher. The bundle keeps its own copy on
   # purpose: it has to run with DolBundler uninstalled.
+  audio_args=()
+  [ -n "$AUDIO_BACKEND" ] && audio_args=(--audio "$AUDIO_BACKEND")
   exec "$MG_BUILD/moderngekko-run" \
     --game "$ARG_GAME_ROOT" \
     --module "$ARG_MODULE" \
     --user-dir "$USER_DIR" \
     --title "$ARG_TITLE" \
     --graphics "$GRAPHICS_BACKEND" \
+    "${audio_args[@]}" \
     >>"$USER_DIR/Logs/$ARG_DISC_ID.log" 2>&1
 fi
 

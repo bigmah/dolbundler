@@ -10,6 +10,7 @@
 
 mod library;
 mod pipeline;
+mod settings;
 
 use dioxus::desktop::tao::event::Event;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
@@ -106,6 +107,76 @@ struct Job {
     error: Option<String>,
 }
 
+/// What the settings panel is open on. The panel is modal, so at most one.
+#[derive(Clone, PartialEq)]
+enum Editing {
+    Global,
+    Game(Game),
+}
+
+/// The settings form. Every field is a string so one panel can serve both the
+/// global defaults and a single game's overrides; in the latter, `INHERIT`
+/// stands for "whatever the defaults say".
+#[derive(Clone, PartialEq)]
+struct Draft {
+    resolution: String,
+    fullscreen: String,
+    show_fps: String,
+    graphics: String,
+    audio: String,
+    controllers: [String; 4],
+}
+
+impl Draft {
+    fn from_defaults(defaults: &settings::Defaults) -> Self {
+        Self {
+            resolution: defaults.resolution.clone(),
+            fullscreen: defaults.fullscreen.to_string(),
+            show_fps: defaults.show_fps.to_string(),
+            graphics: defaults.graphics.clone(),
+            audio: defaults.audio.clone(),
+            controllers: defaults.controllers.clone(),
+        }
+    }
+
+    fn from_overrides(game: &settings::Overrides) -> Self {
+        let inherit = || settings::INHERIT.to_string();
+        Self {
+            resolution: game.resolution.clone().unwrap_or_else(inherit),
+            fullscreen: game.fullscreen.map(|on| on.to_string()).unwrap_or_else(inherit),
+            show_fps: game.show_fps.map(|on| on.to_string()).unwrap_or_else(inherit),
+            graphics: game.graphics.clone().unwrap_or_else(inherit),
+            audio: game.audio.clone().unwrap_or_else(inherit),
+            controllers: std::array::from_fn(|port| {
+                game.controllers[port].clone().unwrap_or_else(inherit)
+            }),
+        }
+    }
+
+    fn into_defaults(self) -> settings::Defaults {
+        settings::Defaults {
+            resolution: self.resolution,
+            fullscreen: self.fullscreen == "true",
+            show_fps: self.show_fps == "true",
+            graphics: self.graphics,
+            audio: self.audio,
+            controllers: self.controllers,
+        }
+    }
+
+    fn into_overrides(self) -> settings::Overrides {
+        let kept = |value: String| (value != settings::INHERIT).then_some(value);
+        settings::Overrides {
+            resolution: kept(self.resolution),
+            fullscreen: kept(self.fullscreen).map(|value| value == "true"),
+            show_fps: kept(self.show_fps).map(|value| value == "true"),
+            graphics: kept(self.graphics),
+            audio: kept(self.audio),
+            controllers: self.controllers.map(kept),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 struct Line {
     text: String,
@@ -142,6 +213,11 @@ fn app() -> Element {
     // cannot be double-clicked into two concurrent builders.
     let mut making_app = use_signal(|| None::<String>);
     let mut dragging = use_signal(|| false);
+    let mut store = use_signal(settings::load);
+    // The gamepads the runtime reported, refreshed whenever the panel opens so
+    // a pad plugged in while the window was already up shows up in the picker.
+    let mut pads = use_signal(Vec::<settings::Controller>::new);
+    let mut editing = use_signal(|| None::<Editing>);
 
     // Keep the console pinned to the newest line.
     use_effect(move || {
@@ -166,6 +242,21 @@ fn app() -> Element {
             }
         };
     }
+
+    // Enumerating gamepads spins up SDL in a child process, so it happens off
+    // the UI thread the same way the pipeline does.
+    let rescan = move || {
+        let tool = recompgc.peek().clone();
+        let (tx, mut rx) = futures_channel::mpsc::unbounded::<Vec<settings::Controller>>();
+        std::thread::spawn(move || {
+            let _ = tx.unbounded_send(settings::list_controllers(&tool));
+        });
+        spawn(async move {
+            if let Some(found) = rx.next().await {
+                pads.set(found);
+            }
+        });
+    };
 
     let mut start = move |image: PathBuf| {
         if job.read().as_ref().is_some_and(|current| current.running) {
@@ -315,6 +406,14 @@ fn app() -> Element {
                 }
                 div { class: "spacer" }
                 button {
+                    title: "Defaults every game starts from",
+                    onclick: move |_| {
+                        rescan();
+                        editing.set(Some(Editing::Global));
+                    },
+                    "Settings"
+                }
+                button {
                     class: "primary",
                     disabled: busy,
                     onclick: move |_| pick(),
@@ -343,7 +442,29 @@ fn app() -> Element {
                             game: game.clone(),
                             busy,
                             making_app: making_app.read().as_deref() == Some(game.disc_id.as_str()),
+                            customised: !store.read().overrides(&game.disc_id).is_empty(),
+                            on_settings: move |target: Game| {
+                                rescan();
+                                editing.set(Some(Editing::Game(target)));
+                            },
                             on_play: move |target: Game| {
+                                // config.ini and the controller profile are
+                                // global to the runtime, so this game's
+                                // settings are written into them here, one
+                                // moment before it starts.
+                                let resolved = store.read().resolve(&target.disc_id);
+                                match settings::apply(&resolved, &target.platform) {
+                                    Ok(notes) => for note in notes {
+                                        log.write().push(Line { text: note, kind: "dim" });
+                                    },
+                                    Err(err) => log.write().push(Line {
+                                        text: format!("Could not apply settings: {err}"),
+                                        kind: "bad",
+                                    }),
+                                }
+                                if let Err(err) = settings::sync_bundle(&target.app, &resolved) {
+                                    log.write().push(Line { text: err, kind: "bad" });
+                                }
                                 // With a bundle, launch it so the game gets its
                                 // own Dock icon; without one, run the same
                                 // command the bundle would have run.
@@ -354,14 +475,20 @@ fn app() -> Element {
                                         .map(|_| ())
                                 } else {
                                     let tool = recompgc.peek().clone();
+                                    let mut args = vec![
+                                        "play".to_string(),
+                                        "--disc-id".into(), target.disc_id.clone(),
+                                        "--game-root".into(), target.game_root.clone(),
+                                        "--module".into(), target.module.clone(),
+                                        "--title".into(), target.name.clone(),
+                                        "--graphics".into(), resolved.graphics.clone(),
+                                    ];
+                                    if !resolved.audio.is_empty() {
+                                        args.push("--audio".into());
+                                        args.push(resolved.audio.clone());
+                                    }
                                     std::process::Command::new(tool)
-                                        .args([
-                                            "play",
-                                            "--disc-id", &target.disc_id,
-                                            "--game-root", &target.game_root,
-                                            "--module", &target.module,
-                                            "--title", &target.name,
-                                        ])
+                                        .args(args)
                                         .stdin(std::process::Stdio::null())
                                         .spawn()
                                         .map(|_| ())
@@ -383,6 +510,7 @@ fn app() -> Element {
                                 }
                                 making_app.set(Some(target.disc_id.clone()));
                                 let tool = recompgc.peek().clone();
+                                let resolved = store.read().resolve(&target.disc_id);
                                 log.write().push(Line {
                                     text: format!("==> Building {}.app", target.name),
                                     kind: "head",
@@ -398,6 +526,8 @@ fn app() -> Element {
                                         "--module".into(), target.module.clone(),
                                         "--title".into(), target.name.clone(),
                                         "--platform".into(), target.platform.clone(),
+                                        "--graphics".into(), resolved.graphics.clone(),
+                                        "--audio".into(), resolved.audio.clone(),
                                     ],
                                     tx,
                                 );
@@ -458,6 +588,11 @@ fn app() -> Element {
                                     .collect();
                                 let _ = library::save(&kept);
                                 games.set(library::load());
+                                {
+                                    let mut current = store.write();
+                                    current.games.remove(&target.disc_id);
+                                }
+                                let _ = settings::save(&store.read());
                                 log.write().push(Line {
                                     text: if target.has_app {
                                         format!(
@@ -497,6 +632,72 @@ fn app() -> Element {
                             div { key: "{index}", class: "line {line.kind}", "{line.text}" }
                         }
                     }
+                }
+            }
+
+            if let Some(target) = editing.read().clone() {
+                SettingsPanel {
+                    title: match &target {
+                        Editing::Global => "Default settings".to_string(),
+                        Editing::Game(game) => game.name.clone(),
+                    },
+                    subtitle: match &target {
+                        Editing::Global =>
+                            "What every game starts from. A game can override any of it."
+                                .to_string(),
+                        Editing::Game(game) => format!(
+                            "{} · {} — only this game", game.disc_id, game.platform,
+                        ),
+                    },
+                    per_game: matches!(target, Editing::Game(_)),
+                    defaults: store.read().defaults.clone(),
+                    initial: match &target {
+                        Editing::Global => Draft::from_defaults(&store.read().defaults),
+                        Editing::Game(game) =>
+                            Draft::from_overrides(&store.read().overrides(&game.disc_id)),
+                    },
+                    pads: pads.read().clone(),
+                    on_rescan: move |_| rescan(),
+                    on_close: move |_| editing.set(None),
+                    on_save: move |draft: Draft| {
+                        let saved = match &target {
+                            Editing::Global => {
+                                store.write().defaults = draft.into_defaults();
+                                "Default settings saved.".to_string()
+                            }
+                            Editing::Game(game) => {
+                                let overrides = draft.into_overrides();
+                                let count = overrides.count();
+                                {
+                                    let mut current = store.write();
+                                    if overrides.is_empty() {
+                                        current.games.remove(&game.disc_id);
+                                    } else {
+                                        current.games
+                                            .insert(game.disc_id.clone(), overrides);
+                                    }
+                                }
+                                // A bundle keeps its own copy of the backends,
+                                // so it is brought in line as soon as they
+                                // change rather than at the next Play.
+                                let resolved = store.read().resolve(&game.disc_id);
+                                let _ = settings::sync_bundle(&game.app, &resolved);
+                                match count {
+                                    0 => format!("{} is back on the defaults.", game.name),
+                                    1 => format!("{}: 1 setting overridden.", game.name),
+                                    n => format!("{}: {n} settings overridden.", game.name),
+                                }
+                            }
+                        };
+                        match settings::save(&store.read()) {
+                            Ok(()) => log.write().push(Line { text: saved, kind: "good" }),
+                            Err(err) => log.write().push(Line {
+                                text: format!("Could not save settings: {err}"),
+                                kind: "bad",
+                            }),
+                        }
+                        editing.set(None);
+                    },
                 }
             }
 
@@ -556,7 +757,9 @@ fn GameCard(
     game: Game,
     busy: bool,
     making_app: bool,
+    customised: bool,
     on_play: EventHandler<Game>,
+    on_settings: EventHandler<Game>,
     on_make_app: EventHandler<Game>,
     on_log: EventHandler<Game>,
     on_reveal: EventHandler<Game>,
@@ -571,7 +774,12 @@ fn GameCard(
             }
             div { class: "card-text",
                 div { class: "card-name", "{game.name}" }
-                div { class: "card-meta", "{game.disc_id} · {game.platform}" }
+                div { class: "card-meta",
+                    "{game.disc_id} · {game.platform}"
+                    if customised {
+                        span { class: "tag", "custom settings" }
+                    }
+                }
                 if !game.ready {
                     div { class: "warn", "Recompiled module or extracted disc is missing. Add the disc image again." }
                 }
@@ -585,6 +793,14 @@ fn GameCard(
                         move |_| on_play.call(game.clone())
                     },
                     "Play"
+                }
+                button {
+                    title: "Resolution, backends, and controllers for this game",
+                    onclick: {
+                        let game = game.clone();
+                        move |_| on_settings.call(game.clone())
+                    },
+                    "Settings"
                 }
                 if !game.has_app {
                     button {
@@ -617,6 +833,250 @@ fn GameCard(
                         move |_| on_forget.call(game.clone())
                     },
                     "Remove"
+                }
+            }
+        }
+    }
+}
+
+/// One `<select>`, rendered from `(value, label)` pairs.
+#[component]
+fn Choice(value: String, options: Vec<(String, String)>, on_pick: EventHandler<String>) -> Element {
+    rsx! {
+        select {
+            // Set on the element as well as on the options: an `option`'s
+            // selected attribute only carries the initial choice, so resetting
+            // the form from a button would otherwise leave the control showing
+            // the old one.
+            value: "{value}",
+            onchange: move |event| on_pick.call(event.value()),
+            for (candidate, label) in options.iter() {
+                option {
+                    key: "{candidate}",
+                    value: "{candidate}",
+                    selected: *candidate == value,
+                    "{label}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SettingRow(label: String, hint: String, children: Element) -> Element {
+    rsx! {
+        div { class: "setting",
+            div { class: "setting-label",
+                div { "{label}" }
+                if !hint.is_empty() {
+                    div { class: "setting-hint", "{hint}" }
+                }
+            }
+            div { class: "setting-control", {children} }
+        }
+    }
+}
+
+/// The settings form, modal over the window.
+///
+/// `per_game` decides whether every control carries a leading "Default (…)"
+/// entry: the global panel edits concrete values, a game's panel edits which of
+/// them it departs from.
+#[component]
+fn SettingsPanel(
+    title: String,
+    subtitle: String,
+    per_game: bool,
+    defaults: settings::Defaults,
+    initial: Draft,
+    pads: Vec<settings::Controller>,
+    on_save: EventHandler<Draft>,
+    on_close: EventHandler<()>,
+    on_rescan: EventHandler<()>,
+) -> Element {
+    let mut draft = use_signal(|| initial.clone());
+
+    // "Default (1920x1080)" ahead of the real choices, in a game's panel only.
+    let lead = |shown: String| -> Vec<(String, String)> {
+        if per_game {
+            vec![(settings::INHERIT.to_string(), format!("Default ({shown})"))]
+        } else {
+            Vec::new()
+        }
+    };
+    let named = |table: &[(&str, &str)], value: &str| -> String {
+        table
+            .iter()
+            .find(|(candidate, _)| *candidate == value)
+            .map(|(_, label)| (*label).to_string())
+            .unwrap_or_else(|| value.to_string())
+    };
+    let switch = |on: bool| if on { "On" } else { "Off" }.to_string();
+
+    let resolutions: Vec<(String, String)> = lead(defaults.resolution.clone())
+        .into_iter()
+        .chain(
+            settings::RESOLUTIONS
+                .iter()
+                .map(|value| (value.to_string(), value.to_string())),
+        )
+        .collect();
+    let graphics: Vec<(String, String)> = lead(named(&settings::GRAPHICS, &defaults.graphics))
+        .into_iter()
+        .chain(
+            settings::GRAPHICS
+                .iter()
+                .map(|(value, label)| (value.to_string(), label.to_string())),
+        )
+        .collect();
+    let audio: Vec<(String, String)> = lead(named(&settings::AUDIO, &defaults.audio))
+        .into_iter()
+        .chain(
+            settings::AUDIO
+                .iter()
+                .map(|(value, label)| (value.to_string(), label.to_string())),
+        )
+        .collect();
+    let fullscreen: Vec<(String, String)> = lead(switch(defaults.fullscreen))
+        .into_iter()
+        .chain([("true".into(), "On".into()), ("false".into(), "Off".into())])
+        .collect();
+    let show_fps: Vec<(String, String)> = lead(switch(defaults.show_fps))
+        .into_iter()
+        .chain([("true".into(), "On".into()), ("false".into(), "Off".into())])
+        .collect();
+
+    // A pad that is saved but unplugged still has to be offered, or opening
+    // the panel with it disconnected would quietly drop the assignment.
+    let device_label = |device: &str| -> String {
+        pads.iter()
+            .find(|pad| pad.device == device)
+            .map(|pad| pad.label.clone())
+            .unwrap_or_else(|| format!("{device} (not connected)"))
+    };
+    let ports: Vec<Vec<(String, String)>> = (0..4)
+        .map(|port| {
+            let mut options = lead(match defaults.controllers[port].as_str() {
+                "" => "None".to_string(),
+                device => device_label(device),
+            });
+            options.push((String::new(), "None".to_string()));
+            options.extend(
+                pads.iter()
+                    .map(|pad| (pad.device.clone(), pad.label.clone())),
+            );
+            let chosen = draft.read().controllers[port].clone();
+            if !chosen.is_empty()
+                && chosen != settings::INHERIT
+                && !options.iter().any(|(value, _)| *value == chosen)
+            {
+                options.push((chosen.clone(), device_label(&chosen)));
+            }
+            options
+        })
+        .collect();
+
+    rsx! {
+        div { class: "modal-veil", onclick: move |_| on_close.call(()),
+            div {
+                class: "modal",
+                onclick: move |event| event.stop_propagation(),
+
+                div { class: "modal-head",
+                    div { class: "modal-title", "{title}" }
+                    div { class: "modal-sub", "{subtitle}" }
+                }
+
+                div { class: "modal-body",
+                    p { class: "section-label", "Video and audio" }
+                    SettingRow {
+                        label: "Internal resolution",
+                        hint: "What the game renders at, not the window size.",
+                        Choice {
+                            value: draft.read().resolution.clone(),
+                            options: resolutions,
+                            on_pick: move |value| draft.write().resolution = value,
+                        }
+                    }
+                    SettingRow {
+                        label: "Graphics backend",
+                        hint: "Metal is the native one on macOS.",
+                        Choice {
+                            value: draft.read().graphics.clone(),
+                            options: graphics,
+                            on_pick: move |value| draft.write().graphics = value,
+                        }
+                    }
+                    SettingRow {
+                        label: "Audio backend",
+                        hint: "",
+                        Choice {
+                            value: draft.read().audio.clone(),
+                            options: audio,
+                            on_pick: move |value| draft.write().audio = value,
+                        }
+                    }
+                    SettingRow {
+                        label: "Fullscreen",
+                        hint: "",
+                        Choice {
+                            value: draft.read().fullscreen.clone(),
+                            options: fullscreen,
+                            on_pick: move |value| draft.write().fullscreen = value,
+                        }
+                    }
+                    SettingRow {
+                        label: "Show FPS in the title bar",
+                        hint: "",
+                        Choice {
+                            value: draft.read().show_fps.clone(),
+                            options: show_fps,
+                            on_pick: move |value| draft.write().show_fps = value,
+                        }
+                    }
+
+                    div { class: "modal-section",
+                        span { class: "section-label", style: "margin: 0;", "Controllers" }
+                        div { class: "spacer" }
+                        button { onclick: move |_| on_rescan.call(()), "Rescan" }
+                    }
+                    if pads.is_empty() {
+                        div { class: "notice",
+                            "No gamepads detected. Plug one in and press Rescan. If nothing
+                             ever shows up, the ModernGekko build predates the
+                             --list-controllers patch — re-run build.sh."
+                        }
+                    }
+                    for (port, options) in ports.into_iter().enumerate() {
+                        SettingRow {
+                            key: "{port}",
+                            label: "Port {port + 1}",
+                            hint: if port == 0 { "The mapping is ModernGekko's standard one." } else { "" },
+                            Choice {
+                                value: draft.read().controllers[port].clone(),
+                                options,
+                                on_pick: move |value| draft.write().controllers[port] = value,
+                            }
+                        }
+                    }
+                }
+
+                div { class: "modal-foot",
+                    if per_game {
+                        button {
+                            onclick: move |_| draft.set(Draft::from_overrides(
+                                &settings::Overrides::default(),
+                            )),
+                            "Use defaults for everything"
+                        }
+                    }
+                    div { class: "spacer" }
+                    button { onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "primary",
+                        onclick: move |_| on_save.call(draft.read().clone()),
+                        "Save"
+                    }
                 }
             }
         }

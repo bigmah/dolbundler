@@ -72,9 +72,9 @@ recomp_gc/
 on the recompiler, that is the tree to edit — a separate top-level checkout
 would compile into nothing.
 
-Pinning is deliberate. `DolBundler/patches/` carries two fixes written against
-a specific ModernGekko revision, and `build.sh` refuses to guess if they no
-longer apply. To move to a newer upstream:
+Pinning is deliberate. `DolBundler/patches/` carries three fixes written
+against a specific ModernGekko revision, and `build.sh` refuses to guess if
+they no longer apply. To move to a newer upstream:
 
 ```sh
 git -C ModernGekko fetch origin
@@ -86,9 +86,9 @@ git add ModernGekko && git commit
 
 ### The patches
 
-Two fixes live in `DolBundler/patches/` as ordinary diffs, applied idempotently
-by `build.sh`. Both are candidates for upstreaming rather than carrying here
-forever:
+Three fixes live in `DolBundler/patches/` as ordinary diffs, applied
+idempotently by `build.sh`. All three are candidates for upstreaming rather
+than carrying here forever:
 
 - `0001-accept-unpinned-discs` — an unbranded ModernGekko build pins no disc ID
   and ships no disc preparer, so `PrepareDisc()` falls into a branch that
@@ -97,6 +97,11 @@ forever:
   Dolphin's 32-bit `dword` form, so it refused to build any game whose INI used
   the `byte`, `word`, or four-field conditional forms. That is 21 of the 127
   games that ship enabled patches.
+- `0003-list-controllers` — adds `moderngekko-run --list-controllers`, printing
+  the SDL gamepads Dolphin's input backend will see. DolBundler's per-game
+  controller picker needs SDL's own name for a pad to write a working profile,
+  and the runner is the only thing in the tree that both links SDL and can be
+  asked without opening a window.
 
 ## Licensing
 
