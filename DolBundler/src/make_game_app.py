@@ -246,6 +246,9 @@ fail() {{
   fail "The recompiled module is missing from $MODULE_PATH. Drop the disc image on DolBundler again to rebuild it."
 
 mkdir -p "$USER_DIR/Logs"
+# macOS ships bash 3.2, where "${{arr[@]}}" on an *empty* array trips `set -u`
+# with "unbound variable". No audio backend chosen is the default, so the array
+# is empty on nearly every launch; ${{arr[@]+...}} expands to nothing instead.
 audio_args=()
 [ -n "$AUDIO_BACKEND" ] && audio_args=(--audio "$AUDIO_BACKEND")
 exec "$RUNTIME_DIR/moderngekko-run" \\
@@ -254,7 +257,7 @@ exec "$RUNTIME_DIR/moderngekko-run" \\
   --user-dir "$USER_DIR" \\
   --title "$GAME_TITLE" \\
   --graphics "$GRAPHICS_BACKEND" \\
-  "${{audio_args[@]}}" \\
+  "${{audio_args[@]+"${{audio_args[@]}}"}}" \\
   >>"$USER_DIR/Logs/{disc_id}.log" 2>&1
 """
 

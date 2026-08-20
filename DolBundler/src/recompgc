@@ -290,6 +290,10 @@ if [ "$MODE" = play ]; then
   done <<<"$(configured_pipes)"
   # Mirrors the generated .app's launcher. The bundle keeps its own copy on
   # purpose: it has to run with DolBundler uninstalled.
+  # macOS ships bash 3.2, where "${arr[@]}" on an *empty* array trips `set -u`
+  # with "unbound variable". No audio backend chosen is the default, so the
+  # array is empty on nearly every launch; ${arr[@]+...} expands to nothing
+  # instead of erroring.
   audio_args=()
   [ -n "$AUDIO_BACKEND" ] && audio_args=(--audio "$AUDIO_BACKEND")
   exec "$MG_BUILD/moderngekko-run" \
@@ -298,7 +302,7 @@ if [ "$MODE" = play ]; then
     --user-dir "$USER_DIR" \
     --title "$ARG_TITLE" \
     --graphics "$GRAPHICS_BACKEND" \
-    "${audio_args[@]}" \
+    "${audio_args[@]+"${audio_args[@]}"}" \
     >>"$USER_DIR/Logs/$ARG_DISC_ID.log" 2>&1
 fi
 
