@@ -45,8 +45,12 @@ fi
   exit 1
 }
 
+# DolRecomp is a submodule of the vendored Dolphin, so check for it too: a
+# vendor/dolphin that is present but missing a nested checkout fails later, in
+# CMake, with a much less obvious message.
 step "Checking out ModernGekko's vendored runtime"
-if [ ! -f "$MG_SRC/vendor/dolphin/CMakeLists.txt" ]; then
+if [ ! -f "$MG_SRC/vendor/dolphin/CMakeLists.txt" ] ||
+   [ ! -f "$MG_SRC/vendor/dolphin/DolRecomp/CMakeLists.txt" ]; then
   echo "    fetching RecompCore and its externals (this is a few hundred MB)"
   git -C "$MG_SRC" submodule update --init --recursive --depth 1 vendor/dolphin
 else
@@ -74,7 +78,10 @@ done
 
 step "Configuring ModernGekko"
 if [ "$REBUILD" -eq 1 ]; then rm -rf "$MG_BUILD"; fi
-if [ ! -f "$MG_BUILD/CMakeCache.txt" ]; then
+# Keyed on build.ninja, not CMakeCache.txt: the cache is written before
+# generation, so an interrupted or failed configure leaves one behind and
+# "reusing" it would just hand ninja a directory with nothing to build.
+if [ ! -f "$MG_BUILD/build.ninja" ]; then
   # CMake 4 refuses the pre-3.5 minimums a few of Dolphin's externals declare.
   cmake -S "$MG_SRC" -B "$MG_BUILD" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
