@@ -120,9 +120,13 @@ WindowSystemInfo PlatformIOS::GetWindowSystemInfo() const
 }
 }  // namespace
 
-// Reachable from anywhere in the tree through a weak declaration, so the boot
-// path can be traced without every file having to know about Platform.
-extern "C" void dolbundler_boot_log(const char* message)
+// Core.cpp calls through this when it is non-null, so the boot path can be
+// traced without every file in the tree knowing about Platform.
+extern "C" {
+extern void (*dolbundler_boot_log_hook)(const char*);
+}
+
+static void BootLogBridge(const char* message)
 {
   ios_log(message);
 }
@@ -135,6 +139,7 @@ void Platform::IOSLog(const char* message)
 void Platform::SetIOSDiagnosticLog(const char* path)
 {
   s_log_path = path ? path : "";
+  dolbundler_boot_log_hook = s_log_path.empty() ? nullptr : &BootLogBridge;
 }
 
 void Platform::SetIOSRenderLayer(void* ca_metal_layer, float scale)

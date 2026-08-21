@@ -119,16 +119,18 @@ static std::unique_ptr<MemoryWatcher> s_memory_watcher;
 
 static void Callback_FramePresented(const PresentInfo& present_info);
 
-// Boot tracing for the iOS port. The symbol is weak: on every other platform
-// it is null and BOOTLOG compiles to nothing. On iOS a failed boot is a
-// SIGKILL with no crash report, and Dolphin's own log stops being written part
-// way through, so this is the only account of how far the core got.
-extern "C" void dolbundler_boot_log(const char*) __attribute__((weak));
+// Boot tracing for the iOS port. A plain function pointer rather than a weak
+// symbol: on Mach-O a weak declaration is still a hard reference at link time,
+// so every other target failed to link. Null everywhere except the iOS app,
+// which points it at its log writer.
+extern "C" {
+void (*dolbundler_boot_log_hook)(const char*) = nullptr;
+}
 #define BOOTLOG(msg)                                                                               \
   do                                                                                               \
   {                                                                                                \
-    if (dolbundler_boot_log)                                                                       \
-      dolbundler_boot_log(msg);                                                                    \
+    if (dolbundler_boot_log_hook)                                                                  \
+      dolbundler_boot_log_hook(msg);                                                               \
   } while (0)
 
 static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,

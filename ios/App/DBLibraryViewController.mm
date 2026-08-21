@@ -60,6 +60,35 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   [self refresh];
 }
 
+- (void)viewDidAppear:(BOOL)animated
+{
+  [super viewDidAppear:animated];
+
+  // Test hook: DOLBUNDLER_AUTOPLAY=<disc id> starts that game straight away.
+  // There is no way to script a tap on the simulator, and every boot bug so
+  // far has needed a build-install-launch cycle to see. Reading an environment
+  // variable keeps the whole loop non-interactive.
+  static BOOL autoplay_done = NO;
+  if (autoplay_done)
+    return;
+  const char* autoplay = getenv("DOLBUNDLER_AUTOPLAY");
+  if (!autoplay || !*autoplay)
+    return;
+  autoplay_done = YES;
+
+  NSString* wanted = @(autoplay);
+  for (DBGameEntry* entry in DBLibrary.shared.games)
+  {
+    if (![entry.discID isEqualToString:wanted])
+      continue;
+    DBGameViewController* game = [[DBGameViewController alloc] initWithGame:entry];
+    game.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:game animated:NO completion:nil];
+    return;
+  }
+  NSLog(@"DOLBUNDLER_AUTOPLAY=%@ but no such game in the library", wanted);
+}
+
 - (void)refresh
 {
   [_table reloadData];

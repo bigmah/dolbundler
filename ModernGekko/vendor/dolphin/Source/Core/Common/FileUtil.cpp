@@ -43,6 +43,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #if defined(__APPLE__)
 #include <CoreFoundation/CFBundle.h>
 #include <CoreFoundation/CFString.h>
@@ -687,6 +691,13 @@ std::string GetBundleDirectory()
   //
   // More information: https://objective-see.com/blog/blog_0x15.html
 
+  // Translocation is a macOS Gatekeeper behaviour and cannot happen to an iOS
+  // app, which is why this whole block is skipped there. It has to be: the
+  // dlopen below names a filesystem path, and on iOS system frameworks live in
+  // the dyld shared cache with nothing at that path. The open fails, both
+  // symbols stay null, and the call through s_is_translocated_url jumps to
+  // address zero.
+#if TARGET_OS_OSX
   // The APIs to deal with translocated paths are private, so we have
   // to dynamically load them from the Security framework.
   //
@@ -699,15 +710,21 @@ std::string GetBundleDirectory()
     s_security_framework.GetSymbol("SecTranslocateCreateOriginalPathForURL", &s_create_orig_path);
   }
 
-  bool is_translocated = false;
-  s_is_translocated_url(bundle_ref, &is_translocated, nullptr);
-
-  if (is_translocated)
+  // Guarded rather than assumed: these are private symbols, so a future macOS
+  // that drops them should degrade to the untranslocated path, not crash.
+  if (s_is_translocated_url && s_create_orig_path)
   {
-    CFURLRef untranslocated_ref = s_create_orig_path(bundle_ref, nullptr);
-    CFRelease(bundle_ref);
-    bundle_ref = untranslocated_ref;
+    bool is_translocated = false;
+    s_is_translocated_url(bundle_ref, &is_translocated, nullptr);
+
+    if (is_translocated)
+    {
+      CFURLRef untranslocated_ref = s_create_orig_path(bundle_ref, nullptr);
+      CFRelease(bundle_ref);
+      bundle_ref = untranslocated_ref;
+    }
   }
+#endif
 
   char app_bundle_path[MAXPATHLEN];
   CFStringRef bundle_path = CFURLCopyFileSystemPath(bundle_ref, kCFURLPOSIXPathStyle);
