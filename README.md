@@ -14,12 +14,19 @@ Recompiling adds the game to DolBundler's library, and that is enough to play
 it. Turning one into a standalone `.app` in `~/Applications` is a separate,
 per-game step — press **Create App**, or pass `--app` on the command line.
 
+A disc can also be recompiled to **bytecode** instead of native code
+(**Settings → Recompile discs to**, or `--backend vm`). That path takes seconds
+rather than minutes because nothing is compiled — the runtime interprets the
+result — and it is the one an iOS build has to use, since an App Store binary
+may not generate or load executable code. It costs some speed; how much depends
+on the game. See [`DolBundler/README.md`](DolBundler/README.md#recompiler).
+
 DolBundler is the glue layer. The heavy lifting belongs to two upstream
 projects it drives:
 
 | Piece | Role | Upstream |
 |---|---|---|
-| `DolRecomp` | reads the disc's `main.dol`, decodes PowerPC, emits C | [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp) |
+| `DolRecomp` | reads the disc's `main.dol`, decodes PowerPC, emits C or bytecode | [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp) |
 | `ModernGekko` | the runtime: GX/Metal video, audio, input, memory, disc I/O | [ExpansionPak/ModernGekko](https://github.com/ExpansionPak/ModernGekko) |
 | `DolBundler/` | the Dioxus window, the pipeline, and the macOS app packaging | this repo |
 
