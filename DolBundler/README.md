@@ -88,8 +88,8 @@ with until you add it again.
 
 | | |
 |---|---|
-| **Native code** | PowerPC → C → arm64. A few minutes of compiling per game, and full speed. This is the default. |
-| **Bytecode (interpreted)** | PowerPC → DolVM. Seconds, because nothing is compiled — the runtime interprets the result instead. |
+| **Bytecode (interpreted)** | PowerPC → DolVM. Seconds, because nothing is compiled — the runtime interprets the result instead. This is the default. |
+| **Native code** | PowerPC → C → arm64. A few minutes of compiling per game, and full speed. |
 
 Bytecode exists because some hosts may not run generated machine code at all:
 an App Store binary may not create executable pages or load code it did not
@@ -212,7 +212,7 @@ The same pipeline runs headless, which is handy for scripting or debugging:
 R=~/Applications/DolBundler.app/Contents/Resources
 $R/recompgc game.iso                    # recompile and add to the library
 $R/recompgc --app game.iso              # also build ~/Applications/<Game>.app
-$R/recompgc --backend vm game.iso       # bytecode instead of native code
+$R/recompgc --backend c game.iso        # native code instead of bytecode
 ```
 
 Two subcommands act on a game that is already recompiled — they are what the

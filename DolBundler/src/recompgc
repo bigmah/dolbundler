@@ -7,7 +7,7 @@
 #      or, with --backend vm, to DolVM bytecode the runtime interprets
 #   3. emit a double-clickable .app that runs the result
 #
-# Usage: recompgc [--porcelain] [--app] [--no-open] [--backend c|vm]
+# Usage: recompgc [--porcelain] [--app] [--no-open] [--backend vm|c]
 #                 <disc-image> [more images...]
 #        recompgc play     --disc-id <id> --game-root <dir> --module <lib> --title <s>
 #                          [--graphics <backend>] [--audio <backend>]
@@ -21,12 +21,13 @@
 # ~/Applications. `play` and `make-app` are what the window calls for an
 # already-recompiled game.
 #
-# --backend picks what the DOL is recompiled to. `c` is the default and the
-# fast one: PowerPC to C to native arm64, a few minutes of compiling. `vm`
-# lowers the same recompilation to DolVM bytecode instead, which takes seconds
-# because nothing is compiled - the runtime interprets it. Slower to play,
-# and the arm of the pipeline that an iOS build has to use, because an App
-# Store binary may not generate or load executable code.
+# --backend picks what the DOL is recompiled to. `vm` is the default: DolVM
+# bytecode, which takes seconds because nothing is compiled - the runtime
+# interprets it. It is the arm of the pipeline an iOS build has to use, because
+# an App Store binary may not generate or load executable code, and it is the
+# one to reach for while working on the interpreter. `--backend c` opts into
+# native code: PowerPC to C to native arm64, a few minutes of compiling per
+# game, and still the faster of the two to play.
 #
 # --graphics and --audio override the defaults from toolchain.conf for one
 # launch; the window passes whatever the game's settings resolved to. Everything
@@ -70,7 +71,7 @@ IMAGES=()
 # Subcommand fields, unused by the pipeline.
 ARG_DISC_ID=''; ARG_GAME_ROOT=''; ARG_MODULE=''; ARG_TITLE=''; ARG_PLATFORM=''
 ARG_GRAPHICS=''; ARG_AUDIO=''
-ARG_BACKEND=c
+ARG_BACKEND=vm
 DRIVER_ACTION=status; ARG_PIPE=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -115,7 +116,7 @@ die()   { emit "fail $*"; printf '\n%serror: %s%s\n' "$red" "$*" "$off" >&2; exi
 
 case "$ARG_BACKEND" in
   c|vm) ;;
-  *) echo "unknown backend: $ARG_BACKEND (expected c or vm)" >&2; exit 2 ;;
+  *) echo "unknown backend: $ARG_BACKEND (expected vm or c)" >&2; exit 2 ;;
 esac
 
 [ -f "$CONF" ] || die "missing $CONF; re-run DolBundler/build.sh"

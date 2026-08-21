@@ -61,19 +61,19 @@ pub const AUDIO: [(&str, &str); 3] = [
     ("No Audio Output", "Muted"),
 ];
 
-/// (stored value, label) for what a disc is recompiled to. `c` is the shipping
-/// path: PowerPC to C to native arm64, a few minutes of compiling per game.
-/// `vm` lowers the same recompilation to DolVM bytecode, which takes seconds
-/// because nothing is compiled -- the runtime interprets it instead. It is
-/// slower to play and it is the arm an iOS build has to use, because an App
-/// Store binary may not generate or load executable code.
+/// (stored value, label) for what a disc is recompiled to, default first. `vm`
+/// lowers the recompilation to DolVM bytecode, which takes seconds because
+/// nothing is compiled -- the runtime interprets it instead. It is the arm an
+/// iOS build has to use, because an App Store binary may not generate or load
+/// executable code. `c` is the native path: PowerPC to C to native arm64, a few
+/// minutes of compiling per game, and still the faster of the two to play.
 pub const BACKENDS: [(&str, &str); 2] = [
-    ("c", "Native code"),
     ("vm", "Bytecode (interpreted)"),
+    ("c", "Native code"),
 ];
 
 pub fn default_backend() -> String {
-    "c".into()
+    "vm".into()
 }
 
 /// A gamepad `recompgc list-controllers` reported.
