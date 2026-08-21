@@ -1,6 +1,10 @@
 // Copyright 2010 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include "InputCommon/ControllerInterface/SDL/SDL.h"
 
 #include <span>
@@ -198,9 +202,16 @@ InputBackend::InputBackend(ControllerInterface* controller_interface)
     {
       Common::ScopeGuard init_guard([this] { m_init_event.Set(); });
 
-      if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC | SDL_INIT_GAMEPAD))
+      // iOS has no SDL haptic devices, and asking for the subsystem there fails
+      // the whole SDL_Init -- taking gamepad support down with it, which does
+      // work. Rumble on a connected controller goes through GameController.
+      Uint32 subsystems = SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD;
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
+      subsystems |= SDL_INIT_HAPTIC;
+#endif
+      if (!SDL_Init(subsystems))
       {
-        ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to initialize");
+        ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to initialize: {}", SDL_GetError());
         return;
       }
 

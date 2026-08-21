@@ -190,13 +190,24 @@ void InitControllers(const WindowSystemInfo& wsi)
                                       "mappings intended for the default device may not work.");
   }
 
+  // Traced individually because none of these log on their own, and on iOS a
+  // failure in here is a SIGKILL with no crash report -- the last line written
+  // is the only way to tell which one died.
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: GCAdapter::Init");
   GCAdapter::Init();
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: Pad::Initialize");
   Pad::Initialize();
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: Pad::InitializeGBA");
   Pad::InitializeGBA();
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: Keyboard::Initialize");
   Keyboard::Initialize();
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: Wiimote::Initialize");
   Wiimote::Initialize(Wiimote::InitializeMode::DO_NOT_WAIT_FOR_WIIMOTES);
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: HotkeyManagerEmu::Initialize");
   HotkeyManagerEmu::Initialize();
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: FreeLook::Initialize");
   FreeLook::Initialize();
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "InitControllers: done");
 }
 
 void ShutdownControllers()

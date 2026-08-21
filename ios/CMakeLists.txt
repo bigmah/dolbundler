@@ -72,6 +72,13 @@ target_link_libraries(DolBundler PRIVATE
 
 target_compile_definitions(DolBundler PRIVATE MODERNGEKKO_HAVE_UIKIT=1)
 
+# Porting to iOS means compiling out whole platform implementations, which
+# leaves #if/#elif chains with no branch taken. A non-void function whose body
+# vanishes that way still compiles: it just falls off its end, which is
+# undefined behaviour. One of those (GCAdapter::IsDetected) crashed the boot
+# here, silently, because Xcode's default warning set disables -Wreturn-type.
+add_compile_options(-Werror=return-type)
+
 target_link_libraries(DolBundler PRIVATE
   "-framework UIKit"
   "-framework Foundation"

@@ -23,6 +23,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <string>
 #include <thread>
 
 namespace
@@ -34,6 +36,23 @@ CAMetalLayer* s_render_layer = nil;
 // Retina scale of the layer. Dolphin reads the drawable size off the layer
 // itself, so this is the only geometry the platform has to report.
 std::atomic<float> s_layer_scale{1.0f};
+
+// Where the host app wants a trace written. Boot failures on iOS arrive as
+// SIGKILL with no crash report and no stdout, so the only way to see how far
+// the video backend got is to write it down as it happens.
+std::string s_log_path;
+
+void ios_log(const char* message)
+{
+  if (s_log_path.empty())
+    return;
+  FILE* f = fopen(s_log_path.c_str(), "a");
+  if (!f)
+    return;
+  fprintf(f, "        [platform] %s\n", message);
+  fflush(f);
+  fclose(f);
+}
 
 class PlatformIOS : public Platform
 {
@@ -47,8 +66,12 @@ public:
 
 bool PlatformIOS::Init()
 {
+  ios_log("Platform::Init");
   if (s_render_layer == nil)
+  {
+    ios_log("Platform::Init FAILED - no render layer was handed over");
     return false;
+  }
 
   // There is no window to focus or unfocus: while the emulation thread runs,
   // the app is by definition in the foreground, and iOS suspends it otherwise.
@@ -65,6 +88,9 @@ void PlatformIOS::SetTitle(const std::string& title)
 
 void PlatformIOS::MainLoop()
 {
+  // Reaching here means BootCore() returned, so the video backend came up and
+  // the emulation thread is running.
+  ios_log("MainLoop entered - boot completed");
   while (IsRunning())
   {
     UpdateRunningFlag();
@@ -80,6 +106,9 @@ void PlatformIOS::MainLoop()
 
 WindowSystemInfo PlatformIOS::GetWindowSystemInfo() const
 {
+  // Called by the video backend as it starts up, and again by the input
+  // interface. Seeing this without MainLoop means boot died in between.
+  ios_log("GetWindowSystemInfo");
   WindowSystemInfo wsi;
   wsi.type = WindowSystemType::iOS;
   // The Metal backend's PrepareWindow() is compiled out on iOS, so unlike the
@@ -90,6 +119,23 @@ WindowSystemInfo PlatformIOS::GetWindowSystemInfo() const
   return wsi;
 }
 }  // namespace
+
+// Reachable from anywhere in the tree through a weak declaration, so the boot
+// path can be traced without every file having to know about Platform.
+extern "C" void dolbundler_boot_log(const char* message)
+{
+  ios_log(message);
+}
+
+void Platform::IOSLog(const char* message)
+{
+  ios_log(message);
+}
+
+void Platform::SetIOSDiagnosticLog(const char* path)
+{
+  s_log_path = path ? path : "";
+}
 
 void Platform::SetIOSRenderLayer(void* ca_metal_layer, float scale)
 {

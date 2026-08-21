@@ -60,6 +60,13 @@ public:
   // The layer is created and owned by the host app; the runtime only draws
   // into it. Must be set before Init().
   static void SetIOSRenderLayer(void* ca_metal_layer, float scale);
+  // Optional trace file. Boot failures on iOS are SIGKILLs with no crash
+  // report, so the platform writes its own breadcrumbs when this is set.
+  static void SetIOSDiagnosticLog(const char* path);
+  // Writes one line to that file, flushed. Safe to call from any thread and
+  // before/after the platform exists. Used to trace the boot on iOS, where a
+  // failure is a SIGKILL and Dolphin's own log stops being written.
+  static void IOSLog(const char* message);
   static std::unique_ptr<Platform> CreateIOSPlatform();
 #endif
 

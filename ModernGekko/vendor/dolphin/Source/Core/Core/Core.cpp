@@ -119,6 +119,18 @@ static std::unique_ptr<MemoryWatcher> s_memory_watcher;
 
 static void Callback_FramePresented(const PresentInfo& present_info);
 
+// Boot tracing for the iOS port. The symbol is weak: on every other platform
+// it is null and BOOTLOG compiles to nothing. On iOS a failed boot is a
+// SIGKILL with no crash report, and Dolphin's own log stops being written part
+// way through, so this is the only account of how far the core got.
+extern "C" void dolbundler_boot_log(const char*) __attribute__((weak));
+#define BOOTLOG(msg)                                                                               \
+  do                                                                                               \
+  {                                                                                                \
+    if (dolbundler_boot_log)                                                                       \
+      dolbundler_boot_log(msg);                                                                    \
+  } while (0)
+
 static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,
                       WindowSystemInfo wsi);
 
@@ -219,12 +231,16 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
   INFO_LOG_FMT(BOOT, "Starting core = {} mode", system.IsWii() ? "Wii" : "GameCube");
   INFO_LOG_FMT(BOOT, "CPU Thread separate = {}", system.IsDualCoreMode() ? "Yes" : "No");
 
+  BOOTLOG("Core::Init: PopulateBackendInfo");
   // Manually reactivate the video backend in case a GameINI overrides the video backend setting.
   VideoBackendBase::PopulateBackendInfo(wsi);
+  BOOTLOG("Core::Init: PopulateBackendInfo done");
 
   // Issue any API calls which must occur on the main thread for the graphics backend.
   WindowSystemInfo prepared_wsi(wsi);
+  BOOTLOG("Core::Init: PrepareWindow");
   g_video_backend->PrepareWindow(prepared_wsi);
+  BOOTLOG("Core::Init: PrepareWindow done, starting EmuThread");
 
   // Start the emu thread
   s_state.store(State::Starting);
@@ -500,6 +516,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
 
   // Switch the window used for inputs to the render window. This way, the cursor position
   // is relative to the render window, instead of the main window.
+  BOOTLOG("EmuThread: entered");
   ASSERT(g_controller_interface.IsInit());
   g_controller_interface.ChangeWindow(wsi.render_window);
 
@@ -538,6 +555,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
 
   FreeLook::LoadInputConfig();
 
+  BOOTLOG("EmuThread: Movie::Init");
   system.GetMovie().Init(*boot);
   Common::ScopeGuard movie_guard([&system] { system.GetMovie().Shutdown(); });
 
@@ -565,7 +583,9 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
 
   // In single-core mode: This holds a video backend shutdown function.
   // In dual-core mode: This holds a GPU thread stopping function (which does the backend shutdown).
+  BOOTLOG("EmuThread: initializing video backend");
   const auto video_guard = GetInitializedVideoGuard(system, wsi);
+  BOOTLOG("EmuThread: video backend initialized");
   if (!video_guard)
   {
     PanicAlertFmt("Failed to initialize video backend!");

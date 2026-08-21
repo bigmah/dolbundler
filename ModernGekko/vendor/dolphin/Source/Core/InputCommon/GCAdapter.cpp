@@ -1075,6 +1075,13 @@ bool IsDetected(const char** error_message)
   return false;
 #elif GCADAPTER_USE_ANDROID_IMPLEMENTATION
   return s_detected;
+#else
+  // No adapter implementation on this platform, so there is nothing to detect.
+  // Without this the function falls off its end, which is undefined behaviour
+  // rather than a compile error, and crashed the iOS build during boot.
+  if (error_message)
+    *error_message = nullptr;
+  return false;
 #endif
 }
 
