@@ -18,12 +18,15 @@ pub enum Msg {
     Finished(bool),
 }
 
-/// The four-step disc pipeline.
-pub fn run(recompgc: PathBuf, image: PathBuf, tx: UnboundedSender<Msg>) {
+/// The four-step disc pipeline. `backend` is what the DOL is recompiled to:
+/// `c` for native code, `vm` for DolVM bytecode the runtime interprets.
+pub fn run(recompgc: PathBuf, image: PathBuf, backend: String, tx: UnboundedSender<Msg>) {
     run_args(
         recompgc,
         vec![
             "--porcelain".into(),
+            "--backend".into(),
+            backend,
             image.to_string_lossy().into_owned(),
         ],
         tx,

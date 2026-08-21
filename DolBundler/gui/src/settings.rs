@@ -61,6 +61,21 @@ pub const AUDIO: [(&str, &str); 3] = [
     ("No Audio Output", "Muted"),
 ];
 
+/// (stored value, label) for what a disc is recompiled to, default first. `vm`
+/// lowers the recompilation to DolVM bytecode, which takes seconds because
+/// nothing is compiled -- the runtime interprets it instead. It is the arm an
+/// iOS build has to use, because an App Store binary may not generate or load
+/// executable code. `c` is the native path: PowerPC to C to native arm64, a few
+/// minutes of compiling per game, and still the faster of the two to play.
+pub const BACKENDS: [(&str, &str); 2] = [
+    ("vm", "Bytecode (interpreted)"),
+    ("c", "Native code"),
+];
+
+pub fn default_backend() -> String {
+    "vm".into()
+}
+
 /// A gamepad `recompgc list-controllers` reported.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Controller {
@@ -133,13 +148,29 @@ impl Overrides {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default)]
     pub defaults: Defaults,
+    /// What the next disc added is recompiled to. Not a per-game launch
+    /// setting: it decides what the recompiler produces, so it only applies
+    /// when a game is built, and a game already in the library keeps whatever
+    /// it was built with until it is recompiled.
+    #[serde(default = "default_backend")]
+    pub backend: String,
     /// Keyed by disc ID. Games with nothing overridden are dropped on save.
     #[serde(default)]
     pub games: BTreeMap<String, Overrides>,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            defaults: Defaults::default(),
+            backend: default_backend(),
+            games: BTreeMap::new(),
+        }
+    }
 }
 
 impl Store {

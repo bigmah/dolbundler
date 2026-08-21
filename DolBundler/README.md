@@ -18,14 +18,13 @@ mario_party_4.iso  ──▶  DolBundler  ──▶  ~/Applications/Mario Party 
 | `DolBundler/gui` | the Dioxus window — library, live console, one-click play |
 | `DolBundler/src` | the pipeline the window drives, usable on its own |
 
-`DolRecomp` and `ModernGekko` are upstream projects. `DolBundler` is the glue
-that turns their CLI tools into something you can double-click.
+`DolRecomp` and `ModernGekko` began as separate projects. `DolBundler` is the
+glue that turns their CLI tools into something you can double-click.
 
-`ModernGekko` is a pinned submodule at the repo root. `DolRecomp` is not a
-direct dependency — it is built from `ModernGekko/vendor/dolphin/DolRecomp`
-through ModernGekko's own submodule chain, so that is the tree to edit if you
-need to hack on the recompiler. See the [root README](../README.md) for the
-full wiring and for how to bump the pin.
+Both are vendored directly into this repo: `ModernGekko` at the repo root, and
+`DolRecomp` at `ModernGekko/vendor/dolphin/DolRecomp`. The recompiler is built
+through ModernGekko's CMake, so that is the tree to edit if you need to hack on
+it. See the [root README](../README.md) for the full wiring.
 
 ## Install
 
@@ -35,13 +34,12 @@ cd recomp_gc
 ./DolBundler/build.sh
 ```
 
-If you forgot `--recursive`, `build.sh` initialises the ModernGekko submodule
-for you.
+If you forgot `--recursive`, `build.sh` fetches Dolphin's externals for you.
 
-The first run fetches ModernGekko's vendored RecompCore/Dolphin tree (a few
-hundred MB), builds it, builds the window, and installs `DolBundler.app` to
-`~/Applications`. A cold build compiles all of Dolphin, so expect it to take a
-while; later runs reuse the build directory.
+All the code is in the clone; the first run fetches only Dolphin's third-party
+externals (a few hundred MB), builds them, builds the window, and installs
+`DolBundler.app` to `~/Applications`. A cold build compiles all of Dolphin, so
+expect it to take a while; later runs reuse the build directory.
 
 Requirements: Xcode command line tools, `cmake`, `ninja`, `python3`, `cargo`.
 Apple Silicon and Intel are both fine — the recompiled module is built for
@@ -67,7 +65,8 @@ Four steps run, with live output in the console pane:
 1. **Extract** the disc into `~/.local/share/moderngekko/games/<DISC_ID>`
 2. **Read** the disc header for the game's name, ID, and platform
 3. **Recompile** the DOL to a native `.dylib`, cached under
-   `~/.cache/moderngekko/modules/<DISC_ID>/`
+   `~/.cache/moderngekko/modules/<DISC_ID>/` — or to a `.dvm` the runtime
+   interprets, see [Recompiler](#recompiler)
 4. **Add** it to the library, with its banner art
 
 That is all it takes to play. Building `~/Applications/<Game Name>.app` is a
@@ -78,6 +77,30 @@ you only wanted to try does not leave an icon behind.
 Step 3 is the slow one — a few minutes for a GameCube game. It is keyed on the
 DOL hash, the compiler, and the recompiler revision, so adding the same disc
 again is instant and reuses the cached module.
+
+## Recompiler
+
+**Settings → Recompile discs to** picks what step 3 produces. It applies to the
+next disc you add; a game already in the library keeps whatever it was built
+with until you add it again.
+
+| | |
+|---|---|
+| **Bytecode (interpreted)** | PowerPC → DolVM. Seconds, because nothing is compiled — the runtime interprets the result instead. This is the default. |
+| **Native code** | PowerPC → C → arm64. A few minutes of compiling per game, and full speed. |
+
+Bytecode exists because some hosts may not run generated machine code at all:
+an App Store binary may not create executable pages or load code it did not
+ship with, which rules the native path out on iOS however the recompilation is
+packaged. Everything else is the same — same recompiler, same analysis, same
+runtime, same coverage and self-modifying-code checks. It is only slower to
+play, by an amount that depends on the game: measured against the Gekko's
+486 MHz with a window open, Super Smash Bros Melee runs at full speed, The
+SpongeBob SquarePants Movie at about 0.95x and Mario Party 4 at about 0.87x,
+where native is at the frame limiter for all three.
+
+It is also the quickest way to find out whether a disc recompiles and boots at
+all, since it takes seconds rather than minutes.
 
 The game then sits in the library with its banner art, decoded from the disc's
 own `opening.bnr`. Per game:
@@ -185,8 +208,9 @@ The same pipeline runs headless, which is handy for scripting or debugging:
 
 ```sh
 R=~/Applications/DolBundler.app/Contents/Resources
-$R/recompgc game.iso           # recompile and add to the library
-$R/recompgc --app game.iso     # also build ~/Applications/<Game>.app
+$R/recompgc game.iso                    # recompile and add to the library
+$R/recompgc --app game.iso              # also build ~/Applications/<Game>.app
+$R/recompgc --backend c game.iso        # native code instead of bytecode
 ```
 
 Two subcommands act on a game that is already recompiled — they are what the

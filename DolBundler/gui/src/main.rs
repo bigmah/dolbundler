@@ -328,7 +328,8 @@ fn app() -> Element {
         }));
 
         let (tx, mut rx) = futures_channel::mpsc::unbounded::<Msg>();
-        pipeline::run(recompgc.peek().clone(), image, tx);
+        let backend = store.peek().backend.clone();
+        pipeline::run(recompgc.peek().clone(), image, backend, tx);
 
         spawn(async move {
             while let Some(message) = rx.next().await {
@@ -715,6 +716,16 @@ fn app() -> Element {
                     },
                     per_game: matches!(target, Editing::Game(_)),
                     defaults: store.read().defaults.clone(),
+                    backend: store.read().backend.clone(),
+                    on_backend: move |value: String| {
+                        store.write().backend = value;
+                        if let Err(err) = settings::save(&store.read()) {
+                            log.write().push(Line {
+                                text: format!("Could not save settings: {err}"),
+                                kind: "bad",
+                            });
+                        }
+                    },
                     initial: match &target {
                         Editing::Global => Draft::from_defaults(&store.read().defaults),
                         Editing::Game(game) =>
@@ -953,9 +964,11 @@ fn SettingsPanel(
     subtitle: String,
     per_game: bool,
     defaults: settings::Defaults,
+    backend: String,
     initial: Draft,
     pads: Vec<settings::Controller>,
     on_save: EventHandler<Draft>,
+    on_backend: EventHandler<String>,
     on_close: EventHandler<()>,
     on_rescan: EventHandler<()>,
 ) -> Element {
@@ -1053,6 +1066,21 @@ fn SettingsPanel(
                 }
 
                 div { class: "modal-body",
+                    if !per_game {
+                        p { class: "section-label", "Recompiler" }
+                        SettingRow {
+                            label: "Recompile discs to",
+                            hint: "Native code is faster to play. Bytecode builds in seconds instead of minutes and never generates machine code, which is what an iOS build needs. Applies to the next disc you add.",
+                            Choice {
+                                value: backend.clone(),
+                                options: settings::BACKENDS
+                                    .iter()
+                                    .map(|(value, label)| (value.to_string(), label.to_string()))
+                                    .collect::<Vec<(String, String)>>(),
+                                on_pick: move |value| on_backend.call(value),
+                            }
+                        }
+                    }
                     p { class: "section-label", "Video and audio" }
                     SettingRow {
                         label: "Internal resolution",

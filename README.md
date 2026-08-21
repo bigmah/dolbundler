@@ -14,14 +14,21 @@ Recompiling adds the game to DolBundler's library, and that is enough to play
 it. Turning one into a standalone `.app` in `~/Applications` is a separate,
 per-game step — press **Create App**, or pass `--app` on the command line.
 
-DolBundler is the glue layer. The heavy lifting belongs to two upstream
-projects it drives:
+A disc is recompiled to **bytecode** by default: that path takes seconds rather
+than minutes because nothing is compiled — the runtime interprets the result —
+and it is the one an iOS build has to use, since an App Store binary may not
+generate or load executable code. It costs some speed; how much depends on the
+game. **Settings → Recompile discs to**, or `--backend c`, opts into native code
+instead. See [`DolBundler/README.md`](DolBundler/README.md#recompiler).
 
-| Piece | Role | Upstream |
-|---|---|---|
-| `DolRecomp` | reads the disc's `main.dol`, decodes PowerPC, emits C | [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp) |
-| `ModernGekko` | the runtime: GX/Metal video, audio, input, memory, disc I/O | [ExpansionPak/ModernGekko](https://github.com/ExpansionPak/ModernGekko) |
-| `DolBundler/` | the Dioxus window, the pipeline, and the macOS app packaging | this repo |
+DolBundler is the glue layer. The heavy lifting is done by two projects it
+drives, both vendored directly into this repo:
+
+| Piece | Role | Path | Originally from |
+|---|---|---|---|
+| `DolRecomp` | reads the disc's `main.dol`, decodes PowerPC, emits C or bytecode | `ModernGekko/vendor/dolphin/DolRecomp/` | [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp) |
+| `ModernGekko` | the runtime: GX/Metal video, audio, input, memory, disc I/O | `ModernGekko/` | [ExpansionPak/ModernGekko](https://github.com/ExpansionPak/ModernGekko) |
+| `DolBundler` | the Dioxus window, the pipeline, and the macOS app packaging | `DolBundler/` | this repo |
 
 ## Legal
 
@@ -42,12 +49,12 @@ cd recomp_gc
 ./DolBundler/build.sh
 ```
 
-If you forgot `--recursive`, `build.sh` initialises the submodule for you.
+If you forgot `--recursive`, `build.sh` fetches Dolphin's externals for you.
 
-The first run fetches ModernGekko's vendored RecompCore/Dolphin tree (a few
-hundred MB), builds it, builds the window, and installs `DolBundler.app` to
-`~/Applications`. A cold build compiles all of Dolphin, so expect it to take a
-while; later runs reuse the build directory.
+All the code is in the clone; the first run fetches only Dolphin's third-party
+externals (a few hundred MB), builds them, builds the window, and installs
+`DolBundler.app` to `~/Applications`. A cold build compiles all of Dolphin, so
+expect it to take a while; later runs reuse the build directory.
 
 Requirements: Xcode command line tools, `cmake`, `ninja`, `python3`, `cargo`.
 Apple Silicon and Intel are both fine.
@@ -57,15 +64,26 @@ Full usage, the four pipeline steps, and the known limitations are in
 
 ## How the dependencies are wired
 
-`ModernGekko` is a **pinned git submodule** at the repo root. It in turn pins
-RecompCore (a Dolphin fork), which pins DolRecomp:
+This is a **monorepo**. ModernGekko, RecompCore (a Dolphin fork) and DolRecomp
+are ordinary tracked directories here — not submodules, not forks to keep in
+sync:
 
 ```
 recomp_gc/
-  ModernGekko/                  submodule → ExpansionPak/ModernGekko
-    vendor/dolphin/             submodule → ExpansionPak/RecompCore
-      DolRecomp/                submodule → ExpansionPak/DolRecomp
+  DolBundler/                   the window, the pipeline, the app packaging
+  ModernGekko/                  the runtime
+    vendor/dolphin/             RecompCore, a Dolphin fork
+      DolRecomp/                the recompiler
+      Externals/                Dolphin's third-party deps — still submodules
 ```
+
+The only submodules left are Dolphin's own third-party externals under
+`ModernGekko/vendor/dolphin/Externals` — Qt, SDL, curl, imgui and about thirty
+more. Those point at their real upstreams, they are pinned, and `build.sh`
+initialises them on the first run.
+
+Edit the runtime or the recompiler directly in this tree and commit like any
+other change. There is no second repo to push to and nothing to re-pin.
 
 One further project is **optional** and not pinned at all:
 [`gc_controller`](https://github.com/bigmah/nso_gc_macos), a driver for the
@@ -75,21 +93,16 @@ then offers that pad as a controller. Nothing here needs it; without one the
 controller picker just offers SDL gamepads. See
 [`DolBundler/README.md`](DolBundler/README.md#gamecube-controllers).
 
-**DolRecomp is not a direct dependency of this repo.** It is built from
-`ModernGekko/vendor/dolphin/DolRecomp` through that chain. If you need to hack
-on the recompiler, that is the tree to edit — a separate top-level checkout
-would compile into nothing.
+**DolRecomp lives at `ModernGekko/vendor/dolphin/DolRecomp`.** It is built
+through ModernGekko's CMake, so that is the tree to edit — a separate top-level
+checkout would compile into nothing.
 
-Pinning is deliberate. `DolBundler/patches/` carries three fixes written
-against a specific ModernGekko revision, and `build.sh` refuses to guess if
-they no longer apply. To move to a newer upstream:
+After changing the recompiler or the runtime, rebuild and re-check the game
+patch coverage:
 
 ```sh
-git -C ModernGekko fetch origin
-git -C ModernGekko checkout <new-sha>
-./DolBundler/build.sh              # will fail loudly if a patch no longer applies
+./DolBundler/build.sh
 ./DolBundler/src/check_game_patches.py
-git add ModernGekko && git commit
 ```
 
 ### The patches
@@ -136,9 +149,10 @@ reading.
 
 Issues and pull requests welcome. Two things to know first:
 
-- Bugs in recompilation or in the runtime belong upstream, in
-  [DolRecomp](https://github.com/ExpansionPak/DolRecomp) or
-  [ModernGekko](https://github.com/ExpansionPak/ModernGekko) — not here. This
-  repo is the macOS packaging and the pipeline that drives them.
+- Bugs in recompilation or in the runtime are fixed in this repo too, under
+  `ModernGekko/vendor/dolphin/DolRecomp/` and `ModernGekko/`. Those trees began
+  as [DolRecomp](https://github.com/ExpansionPak/DolRecomp) and
+  [ModernGekko](https://github.com/ExpansionPak/ModernGekko); this copy has
+  diverged and is not kept in sync with them.
 - Never attach a disc image, an extracted DOL, or game assets to an issue. A
   disc ID and the failing address are enough.

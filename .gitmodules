@@ -1,4 +1,136 @@
-[submodule "ModernGekko"]
-	path = ModernGekko
-	url = git@github.com:bigmah/ModernGekko.git
-	branch = dolvm-stack
+[submodule "Externals/FFmpeg-bin"]
+	path = ModernGekko/vendor/dolphin/Externals/FFmpeg-bin
+	url = https://github.com/dolphin-emu/ext-win-ffmpeg.git
+	shallow = true
+[submodule "Externals/Qt"]
+	path = ModernGekko/vendor/dolphin/Externals/Qt
+	url = https://github.com/dolphin-emu/ext-win-qt.git
+	shallow = true
+[submodule "Externals/SFML/SFML"]
+	path = ModernGekko/vendor/dolphin/Externals/SFML/SFML
+	url = https://github.com/SFML/SFML.git
+	shallow = true
+[submodule "Externals/Vulkan-Headers"]
+	path = ModernGekko/vendor/dolphin/Externals/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+	shallow = true
+[submodule "Externals/VulkanMemoryAllocator"]
+	path = ModernGekko/vendor/dolphin/Externals/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+	shallow = true
+[submodule "Externals/bzip2/bzip2"]
+	path = ModernGekko/vendor/dolphin/Externals/bzip2/bzip2
+	url = https://gitlab.com/bzip2/bzip2.git
+	shallow = true
+[submodule "Externals/cpp-ipc/cpp-ipc"]
+	path = ModernGekko/vendor/dolphin/Externals/cpp-ipc/cpp-ipc
+	url = https://github.com/mutouyun/cpp-ipc.git
+	shallow = true
+[submodule "Externals/cpp-optparse/cpp-optparse"]
+	path = ModernGekko/vendor/dolphin/Externals/cpp-optparse/cpp-optparse
+	url = https://github.com/weisslj/cpp-optparse.git
+	shallow = true
+[submodule "Externals/cubeb/cubeb"]
+	path = ModernGekko/vendor/dolphin/Externals/cubeb/cubeb
+	url = https://github.com/mozilla/cubeb.git
+	shallow = true
+[submodule "Externals/curl/curl"]
+	path = ModernGekko/vendor/dolphin/Externals/curl/curl
+	url = https://github.com/curl/curl.git
+	shallow = true
+[submodule "Externals/enet/enet"]
+	path = ModernGekko/vendor/dolphin/Externals/enet/enet
+	url = https://github.com/lsalzman/enet.git
+	shallow = true
+[submodule "Externals/fmt/fmt"]
+	path = ModernGekko/vendor/dolphin/Externals/fmt/fmt
+	url = https://github.com/fmtlib/fmt.git
+	shallow = true
+[submodule "Externals/glslang/glslang"]
+	path = ModernGekko/vendor/dolphin/Externals/glslang/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+	shallow = true
+[submodule "Externals/gtest"]
+	path = ModernGekko/vendor/dolphin/Externals/gtest
+	url = https://github.com/google/googletest.git
+	shallow = true
+[submodule "Externals/imgui/imgui"]
+	path = ModernGekko/vendor/dolphin/Externals/imgui/imgui
+	url = https://github.com/ocornut/imgui.git
+	shallow = true
+[submodule "Externals/implot/implot"]
+	path = ModernGekko/vendor/dolphin/Externals/implot/implot
+	url = https://github.com/epezent/implot.git
+	shallow = true
+[submodule "Externals/libadrenotools"]
+	path = ModernGekko/vendor/dolphin/Externals/libadrenotools
+	url = https://github.com/bylaws/libadrenotools.git
+	shallow = true
+[submodule "Externals/libspng/libspng"]
+	path = ModernGekko/vendor/dolphin/Externals/libspng/libspng
+	url = https://github.com/randy408/libspng.git
+	shallow = true
+[submodule "Externals/lz4/lz4"]
+	path = ModernGekko/vendor/dolphin/Externals/lz4/lz4
+	url = https://github.com/lz4/lz4.git
+	shallow = true
+[submodule "Externals/mGBA/mgba"]
+	path = ModernGekko/vendor/dolphin/Externals/mGBA/mgba
+	url = https://github.com/mgba-emu/mgba.git
+	shallow = true
+[submodule "Externals/miniupnpc/miniupnp"]
+	path = ModernGekko/vendor/dolphin/Externals/miniupnpc/miniupnp
+	url = https://github.com/miniupnp/miniupnp.git
+	shallow = true
+[submodule "Externals/minizip-ng/minizip-ng"]
+	path = ModernGekko/vendor/dolphin/Externals/minizip-ng/minizip-ng
+	url = https://github.com/zlib-ng/minizip-ng.git
+	shallow = true
+[submodule "Externals/pugixml/pugixml"]
+	path = ModernGekko/vendor/dolphin/Externals/pugixml/pugixml
+	url = https://github.com/zeux/pugixml.git
+	shallow = true
+[submodule "Externals/rcheevos/rcheevos"]
+	path = ModernGekko/vendor/dolphin/Externals/rcheevos/rcheevos
+	url = https://github.com/RetroAchievements/rcheevos.git
+	shallow = true
+[submodule "Externals/spirv_cross/SPIRV-Cross"]
+	path = ModernGekko/vendor/dolphin/Externals/spirv_cross/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+	shallow = true
+[submodule "Externals/tinygltf/tinygltf"]
+	path = ModernGekko/vendor/dolphin/Externals/tinygltf/tinygltf
+	url = https://github.com/syoyo/tinygltf.git
+	shallow = true
+[submodule "Externals/watcher/watcher"]
+	path = ModernGekko/vendor/dolphin/Externals/watcher/watcher
+	url = https://github.com/e-dant/watcher.git
+	shallow = true
+[submodule "Externals/wil"]
+	path = ModernGekko/vendor/dolphin/Externals/wil
+	url = https://github.com/microsoft/wil.git
+	shallow = true
+[submodule "Externals/xxhash/xxHash"]
+	path = ModernGekko/vendor/dolphin/Externals/xxhash/xxHash
+	url = https://github.com/Cyan4973/xxHash.git
+	shallow = true
+[submodule "Externals/zlib-ng/zlib-ng"]
+	path = ModernGekko/vendor/dolphin/Externals/zlib-ng/zlib-ng
+	url = https://github.com/zlib-ng/zlib-ng.git
+	shallow = true
+[submodule "Externals/zstd/zstd"]
+	path = ModernGekko/vendor/dolphin/Externals/zstd/zstd
+	url = https://github.com/facebook/zstd.git
+	shallow = true
+[submodule "SDL"]
+	path = ModernGekko/vendor/dolphin/Externals/SDL/SDL
+	url = https://github.com/libsdl-org/SDL.git
+	shallow = true
+[submodule "hidapi-src"]
+	path = ModernGekko/vendor/dolphin/Externals/hidapi/hidapi-src
+	url = https://github.com/libusb/hidapi.git
+	shallow = true
+[submodule "libusb"]
+	path = ModernGekko/vendor/dolphin/Externals/libusb/libusb
+	url = https://github.com/libusb/libusb.git
+	shallow = true

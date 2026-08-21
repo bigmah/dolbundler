@@ -31,28 +31,27 @@ for tool in cmake ninja git python3 cargo; do
   command -v "$tool" >/dev/null || { echo "$tool is required but not installed" >&2; exit 1; }
 done
 
-# ModernGekko is a pinned submodule of this repo. A plain `git clone` leaves it
-# as an empty directory, so init it here rather than making everyone remember
-# --recursive.
-step "Checking out ModernGekko"
-if [ ! -f "$MG_SRC/CMakeLists.txt" ]; then
-  echo "    initialising the ModernGekko submodule"
-  git -C "$ROOT" submodule update --init ModernGekko
-fi
-[ -f "$MG_SRC/CMakeLists.txt" ] || {
-  echo "ModernGekko checkout not found at $MG_SRC" >&2
-  echo "Run: git -C $ROOT submodule update --init ModernGekko" >&2
-  exit 1
-}
+# ModernGekko, RecompCore (vendor/dolphin) and DolRecomp all live directly in
+# this repo, so a plain `git clone` already has them. Check anyway: a truncated
+# or half-copied tree fails later, in CMake, with a much less obvious message.
+step "Checking the runtime sources"
+for f in "$MG_SRC/CMakeLists.txt" \
+         "$MG_SRC/vendor/dolphin/CMakeLists.txt" \
+         "$MG_SRC/vendor/dolphin/DolRecomp/CMakeLists.txt"; do
+  [ -f "$f" ] || {
+    echo "missing $f" >&2
+    echo "That is part of this repo, so the checkout at $ROOT is incomplete." >&2
+    exit 1
+  }
+done
+echo "    ModernGekko, RecompCore and DolRecomp are in-tree"
 
-# DolRecomp is a submodule of the vendored Dolphin, so check for it too: a
-# vendor/dolphin that is present but missing a nested checkout fails later, in
-# CMake, with a much less obvious message.
-step "Checking out ModernGekko's vendored runtime"
-if [ ! -f "$MG_SRC/vendor/dolphin/CMakeLists.txt" ] ||
-   [ ! -f "$MG_SRC/vendor/dolphin/DolRecomp/CMakeLists.txt" ]; then
-  echo "    fetching RecompCore and its externals (this is a few hundred MB)"
-  git -C "$MG_SRC" submodule update --init --recursive --depth 1 vendor/dolphin
+# Dolphin's third-party externals are the one thing still fetched separately.
+# They are upstream submodules pinned here, so a plain clone leaves them empty.
+step "Checking out Dolphin's externals"
+if [ ! -f "$MG_SRC/vendor/dolphin/Externals/fmt/fmt/CMakeLists.txt" ]; then
+  echo "    fetching the externals (this is a few hundred MB)"
+  git -C "$ROOT" submodule update --init --recursive --depth 1
 else
   echo "    already present"
 fi
