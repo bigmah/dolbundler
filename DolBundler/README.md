@@ -18,14 +18,13 @@ mario_party_4.iso  ──▶  DolBundler  ──▶  ~/Applications/Mario Party 
 | `DolBundler/gui` | the Dioxus window — library, live console, one-click play |
 | `DolBundler/src` | the pipeline the window drives, usable on its own |
 
-`DolRecomp` and `ModernGekko` are upstream projects. `DolBundler` is the glue
-that turns their CLI tools into something you can double-click.
+`DolRecomp` and `ModernGekko` began as separate projects. `DolBundler` is the
+glue that turns their CLI tools into something you can double-click.
 
-`ModernGekko` is a pinned submodule at the repo root. `DolRecomp` is not a
-direct dependency — it is built from `ModernGekko/vendor/dolphin/DolRecomp`
-through ModernGekko's own submodule chain, so that is the tree to edit if you
-need to hack on the recompiler. See the [root README](../README.md) for the
-full wiring and for how to bump the pin.
+Both are vendored directly into this repo: `ModernGekko` at the repo root, and
+`DolRecomp` at `ModernGekko/vendor/dolphin/DolRecomp`. The recompiler is built
+through ModernGekko's CMake, so that is the tree to edit if you need to hack on
+it. See the [root README](../README.md) for the full wiring.
 
 ## Install
 
@@ -35,13 +34,12 @@ cd recomp_gc
 ./DolBundler/build.sh
 ```
 
-If you forgot `--recursive`, `build.sh` initialises the ModernGekko submodule
-for you.
+If you forgot `--recursive`, `build.sh` fetches Dolphin's externals for you.
 
-The first run fetches ModernGekko's vendored RecompCore/Dolphin tree (a few
-hundred MB), builds it, builds the window, and installs `DolBundler.app` to
-`~/Applications`. A cold build compiles all of Dolphin, so expect it to take a
-while; later runs reuse the build directory.
+All the code is in the clone; the first run fetches only Dolphin's third-party
+externals (a few hundred MB), builds them, builds the window, and installs
+`DolBundler.app` to `~/Applications`. A cold build compiles all of Dolphin, so
+expect it to take a while; later runs reuse the build directory.
 
 Requirements: Xcode command line tools, `cmake`, `ninja`, `python3`, `cargo`.
 Apple Silicon and Intel are both fine — the recompiled module is built for
