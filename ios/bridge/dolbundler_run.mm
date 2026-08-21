@@ -105,6 +105,13 @@ void AttachOverriderWhenPadsExist(Core::State state)
 // backend and the core were doing.
 void ForceDolphinFileLog()
 {
+  // Off unless asked for. At LDEBUG Dolphin logs a line per DVD read, which is
+  // a real drag on frame rate and fills the container -- fine while hunting a
+  // boot failure, not something to ship enabled.
+  const char* wanted = getenv("DOLBUNDLER_DEBUG_LOG");
+  if (!wanted || wanted[0] != '1')
+    return;
+
   using namespace Common::Log;
   LogManager* manager = LogManager::GetInstance();
   if (!manager)

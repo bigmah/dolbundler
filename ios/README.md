@@ -124,6 +124,44 @@ controller is connected.
 | AGL / OpenGL | Metal only |
 | NoGUI / Qt frontends, updater | Desktop-only; the app links the libraries directly |
 
+## Debugging a failed boot
+
+A boot failure on iOS is a SIGKILL: no crash report, no stdout, and Dolphin's
+own log stops part way through. Three things exist because of that.
+
+`Documents/moderngekko/dolbundler-run.log` gets a line per boot step with the
+process footprint at that moment, written straight through and flushed, so it
+survives the kill. `Core.cpp` traces the core boot into the same file through a
+function pointer that is null everywhere except this app. And
+`DOLBUNDLER_DEBUG_LOG=1` turns Dolphin's own log on at LDEBUG -- useful, but it
+writes a line per DVD read, so leave it off unless you are chasing something.
+
+**The simulator is the better loop.** It produces a real crash report with a
+stack trace, which the device does not:
+
+```sh
+cmake -S ios -B build-sim -G Xcode -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DENABLE_GENERIC=ON
+xcodebuild -project build-sim/DolBundlerIOS.xcodeproj -target DolBundler \
+  -configuration Release -sdk iphonesimulator -arch arm64 CODE_SIGNING_ALLOWED=NO build
+```
+
+There is no way to script a tap, so `DOLBUNDLER_AUTOPLAY=<disc id>` starts a
+game directly. It works on both:
+
+```sh
+SIMCTL_CHILD_DOLBUNDLER_AUTOPLAY=GLME01 xcrun simctl launch --console-pty <udid> com.bigmah.dolbundler
+DEVICECTL_CHILD_DOLBUNDLER_AUTOPLAY=GLME01 xcrun devicectl device process launch --device <id> com.bigmah.dolbundler
+```
+
+Crash reports land in `~/Library/Logs/DiagnosticReports/DolBundler-*.ips`.
+
+One more loop worth knowing: a macOS build with `ENABLE_GENERIC=ON` runs the
+same JIT-less StaticRecomp/DolVM path against the same `.dvm`, in seconds, with
+a debugger. It will not reproduce anything iOS-specific, but it tells you
+straight away whether the interpreter or the module is at fault.
+
 ## Known limitations
 
 **No audio.** cubeb is disabled, so `AudioCommon` falls back to its null
