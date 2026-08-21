@@ -112,12 +112,30 @@ SDL3 builds for iOS and handles MFi and Bluetooth pads. The on-screen pad feeds
 carries no Android dependencies. The overlay hides itself whenever a real
 controller is connected.
 
+## Audio
+
+`AudioCommon/IOSSoundStream.mm` outputs through a RemoteIO audio unit at 48 kHz
+stereo, which is the format `Mixer` already produces. It registers as the
+`AudioUnit` backend and is the default on iOS.
+
+It exists because the vendored cubeb cannot build for iOS: its AudioUnit
+backend declares macOS-only CoreAudio device-enumeration types and constants at
+file scope, and the errors run the length of the file. None of that machinery
+is needed here -- iOS has one output device, the system owns it, and the app
+never enumerates or switches it -- so this talks to RemoteIO directly, which is
+the same thing cubeb would do underneath.
+
+The session category is `Playback`, so a game keeps its sound with the ringer
+switch off, and the session is deactivated with
+`NotifyOthersOnDeactivation` when the stream is torn down so other audio is not
+left ducked.
+
 ## What is disabled, and why
 
 | Dropped | Reason |
 |---|---|
 | All JIT backends | `ENABLE_GENERIC`; the whole point of DolVM |
-| cubeb (audio) | The vendored copy declares macOS-only CoreAudio globals at file scope with no iOS guard. **There is currently no audio.** |
+| cubeb (audio) | The vendored copy declares macOS-only CoreAudio globals at file scope with no iOS guard -- 164 compile errors spread through the file, which is a fork of a third-party library rather than a patch. Replaced by `IOSSoundStream`, a RemoteIO audio unit. |
 | libusb, hidapi | Both need IOKit. The devices they drive can't attach to an iPhone anyway |
 | Quartz input | Carbon key codes and CoreGraphics mouse events |
 | FSEvents watcher | No FSEvents on iOS; asset hot-reload is a no-op |

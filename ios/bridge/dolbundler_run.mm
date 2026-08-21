@@ -160,9 +160,9 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   config.user_directory = user_dir;
   config.module = moderngekko::ModuleSource::BytecodePath(module_path);
   config.graphics.backend = "Metal";
-  // No cubeb on iOS, so there is no device-backed sound stream to ask for.
-  // AudioCommon falls back to its null stream when the backend is unknown.
-  config.audio.backend = "";
+  // AudioCommon's own default resolves to this on iOS too, but naming it means
+  // a silent game is a wrong-backend bug rather than an unnoticed fallback.
+  config.audio.backend = "AudioUnit";
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
   // A .dvm covers the whole title; letting the chassis fall back to its own

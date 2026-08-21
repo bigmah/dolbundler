@@ -83,6 +83,16 @@ if(WIN32)
   endif()
 endif()
 
+if(DOLPHIN_IOS)
+  target_sources(audiocommon PRIVATE
+    IOSSoundStream.h
+    IOSSoundStream.mm
+  )
+  set_source_files_properties(IOSSoundStream.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  target_link_libraries(audiocommon PRIVATE
+    "-framework AVFoundation" "-framework AudioToolbox")
+endif()
+
 target_link_libraries(audiocommon
 PUBLIC
   common
