@@ -7,7 +7,10 @@
 #include <TargetConditionals.h>
 
 #if TARGET_OS_OSX
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
 #include <AppKit/AppKit.h>
+#endif
 #endif
 
 #include <Metal/Metal.h>
@@ -56,6 +59,7 @@ static bool WindowSystemTypeSupportsMetal(WindowSystemType type)
   switch (type)
   {
   case WindowSystemType::MacOS:
+  case WindowSystemType::iOS:
   case WindowSystemType::Headless:
     return true;
   default:

@@ -56,6 +56,13 @@ public:
   static std::unique_ptr<Platform> CreateMacOSPlatform();
 #endif
 
+#ifdef MODERNGEKKO_HAVE_UIKIT
+  // The layer is created and owned by the host app; the runtime only draws
+  // into it. Must be set before Init().
+  static void SetIOSRenderLayer(void* ca_metal_layer, float scale);
+  static std::unique_ptr<Platform> CreateIOSPlatform();
+#endif
+
 protected:
   void UpdateRunningFlag();
 

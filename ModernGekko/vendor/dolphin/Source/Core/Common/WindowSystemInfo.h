@@ -8,6 +8,10 @@ enum class WindowSystemType
   Headless,
   Windows,
   MacOS,
+  // iOS renders into a CAMetalLayer the host app owns, rather than into a view
+  // the runtime creates. It is a separate type from MacOS so the AppKit-only
+  // paths (Quartz input, GL contexts, PrepareWindow) do not claim it.
+  iOS,
   Android,
   X11,
   Wayland,

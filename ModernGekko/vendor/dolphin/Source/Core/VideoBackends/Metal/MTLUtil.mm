@@ -78,8 +78,14 @@ void Metal::Util::PopulateBackendInfo(BackendInfo* backend_info)
   backend_info->bSupportsPartialMultisampleResolve = false;
   backend_info->bSupportsDynamicVertexLoader = true;
   backend_info->bSupportsVSLinePointExpand = true;
+#if TARGET_OS_OSX
   backend_info->bSupportsHDROutput =
       1.0 < [[NSScreen deepestScreen] maximumPotentialExtendedDynamicRangeColorComponentValue];
+#else
+  // UIScreen exposes EDR headroom per-screen at runtime rather than as a static
+  // capability, and the layer is owned by the host app on iOS. Report no HDR.
+  backend_info->bSupportsHDROutput = false;
+#endif
 }
 
 void Metal::Util::PopulateBackendInfoAdapters(BackendInfo* backend_info,

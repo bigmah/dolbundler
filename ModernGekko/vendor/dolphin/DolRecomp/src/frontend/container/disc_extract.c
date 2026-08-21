@@ -541,6 +541,53 @@ static ExtractResult extract_gamecube_iso_native(const Options* opts) {
     return EXTRACT_OK;
 }
 
+int disc_probe_gamecube(const char* image_path, char* disc_id, char* title) {
+    if (!image_path)
+        return 0;
+
+    RawReader reader;
+    if (!raw_reader_open(&reader, image_path))
+        return 0;
+    u8 header[0x440];
+    const int read_ok = read_at(&reader, 0, header, sizeof(header));
+    raw_reader_close(&reader);
+    if (!read_ok)
+        return 0;
+    if (read_be32(header + 0x1c) != GC_MAGIC)
+        return 0;
+
+    if (disc_id) {
+        memcpy(disc_id, header, 6);
+        disc_id[6] = '\0';
+    }
+    if (title) {
+        memcpy(title, header + 0x20, 64);
+        title[64] = '\0';
+        // The field is space padded rather than NUL padded on some discs.
+        for (int i = 63; i >= 0 && (title[i] == ' ' || title[i] == '\0'); i--)
+            title[i] = '\0';
+    }
+    return 1;
+}
+
+int disc_extract_gamecube(const char* image_path, const char* output_dir,
+                          char* disc_id, char* title) {
+    if (!image_path || !output_dir)
+        return 0;
+
+    // Identity has to be read before extracting: the extractor closes the
+    // image before it returns.
+    if ((disc_id || title) && !disc_probe_gamecube(image_path, disc_id, title))
+        return 0;
+
+    Options opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.input_path = image_path;
+    opts.output_dir = output_dir;
+    opts.native_only = 1;
+    return extract_gamecube_iso_native(&opts) == EXTRACT_OK;
+}
+
 static int print_native_info(const char* path) {
     RawReader reader;
     u8 header[0x500];
@@ -626,7 +673,12 @@ static int command_exists(const char* exe) {
     snprintf(cmd, sizeof(cmd), "%s --version >/dev/null 2>/dev/null", qexe);
 #endif
     free(qexe);
+#ifdef DOLRECOMP_NO_SUBPROCESS
+    (void)cmd;  // no subprocesses on iOS; wit is never reachable there
+    return 0;
+#else
     return system(cmd) == 0;
+#endif
 }
 
 static ExtractResult extract_with_wit(const Options* opts) {
@@ -677,7 +729,11 @@ static ExtractResult extract_with_wit(const Options* opts) {
     snprintf(cmd, cmd_size, "%s EXTRACT -o %s %s", qwit, qin, qout);
 #endif
     printf("using wit bridge\n");
-    int rc = system(cmd);
+#ifdef DOLRECOMP_NO_SUBPROCESS
+    const int rc = -1;  // unreachable on iOS: wit_available() is always false
+#else
+    const int rc = system(cmd);
+#endif
 
     free(cmd);
     free(qwit);

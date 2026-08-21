@@ -56,7 +56,10 @@
 #endif
 
 #ifdef __APPLE__
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#endif
 #endif
 
 namespace UICommon
@@ -517,7 +520,7 @@ void InhibitScreenSaver(bool inhibit)
                           (inhibit ? (ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) : 0));
 #endif
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && TARGET_OS_OSX
   static IOPMAssertionID s_power_assertion = kIOPMNullAssertionID;
   if (inhibit)
   {

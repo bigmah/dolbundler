@@ -54,7 +54,16 @@ char* shell_quote_arg(const char* arg) {
 }
 
 int run_shell_command(const char* command) {
+#ifdef DOLRECOMP_NO_SUBPROCESS
+    // iOS has no process spawning at all -- the SDK marks system() unavailable
+    // rather than failing at runtime. Every caller of this is an optional
+    // convenience (probing for a tool, fetching the titles database), so
+    // reporting failure degrades to "that tool is not here", which is true.
+    (void)command;
+    return 0;
+#else
     return system(command) == 0;
+#endif
 }
 
 int command_exists_quiet(const char* command_name) {

@@ -16,6 +16,13 @@ if(DOLRECOMP_ENABLE_LLVM)
     endif()
 endif()
 
+# iOS forbids process spawning outright, and its SDK marks system() unavailable
+# at compile time. The only callers are optional external-tool bridges (wit,
+# curl), so they are compiled out rather than ported.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_compile_definitions(DOLRECOMP_NO_SUBPROCESS=1)
+endif()
+
 # Portable warnings for local development and CI.
 if(MSVC)
     add_compile_options(/W3)

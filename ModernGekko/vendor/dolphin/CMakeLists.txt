@@ -23,6 +23,14 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 project(dolphin-emu)
 
+# iOS is an Apple platform but shares almost none of macOS's desktop surface:
+# no AppKit, no FSEvents, no AGL, no IOKit, no subprocesses. DOLPHIN_IOS marks
+# the places that have to diverge, rather than overloading APPLE to mean macOS.
+# It is set before the option() block so defaults can key off it.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(DOLPHIN_IOS TRUE)
+endif()
+
 if (CMAKE_VERSION VERSION_LESS "3.25" AND CMAKE_SYSTEM_NAME MATCHES "Linux")
   set(LINUX TRUE)
 endif()
@@ -97,6 +105,26 @@ option(ENABLE_VULKAN "Enables vulkan video backend" ON)
 option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence, show the current game on Discord" ON)
 option(USE_MGBA "Enables GBA controllers emulation using libmgba" ON)
 option(ENABLE_AUTOUPDATE "Enables support for automatic updates" ON)
+
+if(DOLPHIN_IOS)
+  # These are set after the option() block, and FORCEd, so neither a default
+  # nor a stale cache entry from an earlier configure can turn them back on.
+  #
+  # cubeb: the vendored copy declares macOS-only CoreAudio device-enumeration
+  # globals at file scope with no iOS guard, so its AudioUnit backend cannot
+  # build. AudioCommon falls back to NullSoundStream.
+  # The frontends and the updater are desktop-only; the app links the runtime
+  # libraries directly instead.
+  # Cross-compiling: a "system" library here means whatever Homebrew installed
+  # for macOS, which is the wrong platform entirely. Found lz4 and zstd that
+  # way and failed at link. Everything comes from Externals on iOS.
+  set(USE_SYSTEM_LIBS OFF CACHE STRING "" FORCE)
+  set(ENABLE_CUBEB OFF CACHE BOOL "" FORCE)
+  set(ENABLE_NOGUI OFF CACHE BOOL "" FORCE)
+  set(ENABLE_QT OFF CACHE BOOL "" FORCE)
+  set(ENABLE_CLI_TOOL OFF CACHE BOOL "" FORCE)
+  set(ENABLE_AUTOUPDATE OFF CACHE BOOL "" FORCE)
+endif()
 option(USE_RETRO_ACHIEVEMENTS "Enables integration with retroachievements.org" ON)
 
 # Maintainers: if you consider blanket disabling this for your users, please
@@ -715,7 +743,9 @@ if(ENABLE_CUBEB)
   add_definitions(-DHAVE_CUBEB)
 endif()
 
-if(NOT ANDROID)
+# libusb and hidapi both reach for IOKit, which iOS does not expose. The devices
+# they drive (GameCube adapters, real Wii remotes) cannot be attached there.
+if(NOT ANDROID AND NOT DOLPHIN_IOS)
   dolphin_find_optional_system_library(LibUSB Externals/libusb)
   add_definitions(-D__LIBUSB__)
 endif()
@@ -743,7 +773,7 @@ dolphin_find_optional_system_library(MBEDTLS Externals/mbedtls 2.28)
 
 dolphin_find_optional_system_library(CURL Externals/curl)
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT DOLPHIN_IOS)
   dolphin_find_optional_system_library(HIDAPI Externals/hidapi)
 endif()
 

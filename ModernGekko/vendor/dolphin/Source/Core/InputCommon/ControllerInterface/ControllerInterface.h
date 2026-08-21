@@ -23,7 +23,12 @@
 #define CIFACE_USE_XLIB
 #endif
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
+// Quartz is Carbon key codes and CoreGraphics mouse events. iOS has neither;
+// it gets physical pads through SDL and on-screen ones through ciface::Touch.
+#if TARGET_OS_OSX
 #define CIFACE_USE_OSX
+#endif
 #endif
 #if defined(HAVE_LIBEVDEV) && defined(HAVE_LIBUDEV)
 #define CIFACE_USE_EVDEV

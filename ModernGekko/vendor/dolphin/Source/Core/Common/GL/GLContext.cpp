@@ -1,6 +1,10 @@
 // Copyright 2014 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include <memory>
 
 #include "Common/GL/GLContext.h"
@@ -79,7 +83,7 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowSystemInfo& wsi, bool s
                                              bool prefer_gles)
 {
   std::unique_ptr<GLContext> context;
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
   if (wsi.type == WindowSystemType::MacOS || wsi.type == WindowSystemType::Headless)
     context = std::make_unique<GLContextAGL>();
 #endif

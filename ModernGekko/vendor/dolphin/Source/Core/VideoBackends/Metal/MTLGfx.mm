@@ -1,6 +1,7 @@
 // Copyright 2022 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <TargetConditionals.h>
 #include "VideoBackends/Metal/MTLGfx.h"
 
 #include "VideoBackends/Metal/MTLBoundingBox.h"
@@ -21,7 +22,9 @@
 Metal::Gfx::Gfx(MRCOwned<CAMetalLayer*> layer) : m_layer(std::move(layer))
 {
   UpdateActiveConfig();
+#if TARGET_OS_OSX
   [m_layer setDisplaySyncEnabled:g_ActiveConfig.bVSyncActive];
+#endif
 
   SetupSurface();
   g_state_tracker->FlushEncoders();
@@ -288,8 +291,10 @@ void Metal::Gfx::OnConfigChanged(u32 bits)
 {
   AbstractGfx::OnConfigChanged(bits);
 
+#if TARGET_OS_OSX
   if (bits & CONFIG_CHANGE_BIT_VSYNC)
     [m_layer setDisplaySyncEnabled:g_ActiveConfig.bVSyncActive];
+#endif
 
   if (bits & CONFIG_CHANGE_BIT_ANISOTROPY)
   {

@@ -3,12 +3,17 @@
 
 #include "InputCommon/GCAdapter.h"
 
-#ifndef ANDROID
+#if defined(ANDROID)
+#define GCADAPTER_USE_LIBUSB_IMPLEMENTATION false
+#define GCADAPTER_USE_ANDROID_IMPLEMENTATION true
+#elif defined(__LIBUSB__)
 #define GCADAPTER_USE_LIBUSB_IMPLEMENTATION true
 #define GCADAPTER_USE_ANDROID_IMPLEMENTATION false
 #else
+// No USB host stack (iOS). Every entry point below compiles to a stub that
+// reports no adapter, which is the same answer as one being unplugged.
 #define GCADAPTER_USE_LIBUSB_IMPLEMENTATION false
-#define GCADAPTER_USE_ANDROID_IMPLEMENTATION true
+#define GCADAPTER_USE_ANDROID_IMPLEMENTATION false
 #endif
 
 #include <array>

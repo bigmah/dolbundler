@@ -26,7 +26,9 @@
 #include "Common/Thread.h"
 #endif
 
-#if defined(__APPLE__)
+// A generic build installs no fastmem handler at all (see the _M_GENERIC branch
+// below), so it has no thread state to name and must not trip the #error.
+#if defined(__APPLE__) && !defined(_M_GENERIC)
 #ifdef _M_X86_64
 #define THREAD_STATE64_COUNT x86_THREAD_STATE64_COUNT
 #define THREAD_STATE64 x86_THREAD_STATE64
@@ -120,7 +122,7 @@ bool IsExceptionHandlerSupported()
   return true;
 }
 
-#elif defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE)
+#elif defined(__APPLE__) && !defined(USE_SIGACTION_ON_APPLE) && !defined(_M_GENERIC)
 
 static void CheckKR(const char* name, kern_return_t kr)
 {

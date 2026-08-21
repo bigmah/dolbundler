@@ -113,6 +113,18 @@ if(WIN32)
     )
   endif()
   target_link_libraries(inputcommon PRIVATE cfgmgr32.lib dinput8.lib dxguid.lib)
+elseif(DOLPHIN_IOS)
+  # Quartz here means Carbon key codes and CoreGraphics mouse events: desktop
+  # input that iOS has no counterpart for. Physical pads arrive through the SDL
+  # backend above; the on-screen ones are fed in through the touch overrider,
+  # which is the same mechanism the Android overlay uses and carries no Android
+  # dependencies of its own.
+  target_sources(inputcommon PRIVATE
+    ControllerInterface/Touch/InputOverrider.cpp
+    ControllerInterface/Touch/InputOverrider.h
+  )
+  target_link_libraries(inputcommon PRIVATE ${COREFOUNDATION_LIBRARY})
+  target_compile_options(inputcommon PRIVATE -fobjc-arc)
 elseif(APPLE)
   target_sources(inputcommon PRIVATE
     ControllerInterface/Quartz/Quartz.h
@@ -149,7 +161,7 @@ elseif(ANDROID)
   )
 endif()
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT DOLPHIN_IOS)
   target_link_libraries(inputcommon PUBLIC LibUSB::LibUSB)
 endif()
 

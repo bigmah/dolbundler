@@ -3,6 +3,40 @@
 
 #include "Common/FilesystemWatcher.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+
+// The watcher library's only Apple backend is FSEvents, which is not available
+// on iOS. Nothing there hot-reloads assets off disk, so the whole class becomes
+// a no-op that still satisfies its interface. wtr::watch is completed here only
+// so the unique_ptr in the (always empty) member map can be destroyed.
+namespace wtr
+{
+inline namespace watcher
+{
+class watch
+{
+};
+}  // namespace watcher
+}  // namespace wtr
+
+namespace Common
+{
+FilesystemWatcher::FilesystemWatcher() = default;
+FilesystemWatcher::~FilesystemWatcher() = default;
+void FilesystemWatcher::Watch(const std::string& path)
+{
+}
+void FilesystemWatcher::Unwatch(const std::string& path)
+{
+}
+}  // namespace Common
+
+#else
+
 #include <wtr/watcher.hpp>
 
 #include "Common/Logging/Log.h"
@@ -65,3 +99,5 @@ void FilesystemWatcher::Unwatch(const std::string& path)
   m_watched_paths.erase(path);
 }
 }  // namespace Common
+
+#endif

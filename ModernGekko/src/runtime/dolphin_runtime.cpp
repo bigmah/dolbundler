@@ -282,6 +282,11 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
 #ifdef MODERNGEKKO_HAVE_COCOA
   else impl->platform = Platform::CreateMacOSPlatform();
 #endif
+#ifdef MODERNGEKKO_HAVE_UIKIT
+  // Fails Init() if the app has not handed over a render layer yet, which
+  // surfaces as PlatformUnavailable rather than a crash in the video backend.
+  else impl->platform = Platform::CreateIOSPlatform();
+#endif
 #ifdef HAVE_X11
   else if (impl->config.window_system != WindowSystem::Wayland) impl->platform =
       Platform::CreateX11Platform();

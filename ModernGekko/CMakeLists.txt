@@ -349,7 +349,19 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformWin32.cpp)
         target_link_libraries(moderngekko PRIVATE dwmapi)
     endif()
-    if(APPLE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # The host app owns the window on iOS; this only reports the layer it
+        # is given. See PlatformIOS.mm for why the ownership is inverted.
+        target_sources(moderngekko PRIVATE
+            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformIOS.mm)
+        set_source_files_properties(
+            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformIOS.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(moderngekko PRIVATE
+            "-framework UIKit" "-framework QuartzCore" "-framework Metal"
+            "${COREFOUNDATION_LIBRARY}")
+        target_compile_definitions(moderngekko PRIVATE MODERNGEKKO_HAVE_UIKIT=1)
+    elseif(APPLE)
         # Dolphin's windowed backend for macOS
         target_sources(moderngekko PRIVATE
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformMacos.mm)

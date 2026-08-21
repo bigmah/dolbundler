@@ -195,16 +195,28 @@ PRIVATE
   CURL::libcurl
   FatFs
   spng::spng
-  watcher
   ${VTUNE_LIBRARIES}
 )
+
+# The watcher library's only Apple backend is FSEvents, which iOS does not
+# provide. FilesystemWatcher.cpp compiles to a no-op there instead.
+if(NOT DOLPHIN_IOS)
+  target_link_libraries(common PRIVATE watcher)
+endif()
 
 if ((DEFINED CMAKE_ANDROID_ARCH_ABI AND CMAKE_ANDROID_ARCH_ABI MATCHES "x86|x86_64") OR
     (NOT DEFINED CMAKE_ANDROID_ARCH_ABI AND _M_X86_64))
   target_link_libraries(common PRIVATE bdisasm)
 endif()
 
-if (APPLE)
+if (DOLPHIN_IOS)
+  # iOS has Foundation and CoreFoundation but no AppKit and no IOKit.
+  target_link_libraries(common
+  PRIVATE
+    ${COREFOUNDATION_LIBRARY}
+    ${FOUNDATION_LIBRARY}
+  )
+elseif (APPLE)
   target_link_libraries(common
   PRIVATE
     ${APPKIT_LIBRARY}
@@ -327,7 +339,7 @@ if(WIN32)
   if(MSVC)
     target_sources(common PRIVATE CompatPatches.cpp)
   endif()
-elseif(APPLE)
+elseif(APPLE AND NOT DOLPHIN_IOS)
   target_sources(common PRIVATE
     GL/GLInterface/AGL.h
     GL/GLInterface/AGL.mm
