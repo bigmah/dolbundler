@@ -97,9 +97,9 @@ ship with, which rules the native path out on iOS however the recompilation is
 packaged. Everything else is the same — same recompiler, same analysis, same
 runtime, same coverage and self-modifying-code checks. It is only slower to
 play, by an amount that depends on the game: measured against the Gekko's
-486 MHz with a window open, Super Smash Bros Melee runs at 0.98x, The SpongeBob
-SquarePants Movie at 0.90x and Mario Party 4 at 0.73x, where native is at the
-frame limiter for all three.
+486 MHz with a window open, Super Smash Bros Melee runs at full speed, The
+SpongeBob SquarePants Movie at about 0.95x and Mario Party 4 at about 0.87x,
+where native is at the frame limiter for all three.
 
 It is also the quickest way to find out whether a disc recompiles and boots at
 all, since it takes seconds rather than minutes.
