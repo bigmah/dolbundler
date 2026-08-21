@@ -1,3 +1,4 @@
 [submodule "ModernGekko"]
 	path = ModernGekko
-	url = https://github.com/ExpansionPak/ModernGekko.git
+	url = git@github.com:bigmah/ModernGekko.git
+	branch = dolvm-stack
