@@ -24,6 +24,8 @@
   DBMetalView* _metalView;
   DBTouchPadView* _pad;
   UIButton* _closeButton;
+  UILabel* _status;
+  UIActivityIndicatorView* _spinner;
   BOOL _started;
 }
 
@@ -33,6 +35,28 @@
   if (self)
     _game = game;
   return self;
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+  [super viewWillAppear:animated];
+
+  // Returning a landscape mask from supportedInterfaceOrientations is not
+  // enough on iOS 16 and later: a modal does not re-evaluate orientation on
+  // its own, so the scene has to be asked to change geometry. Without this the
+  // game renders sideways inside a portrait frame.
+  if (@available(iOS 16.0, *))
+  {
+    UIWindowScene* scene = self.view.window.windowScene;
+    if (scene)
+    {
+      UIWindowSceneGeometryPreferencesIOS* prefs =
+          [[UIWindowSceneGeometryPreferencesIOS alloc]
+              initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape];
+      [scene requestGeometryUpdateWithPreferences:prefs errorHandler:nil];
+    }
+    [self setNeedsUpdateOfSupportedInterfaceOrientations];
+  }
 }
 
 - (void)viewDidLoad
@@ -47,6 +71,23 @@
   _pad = [[DBTouchPadView alloc] initWithFrame:self.view.bounds];
   _pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
   [self.view addSubview:_pad];
+
+  // Create() spends about twelve seconds verifying the bytecode module against
+  // the DOL before anything is drawn. Without this the screen is simply black
+  // for that whole time, which reads as a hang.
+  _status = [[UILabel alloc] initWithFrame:self.view.bounds];
+  _status.text = [NSString stringWithFormat:@"Starting %@\u2026", _game.title];
+  _status.textAlignment = NSTextAlignmentCenter;
+  _status.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
+  _status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+  _status.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  [self.view addSubview:_status];
+
+  _spinner = [[UIActivityIndicatorView alloc]
+      initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+  _spinner.color = [UIColor colorWithWhite:1.0 alpha:0.55];
+  [_spinner startAnimating];
+  [self.view addSubview:_spinner];
 
   _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
   [_closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"]
@@ -91,6 +132,9 @@
   _closeButton.frame =
       CGRectMake(self.view.safeAreaInsets.left + inset, self.view.safeAreaInsets.top + inset, size,
                  size);
+  _status.frame = self.view.bounds;
+  _spinner.center = CGPointMake(CGRectGetMidX(self.view.bounds),
+                                CGRectGetMidY(self.view.bounds) + 28);
 
   CAMetalLayer* layer = (CAMetalLayer*)_metalView.layer;
   layer.contentsScale = UIScreen.mainScreen.nativeScale;
@@ -114,6 +158,14 @@
 
   DBGameEntry* game = _game;
   NSString* userDir = DBLibrary.shared.userDirectory;
+
+  // Nothing reports "first frame drawn", so this clears once boot has had long
+  // enough to reach the point where the game is drawing over it anyway.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(18 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   [self->_spinner stopAnimating];
+                   self->_status.hidden = YES;
+                 });
 
   // db_run_game() blocks for the whole session, so it gets its own thread.
   // User-interactive QoS: this thread is the emulation, and letting the
