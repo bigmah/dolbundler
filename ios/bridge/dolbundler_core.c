@@ -71,7 +71,8 @@ int db_probe_iso(const char* iso_path, DBGame* game, char* err, size_t err_size)
   {
     set_err(err, err_size,
             "That file is not a GameCube disc image this build can read. "
-            "Only uncompressed .iso is supported.");
+            "Supported: .iso, .ciso, and NKit .nkit.iso. Wii discs and .rvz "
+            "are not.");
     return 0;
   }
   return 1;

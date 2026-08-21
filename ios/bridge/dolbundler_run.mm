@@ -2,8 +2,11 @@
 
 #include "dolbundler_run.h"
 
+#include "Core/Core.h"
+#include "Core/HW/GCPad.h"
 #include "DolphinNoGUI/Platform.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
+#include "InputCommon/InputConfig.h"
 #include "moderngekko/runtime.hpp"
 
 #include <atomic>
@@ -24,6 +27,27 @@ std::atomic<bool> s_running{false};
 // paired over Bluetooth arrives through the SDL backend as its own device and
 // does not need an overrider.
 constexpr int kTouchPadIndex = 0;
+
+// The overrider can only be attached once the emulated pads exist, which does
+// not happen until Pad::LoadConfig() runs inside BootCore(). Attaching earlier
+// indexes an empty vector through InputConfig::GetController()'s .at(), which
+// is a hard crash rather than an error. So registration waits for the core to
+// report Running, and every touch is dropped until then.
+std::atomic<bool> s_overrider_ready{false};
+Common::EventHook s_state_hook;
+
+void AttachOverriderWhenPadsExist(Core::State state)
+{
+  if (state == Core::State::Uninitialized || state == Core::State::Stopping)
+    return;
+  if (s_overrider_ready.load())
+    return;
+  if (Pad::GetConfig()->GetControllerCount() <= kTouchPadIndex)
+    return;
+
+  ciface::Touch::RegisterGameCubeInputOverrider(kTouchPadIndex);
+  s_overrider_ready.store(true);
+}
 
 void set_err(char* err, size_t err_size, const std::string& message)
 {
@@ -75,13 +99,16 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     s_runtime = std::move(created.runtime);
   }
 
-  // Registered after the core exists, because it reaches into the emulated
-  // pad, and unregistered before the runtime is torn down.
-  ciface::Touch::RegisterGameCubeInputOverrider(kTouchPadIndex);
+  // Installed before Run() so no boot state transition is missed, but it only
+  // attaches the overrider once the pads actually exist.
+  s_overrider_ready.store(false);
+  s_state_hook = Core::AddOnStateChangedCallback(&AttachOverriderWhenPadsExist);
 
   const moderngekko::RuntimeRunResult result = s_runtime->Run();
 
-  ciface::Touch::UnregisterGameCubeInputOverrider(kTouchPadIndex);
+  if (s_overrider_ready.exchange(false))
+    ciface::Touch::UnregisterGameCubeInputOverrider(kTouchPadIndex);
+  s_state_hook.reset();
 
   {
     std::lock_guard<std::mutex> lock(s_runtime_mutex);
@@ -112,12 +139,18 @@ int db_is_running(void)
 
 void db_set_control(DBPadControl control, double state)
 {
+  // Dropped rather than queued: a touch that lands during boot is stale by the
+  // time the game reads it.
+  if (!s_overrider_ready.load())
+    return;
   ciface::Touch::SetControlState(kTouchPadIndex, static_cast<ciface::Touch::ControlID>(control),
                                  state);
 }
 
 void db_clear_control(DBPadControl control)
 {
+  if (!s_overrider_ready.load())
+    return;
   ciface::Touch::ClearControlState(kTouchPadIndex,
                                    static_cast<ciface::Touch::ControlID>(control));
 }

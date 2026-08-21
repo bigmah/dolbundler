@@ -32,9 +32,13 @@ folder in the Files app. `UIFileSharingEnabled` and
 `LSSupportsOpeningDocumentsInPlace` are both set, so the app's Documents folder
 is reachable from Files, iCloud Drive, or a Mac over USB.
 
-Only uncompressed GameCube `.iso` works. `.ciso`, `.rvz`, and `.gcm` do not —
-DolRecomp's native extractor reads `.iso` and `.wbfs`, and the `wit` bridge it
-would otherwise fall back to cannot run on iOS (see *No subprocesses* below).
+GameCube `.iso`, `.ciso`, and NKit `.nkit.iso` all work. CISO support was added
+to DolRecomp's native extractor for this (it detects the format by magic, not
+by extension, so a mislabelled file still opens), and NKit images extract
+because they keep the disc header and FST intact.
+
+`.rvz` and Wii discs do not work: both need the `wit` bridge, which cannot run
+on iOS (see *No subprocesses* below).
 
 ## Why this is allowed on the App Store
 

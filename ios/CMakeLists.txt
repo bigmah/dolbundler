@@ -63,6 +63,11 @@ target_link_libraries(DolBundler PRIVATE
   moderngekko_dolvm
   # The compiler half, for importing a disc on device.
   dr_app
+  # Dolphin's headers use fmt in inline code, so the app needs its include
+  # path even though the app itself never formats anything. Linking the target
+  # rather than hardcoding a path keeps this correct whether fmt comes from
+  # Externals or elsewhere.
+  fmt::fmt
 )
 
 target_compile_definitions(DolBundler PRIVATE MODERNGEKKO_HAVE_UIKIT=1)

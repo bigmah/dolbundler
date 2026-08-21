@@ -26,6 +26,15 @@
 #define MAX_PATH_BUF 4096
 #define COPY_CHUNK   0x10000u
 
+// CISO: a disc image with all-zero blocks omitted. The header is a fixed 32 KB
+// of magic, block size and a one-byte-per-block present/absent map; the blocks
+// that are present follow in order. Layout matches Dolphin's CISOBlob so the
+// same images work in both.
+#define CISO_MAGIC        0x4F534943u  // "CISO", read little-endian
+#define CISO_HEADER_SIZE  0x8000u
+#define CISO_MAP_SIZE     (CISO_HEADER_SIZE - 8u)
+#define CISO_UNUSED_BLOCK 0xFFFFFFFFu
+
 #ifdef _WIN32
 #define WIT_EXE_NAME "wit.exe"
 #else
@@ -49,7 +58,11 @@ typedef struct {
 
 typedef struct {
     FILE* file;
-    u64 size;
+    u64 size;         // logical size of the image, not of the file
+    // NULL for a plain image. Otherwise maps a logical block to its index in
+    // the file, or CISO_UNUSED_BLOCK for a block that was omitted as zeros.
+    u32* block_map;
+    u32 block_size;
 } RawReader;
 
 typedef struct {
@@ -71,7 +84,7 @@ static void print_usage(void) {
     printf("  --wit <path>       path to wit or wit.exe\n");
     printf("  --help, -h         show this help\n");
     printf("\n");
-    printf("supported inputs: .iso, .wbfs\n");
+    printf("supported inputs: .iso, .ciso, .wbfs\n");
     printf("native support: GameCube ISO filesystem extraction\n");
     printf("wit bridge: Wii ISO and WBFS extraction\n");
 }
@@ -113,8 +126,12 @@ static int is_wbfs_path(const char* path) {
     return ascii_ieq(path_extension(path), ".wbfs");
 }
 
+static int is_ciso_path(const char* path) {
+    return ascii_ieq(path_extension(path), ".ciso");
+}
+
 static int is_supported_image_path(const char* path) {
-    return is_iso_path(path) || is_wbfs_path(path);
+    return is_iso_path(path) || is_wbfs_path(path) || is_ciso_path(path);
 }
 
 static int seek_file_base(FILE* file, s64 offset, int origin) {
@@ -146,12 +163,43 @@ static int get_file_size(FILE* file, u64* size) {
     return seek_file(file, 0);
 }
 
-static int read_at(RawReader* reader, u64 offset, void* out, size_t size) {
-    if (offset > reader->size || size > reader->size - offset)
-        return 0;
+static int read_raw_at(RawReader* reader, u64 offset, void* out, size_t size) {
     if (!seek_file(reader->file, offset))
         return 0;
     return fread(out, 1, size, reader->file) == size;
+}
+
+static int read_at(RawReader* reader, u64 offset, void* out, size_t size) {
+    if (offset > reader->size || size > reader->size - offset)
+        return 0;
+
+    if (!reader->block_map)
+        return read_raw_at(reader, offset, out, size);
+
+    // Walk block by block: a run can span present and omitted blocks, and the
+    // omitted ones are zeros that were never written to the file.
+    u8* cursor = (u8*)out;
+    while (size > 0) {
+        const u64 block = offset / reader->block_size;
+        const u64 within = offset % reader->block_size;
+        u64 chunk = reader->block_size - within;
+        if (chunk > size)
+            chunk = size;
+
+        if (block < CISO_MAP_SIZE && reader->block_map[block] != CISO_UNUSED_BLOCK) {
+            const u64 file_offset = CISO_HEADER_SIZE +
+                                    (u64)reader->block_map[block] * reader->block_size + within;
+            if (!read_raw_at(reader, file_offset, cursor, (size_t)chunk))
+                return 0;
+        } else {
+            memset(cursor, 0, (size_t)chunk);
+        }
+
+        cursor += chunk;
+        offset += chunk;
+        size -= (size_t)chunk;
+    }
+    return 1;
 }
 
 static int raw_reader_open(RawReader* reader, const char* path) {
@@ -167,12 +215,63 @@ static int raw_reader_open(RawReader* reader, const char* path) {
         reader->file = NULL;
         return 0;
     }
+
+    // Detected by magic rather than by extension: .ciso is the usual name but
+    // nothing enforces it, and a mislabelled plain ISO should still open.
+    u8 head[8];
+    if (reader->size >= CISO_HEADER_SIZE && read_raw_at(reader, 0, head, sizeof(head))) {
+        const u32 magic = (u32)head[0] | ((u32)head[1] << 8) |
+                          ((u32)head[2] << 16) | ((u32)head[3] << 24);
+        const u32 block_size = (u32)head[4] | ((u32)head[5] << 8) |
+                               ((u32)head[6] << 16) | ((u32)head[7] << 24);
+        if (magic == CISO_MAGIC) {
+            if (block_size == 0 || CISO_MAP_SIZE > (u64)-1 / block_size) {
+                fprintf(stderr, "error: '%s' has an invalid CISO block size\n", path);
+                fclose(reader->file);
+                reader->file = NULL;
+                return 0;
+            }
+
+            u8* map = (u8*)malloc(CISO_MAP_SIZE);
+            reader->block_map = (u32*)malloc(CISO_MAP_SIZE * sizeof(u32));
+            if (!map || !reader->block_map) {
+                fprintf(stderr, "error: out of memory reading the CISO map\n");
+                free(map);
+                free(reader->block_map);
+                reader->block_map = NULL;
+                fclose(reader->file);
+                reader->file = NULL;
+                return 0;
+            }
+            if (!read_raw_at(reader, 8, map, CISO_MAP_SIZE)) {
+                fprintf(stderr, "error: '%s' is truncated inside its CISO map\n", path);
+                free(map);
+                free(reader->block_map);
+                reader->block_map = NULL;
+                fclose(reader->file);
+                reader->file = NULL;
+                return 0;
+            }
+
+            u32 present = 0;
+            for (u32 i = 0; i < CISO_MAP_SIZE; i++)
+                reader->block_map[i] = (map[i] == 1) ? present++ : CISO_UNUSED_BLOCK;
+            free(map);
+
+            reader->block_size = block_size;
+            // The logical image is the full mapped span; omitted blocks still
+            // occupy their place in it and read back as zeros.
+            reader->size = (u64)CISO_MAP_SIZE * block_size;
+            printf("format: CISO (%u byte blocks, %u present)\n", block_size, present);
+        }
+    }
     return 1;
 }
 
 static void raw_reader_close(RawReader* reader) {
     if (reader->file)
         fclose(reader->file);
+    free(reader->block_map);
     memset(reader, 0, sizeof(*reader));
 }
 
