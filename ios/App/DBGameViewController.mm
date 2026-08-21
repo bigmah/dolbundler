@@ -27,6 +27,10 @@
   UILabel* _status;
   UIActivityIndicatorView* _spinner;
   BOOL _started;
+  // --- diagnostic overlay, remove before release --------------------------
+  UILabel* _perfLabel;
+  CADisplayLink* _perfLink;
+  // -----------------------------------------------------------------------
 }
 
 - (instancetype)initWithGame:(DBGameEntry*)game
@@ -89,6 +93,22 @@
   [_spinner startAnimating];
   [self.view addSubview:_spinner];
 
+  // --- diagnostic overlay, remove before release --------------------------
+  // Emulation speed is the number that matters: 100% means the game is running
+  // at the rate the hardware did. FPS on its own cannot distinguish a game
+  // that renders at 30 by design from one that is running at half speed.
+  _perfLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+  _perfLabel.font = [UIFont monospacedDigitSystemFontOfSize:12
+                                                     weight:UIFontWeightMedium];
+  _perfLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
+  _perfLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+  _perfLabel.textAlignment = NSTextAlignmentCenter;
+  _perfLabel.layer.cornerRadius = 4;
+  _perfLabel.clipsToBounds = YES;
+  _perfLabel.text = @"-- fps  --%";
+  [self.view addSubview:_perfLabel];
+  // -----------------------------------------------------------------------
+
   _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
   [_closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"]
                 forState:UIControlStateNormal];
@@ -114,6 +134,9 @@
 - (void)dealloc
 {
   [NSNotificationCenter.defaultCenter removeObserver:self];
+  // --- diagnostic overlay, remove before release ---
+  [_perfLink invalidate];
+  // ------------------------------------------------
 }
 
 - (void)updatePadVisibility
@@ -132,6 +155,12 @@
   _closeButton.frame =
       CGRectMake(self.view.safeAreaInsets.left + inset, self.view.safeAreaInsets.top + inset, size,
                  size);
+  // --- diagnostic overlay, remove before release ---
+  const CGFloat pw = 104, ph = 20;
+  _perfLabel.frame = CGRectMake(CGRectGetWidth(self.view.bounds) -
+                                    self.view.safeAreaInsets.right - inset - pw,
+                                self.view.safeAreaInsets.top + inset, pw, ph);
+  // ------------------------------------------------
   _status.frame = self.view.bounds;
   _spinner.center = CGPointMake(CGRectGetMidX(self.view.bounds),
                                 CGRectGetMidY(self.view.bounds) + 28);
@@ -155,6 +184,14 @@
 
   CAMetalLayer* layer = (CAMetalLayer*)_metalView.layer;
   db_set_render_layer((__bridge void*)layer, layer.contentsScale);
+
+  // --- diagnostic overlay, remove before release ---
+  // Twice a second: often enough to watch, rare enough that the label itself
+  // does not show up in what it is measuring.
+  _perfLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updatePerformance)];
+  _perfLink.preferredFramesPerSecond = 2;
+  [_perfLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+  // ------------------------------------------------
 
   DBGameEntry* game = _game;
   NSString* userDir = DBLibrary.shared.userDirectory;
@@ -185,6 +222,16 @@
     });
   });
 }
+
+// --- diagnostic overlay, remove before release ----------------------------
+- (void)updatePerformance
+{
+  double fps = 0, speed = 0;
+  db_get_performance(&fps, &speed);
+  _perfLabel.text =
+      [NSString stringWithFormat:@"%.0f fps  %.0f%%", fps, speed * 100.0];
+}
+// --------------------------------------------------------------------------
 
 - (void)showFailure:(NSString*)message
 {

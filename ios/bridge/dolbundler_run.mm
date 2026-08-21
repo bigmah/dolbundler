@@ -6,9 +6,11 @@
 #include "Common/Logging/LogManager.h"
 #include "Core/Core.h"
 #include "Core/HW/GCPad.h"
+#include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 #include "InputCommon/InputConfig.h"
+#include "VideoCommon/PerformanceMetrics.h"
 #include "moderngekko/runtime.hpp"
 
 #include <atomic>
@@ -228,6 +230,25 @@ void db_request_stop(void)
 int db_is_running(void)
 {
   return s_running.load() ? 1 : 0;
+}
+
+void db_get_performance(double* fps, double* speed)
+{
+  const bool running = s_running.load();
+  if (!running)
+  {
+    if (fps)
+      *fps = 0.0;
+    if (speed)
+      *speed = 0.0;
+    return;
+  }
+
+  const auto& metrics = Core::System::GetInstance().GetPerfMetrics();
+  if (fps)
+    *fps = metrics.GetFPS();
+  if (speed)
+    *speed = metrics.GetSpeed();
 }
 
 void db_set_control(DBPadControl control, double state)

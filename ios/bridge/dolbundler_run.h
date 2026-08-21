@@ -56,6 +56,12 @@ void db_request_stop(void);
 
 int db_is_running(void);
 
+// Diagnostic only -- drives the on-screen overlay, remove with it.
+// fps is presented frames per second; speed is emulation speed as a ratio, so
+// 1.0 is full speed and 0.5 is half. Either may be NULL. Safe to call when
+// nothing is running, in which case both come back as zero.
+void db_get_performance(double* fps, double* speed);
+
 // Feed the on-screen controls. Analog axes take -1.0..1.0, buttons 0.0 or 1.0.
 // Physical controllers do not go through here -- SDL picks those up directly.
 void db_set_control(DBPadControl control, double state);
