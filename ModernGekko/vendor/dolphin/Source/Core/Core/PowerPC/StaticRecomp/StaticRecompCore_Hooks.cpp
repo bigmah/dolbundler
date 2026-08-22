@@ -29,6 +29,7 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
 u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   if (ea == 0)
     std::fprintf(stderr, "[zero-access] read size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
@@ -65,6 +66,7 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   if (ea == 0)
     std::fprintf(stderr, "[zero-access] write size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
@@ -134,6 +136,7 @@ u32 StaticRecompCore::HookExternalRead32(CPUState* cpu, u32 ea, u8 rid)
   // generated helper; Dolphin's interpreter services the access as a plain
   // MMU read (the rid is carried in EAR only).
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   core->PropagateGuestMSR();
   auto& mmu = core->m_system.GetMMU();
@@ -150,6 +153,7 @@ void StaticRecompCore::HookExternalWrite32(CPUState* cpu, u32 ea, u32 value, u8 
 {
   // ecowx external-control write; see HookExternalRead32.
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   core->PropagateGuestMSR();
   auto& mmu = core->m_system.GetMMU();
@@ -181,6 +185,7 @@ void* StaticRecompCore::HookExternalPointer(CPUState* cpu, u32 ea, u32 size)
 u32 StaticRecompCore::HookSPRRead(CPUState* cpu, u16 spr, u32 cia)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   auto& ppc = core->m_system.GetPPCState();
   if (spr >= 1024)
   {
@@ -219,6 +224,7 @@ u32 StaticRecompCore::HookSPRRead(CPUState* cpu, u16 spr, u32 cia)
 void StaticRecompCore::HookSPRWrite(CPUState* cpu, u16 spr, u32 value, u32 cia)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   auto& system = core->m_system;
   auto& ppc = system.GetPPCState();
   if (spr >= 1024)
@@ -328,6 +334,7 @@ void StaticRecompCore::HookSPRWrite(CPUState* cpu, u16 spr, u32 value, u32 cia)
 void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32 cia)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   core->PropagateGuestMSR();
   auto& ppc = core->m_system.GetPPCState();
@@ -365,6 +372,7 @@ void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32
 void StaticRecompCore::HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->FlushGuestCharge();
   cia = core->TranslateRelAddress(cia);
   ++core->m_hook_fallback_instructions;
 

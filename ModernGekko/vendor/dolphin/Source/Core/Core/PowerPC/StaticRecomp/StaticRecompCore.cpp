@@ -184,6 +184,9 @@ void StaticRecompCore::Init()
   m_idle_pc = Config::Get(Config::MAIN_STATICRECOMP_IDLE_PC);
   m_lockstep_verifier = std::make_unique<StaticRecompLockstep::StaticRecompLockstepVerifier>(*this);
   m_lockstep_verifier->Init();
+  // Lockstep checks every dispatch against a shadow interpreter, which only
+  // works if every dispatch is one the chassis made.
+  PublishGate(m_module != nullptr && !m_lockstep_verifier->IsEnabled());
 
 #ifdef _M_ARM_64
   m_fallback_jit = std::make_unique<JitArm64>(m_system);
@@ -200,6 +203,7 @@ void StaticRecompCore::Init()
 
 void StaticRecompCore::Shutdown()
 {
+  PublishGate(false);
   g_static_recomp_core = nullptr;
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
@@ -358,4 +362,64 @@ void StaticRecompCore::ClearCache()
   std::fill(m_chunk_state.begin(), m_chunk_state.end(), u8{CHUNK_UNVERIFIED});
   m_failed_chunks = 0;
   ++m_reverify_events;
+  RefreshChunkOpen();
+}
+
+void StaticRecompCore::PublishGate(bool publish)
+{
+  if (!m_module_source.publish_gate)
+    return;
+  if (!publish)
+  {
+    if (m_gate_published)
+      m_module_source.publish_gate(nullptr, m_module_source.publish_gate_user);
+    m_gate_published = false;
+    return;
+  }
+  m_chunk_open.assign(m_module->num_chunk_ranges, 0);
+  RefreshChunkOpen();
+  m_gate.chunk_open = m_chunk_open.data();
+  m_gate.chunk_count = m_module->num_chunk_ranges;
+  auto& ppc = m_system.GetPPCState();
+  static_assert(sizeof(ppc.downcount) == sizeof(int32_t));
+  m_gate.budget = &ppc.downcount;
+  m_gate.pending = &ppc.Exceptions;
+  m_gate.pending_sync = ~static_cast<u32>(EXCEPTION_EXTERNAL_INT | EXCEPTION_DECREMENTER |
+                                          EXCEPTION_PERFORMANCE_MONITOR);
+  m_gate.pending_async =
+      EXCEPTION_EXTERNAL_INT | EXCEPTION_DECREMENTER | EXCEPTION_PERFORMANCE_MONITOR;
+  m_module_source.publish_gate(&m_gate, m_module_source.publish_gate_user);
+  m_gate_published = true;
+}
+
+// A chunk is open when a dispatch to any address inside it would go native:
+// verified against guest RAM, not under a forced fallback range, holding no
+// host-call address, and -- for a REL section -- never, because the module
+// describes REL code at its linked addresses and the guest branches to the
+// runtime ones, a translation only the chassis performs.
+void StaticRecompCore::RefreshChunkOpen(u32 index)
+{
+  if (index >= m_chunk_open.size())
+    return;
+  bool open = m_chunk_state[index] == CHUNK_VERIFIED && m_chunk_rel_sections[index] < 0 &&
+              !ChunkContainsHostCall(index);
+  if (open)
+  {
+    const StaticRecompRange& chunk = m_module->chunk_ranges[index];
+    for (const StaticRecompRange& range : m_forced_fallback_ranges)
+    {
+      if (range.start < chunk.end && chunk.start < range.end)
+      {
+        open = false;
+        break;
+      }
+    }
+  }
+  m_chunk_open[index] = open ? 1 : 0;
+}
+
+void StaticRecompCore::RefreshChunkOpen()
+{
+  for (u32 i = 0; i < m_chunk_open.size(); ++i)
+    RefreshChunkOpen(i);
 }

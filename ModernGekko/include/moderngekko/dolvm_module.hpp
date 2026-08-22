@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <string>
 
+struct StaticRecompDispatchGate;
+
 namespace moderngekko
 {
 // A recompiled game the chassis interprets instead of jumping into.
@@ -34,5 +36,9 @@ public:
 
   // Valid until Close(). Null when nothing is open.
   static const ModernGekkoModuleDesc* Descriptor();
+
+  // The chassis's dispatch gate, or null to withdraw it. Shaped to be handed
+  // straight to StaticRecompModuleSource::publish_gate.
+  static void PublishGate(const StaticRecompDispatchGate* gate, void* user);
 };
 }

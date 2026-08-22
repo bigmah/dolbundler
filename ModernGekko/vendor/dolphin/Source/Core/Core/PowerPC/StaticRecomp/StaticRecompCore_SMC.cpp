@@ -97,6 +97,7 @@ void StaticRecompCore::RefreshRelSections()
       --m_failed_chunks;
     m_chunk_state[i] = CHUNK_UNVERIFIED;
     m_effective_chunk_hashes[i] = m_module->chunk_hashes[i];
+    RefreshChunkOpen(i);
   }
 }
 
@@ -294,6 +295,7 @@ void StaticRecompCore::VerifyChunk(u32 index)
   {
     m_chunk_state[index] = CHUNK_FAILED;
     ++m_failed_chunks;
+    RefreshChunkOpen(index);
     ERROR_LOG_FMT(POWERPC, "StaticRecomp: chunk [0x{:08X},0x{:08X}) outside guest RAM",
                   chunk.start, chunk.end);
     return;
@@ -328,6 +330,7 @@ void StaticRecompCore::VerifyChunk(u32 index)
                  "differs from module); interpreter until next invalidation",
                  chunk.start, chunk.end);
   }
+  RefreshChunkOpen(index);
 }
 
 void StaticRecompCore::OnICacheInvalidate(u32 address, u32 length)
@@ -368,6 +371,7 @@ void StaticRecompCore::OnICacheInvalidate(u32 address, u32 length)
         --m_failed_chunks;
       m_chunk_state[i] = CHUNK_UNVERIFIED;
       ++m_reverify_events;
+      RefreshChunkOpen(i);
     }
   }
 }

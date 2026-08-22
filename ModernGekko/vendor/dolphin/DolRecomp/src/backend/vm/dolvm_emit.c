@@ -151,6 +151,11 @@ typedef struct {
     u8 cr_branch_bit;
     u8 cr_branch_sense;
 
+    // The block is an idle loop: it branches back to itself and does nothing
+    // but read. Its back edge is marked so the interpreter can skip to the next
+    // timing event instead of polling through the rest of the slice.
+    bool idle_loop;
+
     u32 region_index;
     u32 current_block;
     u32 map_base;           // where this function's entries start in the map
@@ -822,6 +827,100 @@ static void analyze_homes(FunctionEmitter* fn, const DolIRBlock* block) {
         fn->home_write[i] = direct ? 1u : 2u;
         wanted_until[index] = 0;
     }
+}
+
+// Whether a block is an idle loop, by the rule Dolphin's JITs use
+// (PPCAnalyst::IsBusyWaitLoop): it branches back to its own head, it writes no
+// memory, it is integer and load work only, and it carries no state from one
+// iteration to the next -- every register it reads is one it either never
+// writes or wrote earlier in the same iteration. Each pass is then the same
+// pure function of memory, nothing the loop does can change memory, and only
+// an interrupt handler or the other processor can end it. So the time spent
+// there can be skipped: the interpreter charges the rest of the slice and
+// returns, the chassis runs whatever event was due, and the loop re-polls.
+// `lwz rX,d(rY); cmp[l]wi rX,n; bc` -- GXDrawDone's wait for the GPU -- is the
+// common shape. A counted loop reads a register before it writes it and is
+// left to run, as is anything with a store.
+static bool idle_loop_block(const DolIRBlock* block, u32 block_index) {
+    const DolIRTerminator* term = &block->terminator;
+    if (term->kind != DOLIR_TERM_COND_BRANCH && term->kind != DOLIR_TERM_BRANCH)
+        return false;
+    if (term->targets[0] != block_index)
+        return false;
+    u8 written[DOLIR_STATE_COUNT];
+    u8 read_first[DOLIR_STATE_COUNT];
+    memset(written, 0, sizeof(written));
+    memset(read_first, 0, sizeof(read_first));
+    u32 loads = 0;
+    for (u32 i = 0; i < block->instruction_count; i++) {
+        const DolIRInstruction* inst = &block->instructions[i];
+        switch (inst->op) {
+        case DOLIR_OP_CONSTANT:
+        case DOLIR_OP_ADD:
+        case DOLIR_OP_SUB:
+        case DOLIR_OP_MUL:
+        case DOLIR_OP_AND:
+        case DOLIR_OP_OR:
+        case DOLIR_OP_XOR:
+        case DOLIR_OP_NOT:
+        case DOLIR_OP_SHL:
+        case DOLIR_OP_LSHR:
+        case DOLIR_OP_ASHR:
+        case DOLIR_OP_ROTL:
+        case DOLIR_OP_CLZ:
+        case DOLIR_OP_BSWAP:
+        case DOLIR_OP_TRUNC:
+        case DOLIR_OP_ZEXT:
+        case DOLIR_OP_SEXT:
+        case DOLIR_OP_BITCAST:
+        case DOLIR_OP_ICMP_EQ:
+        case DOLIR_OP_ICMP_NE:
+        case DOLIR_OP_ICMP_ULT:
+        case DOLIR_OP_ICMP_ULE:
+        case DOLIR_OP_ICMP_SLT:
+        case DOLIR_OP_ICMP_SLE:
+        case DOLIR_OP_SELECT:
+            break;
+        case DOLIR_OP_GUEST_LOAD:
+            loads++;
+            break;
+        case DOLIR_OP_STATE_READ:
+            if (inst->aux >= DOLIR_STATE_COUNT)
+                return false;
+            if (!written[inst->aux])
+                read_first[inst->aux] = 1;
+            break;
+        case DOLIR_OP_STATE_WRITE:
+            if (inst->aux >= DOLIR_STATE_COUNT || read_first[inst->aux])
+                return false;
+            // The loop may only leave behind what a compare and a load leave
+            // behind; anything else is a side effect the wait is producing.
+            if (!(inst->aux <= DOLIR_STATE_GPR31 || inst->aux == DOLIR_STATE_CR ||
+                  inst->aux == DOLIR_STATE_XER))
+                return false;
+            written[inst->aux] = 1;
+            break;
+        case DOLIR_OP_HELPER_CALL:
+            // The condition-register field update reads two values and writes
+            // the field; the only helper a compare becomes.
+            if (!cr_field_helper_inst(inst))
+                return false;
+            written[DOLIR_STATE_CR] = 1;
+            break;
+        default:
+            return false;
+        }
+        if (inst->effects & (DOLIR_EFFECT_WRITE_MEMORY | DOLIR_EFFECT_MAY_RAISE |
+                             DOLIR_EFFECT_BARRIER))
+            return false;
+    }
+    // `b .` waits for an interrupt with nothing to read. An unconditional loop
+    // around a load is left to run: the load may be of a hardware register
+    // whose reading is the point, and Dolphin's rule would skip it, but it is
+    // rare enough that the cautious reading costs nothing.
+    if (term->kind == DOLIR_TERM_BRANCH)
+        return block->instruction_count == 0 || loads == 0;
+    return true;
 }
 
 static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
@@ -1669,7 +1768,8 @@ static bool emit_destination(FunctionEmitter* fn, const DolIRTerminator* term,
         PatchKind kind = charge ? PATCH_BLOCK_BODY : PATCH_BLOCK;
         if (target_block <= fn->current_block) {
             u32 index = builder->code_count;
-            return emit_raw(builder, DOLVM_OP_JMP_GUARD, 0, 0, 0, 0) &&
+            return emit_raw(builder, DOLVM_OP_JMP_GUARD,
+                            fn->idle_loop && slot == 0 ? 1u : 0u, 0, 0, 0) &&
                    emit_payload(builder,
                                 ((u64)charge << 32) |
                                     fn->function->blocks[target_block].guest_address) &&
@@ -1717,7 +1817,9 @@ static bool emit_terminator(FunctionEmitter* fn, const DolIRBlock* block) {
             bool emitted;
             if (backward) {
                 emitted = emit_raw(builder, DOLVM_OP_CMP_JMP_IF_CR_GUARD, left,
-                                   fn->cr_compare_pack, 0, 0) &&
+                                   fn->cr_compare_pack |
+                                       (fn->idle_loop ? 0x80u : 0u),
+                                   0, 0) &&
                           emit_payload(builder, ((u64)charge << 32) |
                                                     (u32)fn->cr_compare_right) &&
                           emit_payload(builder,
@@ -1744,7 +1846,9 @@ static bool emit_terminator(FunctionEmitter* fn, const DolIRBlock* block) {
             bool emitted;
             if (backward) {
                 emitted = emit_raw(builder, DOLVM_OP_JMP_IF_CR_GUARD,
-                                   fn->cr_branch_bit, fn->cr_branch_sense, 0, 0) &&
+                                   fn->cr_branch_bit,
+                                   fn->cr_branch_sense | (fn->idle_loop ? 0x80u : 0u),
+                                   0, 0) &&
                           emit_payload(builder,
                                        ((u64)charge << 32) |
                                            fn->function->blocks[taken].guest_address);
@@ -1782,8 +1886,7 @@ static bool emit_terminator(FunctionEmitter* fn, const DolIRBlock* block) {
                        ? emit_raw(builder, DOLVM_OP_INDIRECT,
                                   fn->indirect_mask ? 1u : 0u,
                                   fn->reg[fn->indirect_target], 0,
-                                  builder->direct_calls ? DOLVM_NO_ENTRY
-                                                        : fn->region_index)
+                                  fn->region_index)
                        : emit_destination(fn, term, 1);
         u32 branch = builder->code_count;
         bool emitted = fn->cr_branch
@@ -1796,9 +1899,7 @@ static bool emit_terminator(FunctionEmitter* fn, const DolIRBlock* block) {
         if (!emitted)
             return false;
         if (!emit_raw(builder, DOLVM_OP_INDIRECT, fn->indirect_mask ? 1u : 0u,
-                      fn->reg[fn->indirect_target], 0,
-                      builder->direct_calls ? DOLVM_NO_ENTRY
-                                            : fn->region_index))
+                      fn->reg[fn->indirect_target], 0, fn->region_index))
             return false;
         builder->code[branch].imm = builder->code_count;
         return emit_destination(fn, term, 1);
@@ -1906,6 +2007,7 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
     fn->block_start[block_index] = builder->code_count;
     fn->pc_base = block->guest_address;
     fn->current_block = block_index;
+    fn->idle_loop = idle_loop_block(block, block_index);
 
     if (block->cycle_cost &&
         !emit_raw(builder, DOLVM_OP_CHARGE, 0, 0, 0, block->cycle_cost))
@@ -2291,14 +2393,24 @@ bool dolvm_build_module(DolIRModule* module, const DolVMEmitOptions* options,
 
     // Cross-function targets, which only exist when the module resolves its own
     // calls, are patched once every region has an entry map.
+    // CALL names the region its target lies in (two bytes, a and b), which is
+    // what a gated interpreter checks before following it.
+    if (ok && builder.patch_count && builder.region_count > 0xFFFFu) {
+        if (diagnostics)
+            fprintf(diagnostics, "dolvm: %u regions, at most 65535 with calls\n",
+                    builder.region_count);
+        ok = false;
+    }
     for (u32 p = 0; p < builder.patch_count && ok; p++) {
         const Patch* patch = &builder.patches[p];
         u32 target = patch->operand;
         const DolVMRegion* region = NULL;
+        u32 region_index = 0;
         for (u32 r = 0; r < builder.region_count; r++) {
             if (target >= builder.regions[r].guest_start &&
                 target < builder.regions[r].guest_end) {
                 region = &builder.regions[r];
+                region_index = r;
                 break;
             }
         }
@@ -2313,6 +2425,8 @@ bool dolvm_build_module(DolIRModule* module, const DolVMEmitOptions* options,
             downgrade_call_to_exit(&builder, patch->code_index, target);
             continue;
         }
+        builder.code[patch->code_index].a = (u8)(region_index & 0xFFu);
+        builder.code[patch->code_index].b = (u8)(region_index >> 8);
         builder.code[patch->code_index].imm =
             point->entry & DOLVM_ENTRY_OFFSET_MASK;
         u64 payload = ((u64)target << 32) | point->pc_base;

@@ -356,6 +356,10 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     // The core logs the module source by path, and an attached descriptor
     // normally has none. This one does, and it is the useful thing to see.
     recomp_source.path = impl->config.module.path.string();
+    // The interpreter can follow calls and returns itself, given the core's
+    // word on which chunks it would dispatch into; a native module has no
+    // such hook and keeps returning for every one.
+    recomp_source.publish_gate = &DolVMModule::PublishGate;
   }
   if (!impl->mods->Empty()) {
     recomp_source.host_call = &ModManager::HostCall;

@@ -228,8 +228,39 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         # -fno-stack-protector: the dispatch loop's frame holds a 2 KB register
         # file, so it gets a guard by default -- a load, a store and a compare
         # on a function called once per thirty guest instructions.
+        #
+        # -mcpu: the host's own core on a native build. A cross build for iOS
+        # names the A16 -- the same ARMv8.6 core generation as the A17 Pro the
+        # app is tested on, and `native` would quietly pick whatever Mac is
+        # doing the building.
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set(_dolvm_cpu -mcpu=apple-a16)
+        else()
+            set(_dolvm_cpu -mcpu=native)
+        endif()
         target_compile_options(moderngekko_dolvm PRIVATE
-            -ffp-contract=off -fno-fast-math -mcpu=native -fno-stack-protector)
+            -ffp-contract=off -fno-fast-math ${_dolvm_cpu} -fno-stack-protector)
+        # The interpreter is threaded code: every handler ends in its own
+        # indirect branch, so each one gets its own branch-prediction history.
+        # LLVM's tail merger undoes that -- it folds the 180 identical
+        # `load op; load handler; branch` tails into one, and the tail
+        # duplicator that would split them back up refuses once a block has
+        # more than 16 predecessors. Raising the limit keeps one `br` per
+        # handler, which is worth 3-7% of wall clock on real titles. CMake
+        # de-duplicates repeated flags, so each `-mllvm` pair needs SHELL:.
+        target_compile_options(moderngekko_dolvm PRIVATE
+            "SHELL:-mllvm -tail-dup-pred-size=256"
+            "SHELL:-mllvm -tail-dup-succ-size=256")
+        # Link-time optimization over the interpreter and the cpu helpers it
+        # calls: the paired-single arithmetic is a call into cpu_interpreter_
+        # float.c per lane per instruction, and on a title that lives in
+        # paired singles inlining it is worth 3%. The codegen then happens at
+        # link, so the tail-duplication limits have to reach the linker too,
+        # or the per-handler branches are lost again and everything regresses.
+        target_compile_options(moderngekko_dolvm PRIVATE -flto)
+        target_link_options(moderngekko_dolvm INTERFACE -flto
+            "SHELL:-Wl,-mllvm,-tail-dup-pred-size=256"
+            "SHELL:-Wl,-mllvm,-tail-dup-succ-size=256")
     endif()
     if(MODERNGEKKO_DOLVM_PROFILE)
         target_compile_definitions(moderngekko_dolvm PRIVATE DOLVM_PROFILE=1)
@@ -270,6 +301,19 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
                 # correctness, so say so once at configure time rather than
                 # shouting on every translation unit.
                 -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled)
+            # Every object in the library has to be built against the same
+            # profile: LTO refuses to merge modules whose profile summaries
+            # disagree, which is what an incremental build produces when the
+            # profile changes and only the interpreter recompiles. A hash of
+            # the profile in the compile definitions makes a new profile a
+            # new set of flags, which every generator -- Xcode included, which
+            # ignores OBJECT_DEPENDS -- treats as a reason to rebuild all of it.
+            file(SHA256 "${MODERNGEKKO_DOLVM_PGO_PROFILE}" _dolvm_profile_hash)
+            string(SUBSTRING "${_dolvm_profile_hash}" 0 16 _dolvm_profile_hash)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                "${MODERNGEKKO_DOLVM_PGO_PROFILE}")
+            target_compile_definitions(moderngekko_dolvm PRIVATE
+                "DOLVM_PGO_PROFILE_ID=0x${_dolvm_profile_hash}")
         else()
             message(STATUS
                 "DolVM: this compiler cannot read the shipped PGO profile; "

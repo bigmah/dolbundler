@@ -8,6 +8,12 @@
 #
 # Signing: set DOLBUNDLER_TEAM to your Apple Developer team ID. `--install`
 # needs one; a plain build does not.
+#
+# With more than one iPhone paired, name the one to install to with
+# DOLBUNDLER_DEVICE -- a devicectl identifier or any part of the device's
+# name, case-insensitive. The script refuses to guess between phones: the
+# wrong guess is a locked phone on a desk failing to mount the developer disk
+# image while the one in your hand gets nothing.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,6 +22,7 @@ BUILD="$ROOT/build-ios"
 
 BUNDLE_ID="${DOLBUNDLER_BUNDLE_ID:-com.bigmah.dolbundler}"
 TEAM="${DOLBUNDLER_TEAM:-}"
+DEVICE_WANTED="${DOLBUNDLER_DEVICE:-}"
 
 INSTALL=0
 CLEAN=0
@@ -83,26 +90,47 @@ if [ "$INSTALL" -eq 1 ]; then
   devices_json="$(mktemp -t dolbundler-devices)"
   xcrun devicectl list devices --json-output "$devices_json" >/dev/null 2>&1
 
-  device="$(python3 - "$devices_json" <<'PY'
+  device="$(python3 - "$devices_json" "$DEVICE_WANTED" <<'PY'
 import json, sys
 devices = json.load(open(sys.argv[1]))["result"]["devices"]
-# Prefer one with a live tunnel; fall back to any paired device so the install
-# is at least attempted and devicectl can report why it failed.
-for want_tunnel in (True, False):
-    for d in devices:
-        conn = d.get("connectionProperties", {})
-        if (conn.get("tunnelState") == "connected") == want_tunnel:
-            print(d["identifier"])
-            sys.exit(0)
-PY
-)"
-  rm -f "$devices_json"
+wanted = sys.argv[2].strip().lower()
 
-  if [ -z "$device" ]; then
-    echo "no paired device found." >&2
-    echo "Plug the iPhone in, unlock it, and tap Trust." >&2
-    exit 1
-  fi
+def name(d):
+    return d.get("deviceProperties", {}).get("name", "")
+
+def describe(d):
+    model = d.get("hardwareProperties", {}).get("marketingName", "")
+    return f"  {d['identifier']}  {name(d)}  ({model})"
+
+if not devices:
+    print("no paired device found.", file=sys.stderr)
+    print("Plug the iPhone in, unlock it, and tap Trust.", file=sys.stderr)
+    sys.exit(1)
+
+if wanted:
+    matches = [d for d in devices
+               if wanted == d["identifier"].lower() or wanted in name(d).lower()]
+    if len(matches) != 1:
+        what = "matches" if matches else "does not match any paired device"
+        print(f"DOLBUNDLER_DEVICE={sys.argv[2]!r} {what}:", file=sys.stderr)
+        for d in (matches or devices):
+            print(describe(d), file=sys.stderr)
+        sys.exit(1)
+    print(matches[0]["identifier"])
+    sys.exit(0)
+
+if len(devices) == 1:
+    print(devices[0]["identifier"])
+    sys.exit(0)
+
+print("more than one iPhone is paired; name the one to install to with", file=sys.stderr)
+print("DOLBUNDLER_DEVICE=<identifier or part of the name>:", file=sys.stderr)
+for d in devices:
+    print(describe(d), file=sys.stderr)
+sys.exit(1)
+PY
+)" || { rm -f "$devices_json"; exit 1; }
+  rm -f "$devices_json"
 
   if ! xcrun devicectl device install app --device "$device" "$APP"; then
     echo >&2

@@ -21,6 +21,7 @@ extern "C" {
 #endif
 
 struct CPUState;
+struct StaticRecompDispatchGate;
 
 typedef struct DolVMBridgeRange
 {
@@ -54,6 +55,13 @@ void dolvm_bridge_close(void);
 // The two module ABI entry points, over whatever dolvm_bridge_open loaded.
 int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address);
 void dolvm_bridge_on_state_loaded(struct CPUState* ctx);
+
+// The chassis's dispatch gate (core/dispatch_gate.h), or NULL to withdraw it.
+// With one installed the interpreter follows calls and returns into any chunk
+// the gate says is open and runs to the end of the chassis's slice; without
+// one it returns at every one of them, which is also what it does when the
+// gate's chunk count does not match the module's regions.
+void dolvm_bridge_set_gate(const struct StaticRecompDispatchGate* gate);
 
 #ifdef __cplusplus
 }

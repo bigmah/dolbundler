@@ -137,4 +137,10 @@ const ModernGekkoModuleDesc* DolVMModule::Descriptor()
 {
   return s_open ? &s_descriptor : nullptr;
 }
+
+void DolVMModule::PublishGate(const StaticRecompDispatchGate* gate, void*)
+{
+  if (s_open)
+    dolvm_bridge_set_gate(gate);
+}
 }

@@ -44,6 +44,24 @@ void StaticRecompCore::AdvanceGuestTimebase(u64 cpu_cycles)
   m_timebase_cycle_remainder = total_cycles % SystemTimers::TIMER_RATIO;
 }
 
+void StaticRecompCore::FlushGuestCharge()
+{
+  // Only a gated module runs long enough inside one dispatch for the moment a
+  // hook is called to differ meaningfully from the moment the dispatch began.
+  // Without a gate the per-dispatch flush in Run() is the accounting the
+  // native modules and the lockstep verifier were built against, and it stays
+  // exactly that.
+  if (!m_gate_published)
+    return;
+  const s64 charge = -m_guest.downcount;
+  if (charge <= 0)
+    return;
+  m_guest.downcount = 0;
+  m_system.GetPPCState().downcount -= static_cast<int>(charge);
+  m_charged_cycles += static_cast<u64>(charge);
+  AdvanceGuestTimebase(static_cast<u64>(charge));
+}
+
 void StaticRecompCore::SyncIn()
 {
   auto& power_pc = m_system.GetPowerPC();

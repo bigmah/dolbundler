@@ -198,10 +198,11 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   DBGameEntry* entry = DBLibrary.shared.games[indexPath.row];
   cell.textLabel.text = entry.title;
   cell.detailTextLabel.text =
-      [NSString stringWithFormat:@"%@  ·  %@", entry.discID,
+      [NSString stringWithFormat:@"%@  ·  %@%@", entry.discID,
                                  [NSByteCountFormatter
                                      stringFromByteCount:(long long)entry.extractedBytes
-                                              countStyle:NSByteCountFormatterCountStyleFile]];
+                                              countStyle:NSByteCountFormatterCountStyleFile],
+                                 entry.moduleStale ? @"  ·  needs a quick update" : @""];
   cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
   return cell;
 }
@@ -211,9 +212,66 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   [tableView deselectRowAtIndexPath:indexPath animated:YES];
   DBGameEntry* entry = DBLibrary.shared.games[indexPath.row];
 
+  if (entry.moduleStale)
+  {
+    [self rebuildModuleThenPlay:entry];
+    return;
+  }
+  [self play:entry];
+}
+
+- (void)play:(DBGameEntry*)entry
+{
   DBGameViewController* game = [[DBGameViewController alloc] initWithGame:entry];
   game.modalPresentationStyle = UIModalPresentationFullScreen;
   [self presentViewController:game animated:YES completion:nil];
+}
+
+// A module built by an older version of the app is recompiled in place before
+// the game starts. The extracted disc is untouched, so this takes seconds.
+- (void)rebuildModuleThenPlay:(DBGameEntry*)entry
+{
+  _progressAlert = [UIAlertController alertControllerWithTitle:@"Updating"
+                                                       message:@"Recompiling to bytecode\n\n"
+                                                preferredStyle:UIAlertControllerStyleAlert];
+  [self presentViewController:_progressAlert animated:YES completion:nil];
+
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    NSString* error = nil;
+    const BOOL ok = [DBLibrary.shared
+        rebuildModuleForGame:entry
+                    progress:^(NSString* stage) {
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                        self->_progressAlert.message = [NSString
+                            stringWithFormat:@"%@\n\nThis version of the app uses a newer "
+                                             @"bytecode format, so the game is being "
+                                             @"recompiled once.\n",
+                                             stage];
+                      });
+                    }
+                       error:&error];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self->_progressAlert dismissViewControllerAnimated:YES
+                                               completion:^{
+                                                 self->_progressAlert = nil;
+                                                 [self refresh];
+                                                 if (!ok)
+                                                 {
+                                                   [self showError:error title:@"Update failed"];
+                                                   return;
+                                                 }
+                                                 for (DBGameEntry* fresh in DBLibrary.shared.games)
+                                                 {
+                                                   if ([fresh.discID isEqualToString:entry.discID])
+                                                   {
+                                                     [self play:fresh];
+                                                     return;
+                                                   }
+                                                 }
+                                               }];
+    });
+  });
 }
 
 - (UISwipeActionsConfiguration*)tableView:(UITableView*)tableView

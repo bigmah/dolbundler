@@ -38,7 +38,10 @@ extern "C" {
 
 // Bumped whenever the meaning of an existing opcode changes. The loader
 // refuses a module it was not built to run rather than misinterpreting it.
-#define DOLVM_ABI_VERSION 3u
+// 4: CALL names the region its target lies in, and INDIRECT always names its
+//    own; both are what a gated chassis checks before the interpreter resolves
+//    the edge in place.
+#define DOLVM_ABI_VERSION 4u
 
 // Register file size. Values are block-local, and the emitter recycles a
 // register as soon as its last use retires, so real blocks land far below this;
@@ -84,7 +87,8 @@ extern "C" {
 #define DOLVM_LOCAL_REGISTERS DOLVM_HOME_BASE
 
 // Matches DOLRECOMP_C_LOOP_CYCLE_BUDGET: how far downcount may go negative
-// inside one dispatch before a back edge returns to the chassis.
+// inside one dispatch before a back edge returns to the chassis. A gate (below)
+// may raise it, never lower it.
 #define DOLVM_LOOP_CYCLE_BUDGET 256
 
 // Backstop for loops whose blocks all cost zero cycles.
@@ -217,8 +221,14 @@ typedef enum {
     DOLVM_OP_EXIT_REG,     // ctx->pc = r[b], leave
     // a = 1 clears the low two bits of the target, which is what `blr` and
     // `bctr` do and what the builder otherwise writes out as its own mask.
+    // imm = the region the branch was emitted in. Ungated, the interpreter
+    // resolves only inside that region and only onto a return target; gated,
+    // anywhere in the module the gate says the chassis would go itself.
     DOLVM_OP_INDIRECT,     // resolve r[b] locally when possible, else leave
-    DOLVM_OP_CALL,         // linked branch to an in-module address
+    // Linked branch (or tail call) to an in-module address. imm = instruction
+    // index, a | b << 8 = the target's region, payload = target pc << 32 |
+    // the target's pc base. Ungated it leaves exactly as EXIT would.
+    DOLVM_OP_CALL,
     DOLVM_OP_FALLBACK,     // payload word: raw instruction; imm = guest pc
     DOLVM_OP_SYSCALL,      // imm = guest pc
     DOLVM_OP_RFI,          // imm = guest pc
@@ -254,7 +264,8 @@ typedef enum {
     // state loads that used to feed it.
     //
     // Guarded jump: LOOP_GUARD followed by JMP, which is how every back edge
-    // was emitted. Payload word holds the guest pc to leave at.
+    // was emitted. Payload word holds the guest pc to leave at. a = 1 marks an
+    // idle loop -- see JMP_IF_CR_GUARD.
     DOLVM_OP_JMP_GUARD,      // imm = instruction index
     // Branch on one condition-register bit, replacing the state load, the mask
     // and the compare the builder writes out for `bc`.
@@ -302,7 +313,13 @@ typedef enum {
     // dispatches -- the test, then the guarded jump the taken edge fell into --
     // and a loop pays that on every iteration. Payload word: the charge in the
     // high half, the guest pc to leave at in the low.
-    DOLVM_OP_JMP_IF_CR_GUARD,  // a = cr bit, b = sense, imm = index
+    //
+    // Bit 7 of b marks an idle loop: a block that polls one word of memory and
+    // branches back to itself, which is a guest waiting for an interrupt or the
+    // other processor to change that word. Taken, the edge charges the rest of
+    // the slice and leaves at the loop head rather than polling through it,
+    // which is what Dolphin's JITs do with the same three instructions.
+    DOLVM_OP_JMP_IF_CR_GUARD,  // a = cr bit, b = sense | idle << 7, imm = index
     // The supervisor check every privileged instruction opens with: the MSR
     // read, the mask, the compare against zero and the conditional raise. The
     // operating system a game links against runs privileged instructions
@@ -319,7 +336,8 @@ typedef enum {
     // because the guest can read it later.
     //
     // a = left register, imm = instruction index,
-    // b = field | signed << 3 | which bit of the field << 4 | sense << 6.
+    // b = field | signed << 3 | which bit of the field << 4 | sense << 6,
+    // and for _GUARD the idle-loop mark in bit 7.
     // Payload word: the comparand, and the target's cycle charge in the high
     // half for the two forms that pay it. _GUARD takes a second payload word,
     // the guest pc to leave at.
@@ -378,10 +396,12 @@ typedef struct {
 } DolVMRegion;
 
 typedef enum {
-    // Resolve intra-module linked branches inside the interpreter instead of
-    // returning to the chassis. Faster, but it bypasses whatever the chassis
+    // Linked branches to in-module addresses were lowered to CALL rather than
+    // to EXIT. Whether the interpreter follows them is the gate's decision: a
+    // chassis that installs none gets a leave at every one, exactly as if they
+    // were EXITs, because resolving in place bypasses whatever that chassis
     // checks on dispatch (host-call interception, self-modifying-code
-    // retirement), so it is opt-in exactly as the C backend's direct calls are.
+    // retirement) and only the gate can say those checks would pass.
     DOLVM_FLAG_DIRECT_CALLS = 1u << 0,
     // Lowered against the homed registers above: the general purpose registers,
     // LR and CTR live in the register file for the length of a dispatch, and
@@ -419,6 +439,36 @@ typedef struct {
     u32 reserved[1];
 } DolVMHeader;
 
+// What a chassis knows that lets the interpreter follow a control transfer in
+// place instead of returning: which regions it would dispatch into itself, how
+// long it is prepared to wait, and which exceptions it is holding.
+//
+// Every field is a pointer into chassis-owned memory, read on the interpreter's
+// thread; the chassis writes them between dispatches (the per-region bytes and
+// the budget) or from hooks the interpreter itself calls (the pending word).
+// Installed on the module with `dolvm_module_set_gate`; with none installed the
+// interpreter resolves nothing beyond its own region and no calls at all.
+typedef struct {
+    // One byte per region, parallel to DolVMModule::regions: nonzero while the
+    // chassis would itself dispatch into that region -- verified against guest
+    // RAM, not retired to a fallback interpreter, no host call inside it.
+    const u8* region_open;
+    // Cycles a dispatch may still charge before a loop back edge or a
+    // resolved edge has to return: the chassis's live slice counter. Read at
+    // every guard rather than once on entry, because the chassis shortens it
+    // from inside the hooks the interpreter calls when one of them schedules
+    // an event due before the slice was going to end.
+    const s32* budget;
+    // A word the chassis raises exceptions in, and the bits that mean "come
+    // back now": the synchronous set unconditionally, the asynchronous set
+    // only while MSR[EE] is set. Tested at every resolved edge, so an
+    // interrupt a guest store just raised is delivered within the function
+    // that raised it, not at the end of the slice.
+    const u32* pending;
+    u32 pending_sync;
+    u32 pending_async;
+} DolVMGate;
+
 // A loaded module. `dolvm_module_open` points these at the file image without
 // copying, so the image must outlive the module.
 typedef struct {
@@ -440,7 +490,21 @@ typedef struct {
     u32 flags;
     void* image;        // owned when loaded from a file, else NULL
     size_t image_size;
+    // Region lookup by address in O(1): `lookup[(address - lookup_base) >>
+    // DOLVM_LOOKUP_SHIFT]` is the first region ending past that bucket, and a
+    // bucket holds at most a couple of regions, so the walk from there is a
+    // compare or two. Built at open; NULL when the span is too large to table,
+    // in which case the binary search over `regions` stands in.
+    u32* lookup;
+    u32 lookup_base;
+    u32 lookup_span;
+    const DolVMGate* gate;
 } DolVMModule;
+
+#define DOLVM_LOOKUP_SHIFT 14u
+// Buckets the lookup table is allowed to reach: 1M entries is 4 MB, which
+// covers 16 GB of guest span -- more than any module describes.
+#define DOLVM_LOOKUP_MAX_BUCKETS (1u << 20)
 
 // How many 8-byte slots an op occupies, payload words included.
 u32 dolvm_op_words(u32 op);
@@ -455,6 +519,10 @@ bool dolvm_module_load_file(DolVMModule* module, const char* path,
                             char* error, size_t error_size);
 void dolvm_module_close(DolVMModule* module);
 
+// Install (or with NULL, remove) the chassis's gate. The gate and everything it
+// points at must outlive every dispatch that runs while it is installed.
+void dolvm_module_set_gate(DolVMModule* module, const DolVMGate* gate);
+
 // Resolve a guest address to its entry, or NULL when the module misses it.
 //
 // Inline because the interpreter does this once per dispatch and a dispatch is
@@ -462,6 +530,21 @@ void dolvm_module_close(DolVMModule* module);
 // everything that is not on that path.
 static inline const DolVMRegion* dolvm_module_region_inline(
     const DolVMModule* module, u32 address) {
+    if (module->lookup) {
+        u32 offset = address - module->lookup_base;
+        if (offset >= module->lookup_span)
+            return 0;
+        u32 index = module->lookup[offset >> DOLVM_LOOKUP_SHIFT];
+        const DolVMRegion* region = &module->regions[index];
+        const DolVMRegion* end = &module->regions[module->region_count];
+        // Regions are sorted and disjoint, so the walk stops at the first one
+        // starting past the address.
+        for (; region < end && address >= region->guest_start; region++) {
+            if (address < region->guest_end)
+                return region;
+        }
+        return 0;
+    }
     u32 low = 0;
     u32 high = module->region_count;
     while (low < high) {

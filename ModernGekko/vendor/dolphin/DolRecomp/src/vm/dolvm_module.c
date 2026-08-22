@@ -284,6 +284,10 @@ static bool verify_code(const DolVMModule* module, char* error, size_t size) {
             inst->imm >= module->region_count)
             return fail(error, size, "dolvm: indirect names region %u of %u",
                         inst->imm, module->region_count);
+        if (inst->op == DOLVM_OP_CALL &&
+            ((u32)inst->a | (u32)inst->b << 8) >= module->region_count)
+            return fail(error, size, "dolvm: call names region %u of %u",
+                        (u32)inst->a | (u32)inst->b << 8, module->region_count);
         if ((inst->op == DOLVM_OP_JMP_IF_CR ||
              inst->op == DOLVM_OP_JMP_IF_CR_CHARGE ||
              inst->op == DOLVM_OP_JMP_IF_CR_GUARD) && inst->a >= 32u)
@@ -344,6 +348,10 @@ static bool verify_code(const DolVMModule* module, char* error, size_t size) {
 }
 
 static bool verify_regions(const DolVMModule* module, char* error, size_t size) {
+    // CALL carries its target's region in two bytes.
+    if (module->region_count > 0xFFFFu)
+        return fail(error, size, "dolvm: %u regions, at most 65535",
+                    module->region_count);
     u32 previous_end = 0;
     for (u32 i = 0; i < module->region_count; i++) {
         const DolVMRegion* region = &module->regions[i];
@@ -385,6 +393,39 @@ static bool verify_smc_ranges(const DolVMModule* module, char* error,
         previous_end = range->end;
     }
     return true;
+}
+
+// The O(1) region table. Every dispatch and every module-wide indirect branch
+// starts with "which region is this address in", and a binary search over a
+// few dozen regions is a handful of data-dependent branches each time; a
+// bucket table answers it with one load and a compare or two. Running out of
+// memory here is not an error -- the search stays available.
+static void build_lookup(DolVMModule* module) {
+    module->lookup = NULL;
+    if (!module->region_count)
+        return;
+    u32 base = module->regions[0].guest_start & ~((1u << DOLVM_LOOKUP_SHIFT) - 1u);
+    u32 end = module->regions[module->region_count - 1u].guest_end;
+    u64 span = (u64)end - base;
+    u64 buckets = (span + (1u << DOLVM_LOOKUP_SHIFT) - 1u) >> DOLVM_LOOKUP_SHIFT;
+    if (buckets > DOLVM_LOOKUP_MAX_BUCKETS || span > 0xFFFFFFFFull)
+        return;
+    u32* lookup = (u32*)malloc((size_t)buckets * sizeof(u32));
+    if (!lookup)
+        return;
+    u32 region = 0;
+    for (u32 b = 0; b < (u32)buckets; b++) {
+        u32 bucket_start = base + (b << DOLVM_LOOKUP_SHIFT);
+        // Regions are sorted, so the first one ending past this bucket's start
+        // is at or after the one found for the previous bucket.
+        while (region < module->region_count &&
+               module->regions[region].guest_end <= bucket_start)
+            region++;
+        lookup[b] = region;
+    }
+    module->lookup = lookup;
+    module->lookup_base = base;
+    module->lookup_span = (u32)span;
 }
 
 bool dolvm_module_open(DolVMModule* module, const void* image, size_t size,
@@ -460,6 +501,7 @@ bool dolvm_module_open(DolVMModule* module, const void* image, size_t size,
         memset(module, 0, sizeof(*module));
         return false;
     }
+    build_lookup(module);
     return true;
 }
 
@@ -504,8 +546,14 @@ bool dolvm_module_load_file(DolVMModule* module, const char* path, char* error,
 void dolvm_module_close(DolVMModule* module) {
     if (!module)
         return;
+    free(module->lookup);
     free(module->image);
     memset(module, 0, sizeof(*module));
+}
+
+void dolvm_module_set_gate(DolVMModule* module, const DolVMGate* gate) {
+    if (module)
+        module->gate = gate;
 }
 
 const DolVMRegion* dolvm_module_region(const DolVMModule* module, u32 address) {

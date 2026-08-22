@@ -36,9 +36,14 @@ static u32 chunk_instructions(void) {
     return (u32)value;
 }
 
+// On unless asked otherwise. A module lowered this way carries CALL where it
+// would otherwise carry EXIT; whether the interpreter follows one is decided at
+// run time by the chassis's gate, and a chassis without one gets the EXIT
+// behaviour back. So the switch costs nothing to leave on, and `0` exists to
+// lower a title the old way for comparison.
 static bool direct_calls_enabled(void) {
     const char* configured = getenv("DOLRECOMP_VM_DIRECT_CALLS");
-    return configured && configured[0] == '1';
+    return !configured || configured[0] != '0';
 }
 
 // On unless asked otherwise. The switch is here so the same title can be

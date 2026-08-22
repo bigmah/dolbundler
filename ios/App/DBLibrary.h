@@ -11,6 +11,9 @@
 // Bytes on disk for the extracted game, so the UI can explain where the
 // storage went. A GameCube disc costs well over a gigabyte extracted.
 @property(nonatomic, assign) unsigned long long extractedBytes;
+// The module was built by an older version of the app and has to be rebuilt
+// before this one can play it. Seconds, not the minutes an import takes.
+@property(nonatomic, assign) BOOL moduleStale;
 @end
 
 @interface DBLibrary : NSObject
@@ -33,6 +36,11 @@
 - (DBGameEntry*)importDiscAtPath:(NSString*)path
                         progress:(void (^)(NSString* stage))progress
                            error:(NSString**)error;
+
+// Rebuild a stale module. Blocking: call it off the main thread.
+- (BOOL)rebuildModuleForGame:(DBGameEntry*)entry
+                    progress:(void (^)(NSString* stage))progress
+                       error:(NSString**)error;
 
 - (BOOL)deleteGame:(DBGameEntry*)entry error:(NSString**)error;
 

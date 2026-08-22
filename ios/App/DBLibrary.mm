@@ -79,6 +79,7 @@
     entry.gameRoot = @(game.game_root);
     entry.modulePath = @(game.module_path);
     entry.extractedBytes = [self directorySize:entry.gameRoot];
+    entry.moduleStale = !db_module_is_current(&game);
 
     // The disc header's title is not kept anywhere after import, so it is
     // cached beside the game rather than re-read from an ISO that may be gone.
@@ -168,6 +169,22 @@ void ProgressBridge(DBStage stage, const char* detail, void* ctx)
   if (error)
     *error = @"The disc imported but did not appear in the library.";
   return nil;
+}
+
+- (BOOL)rebuildModuleForGame:(DBGameEntry*)entry
+                    progress:(void (^)(NSString*))progress
+                       error:(NSString**)error
+{
+  DBGame game;
+  db_paths_for(_libraryDirectory.UTF8String, entry.discID.UTF8String, &game);
+  snprintf(game.title, sizeof(game.title), "%s", entry.title.UTF8String);
+  char err[512] = {0};
+  const int ok = db_rebuild_module(&game, ProgressBridge, (__bridge void*)progress, err,
+                                   sizeof(err));
+  if (!ok && error)
+    *error = @(err);
+  [self reload];
+  return ok != 0;
 }
 
 - (BOOL)deleteGame:(DBGameEntry*)entry error:(NSString**)error

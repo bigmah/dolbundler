@@ -18,6 +18,9 @@ export DOLBUNDLER_TEAM=<your Apple Developer team ID>
 
 That configures, builds, and installs to a connected device. Without
 `--install` it just builds; without `DOLBUNDLER_TEAM` it builds unsigned.
+With more than one iPhone paired, say which with `DOLBUNDLER_DEVICE` -- a
+`devicectl` identifier or any part of the phone's name (`DOLBUNDLER_DEVICE="15
+pro max"`); the script lists the candidates rather than guess.
 
 On first launch, trust the certificate under **Settings → General → VPN &
 Device Management**.
@@ -182,18 +185,28 @@ straight away whether the interpreter or the module is at fault.
 
 ## Known limitations
 
-**No audio.** cubeb is disabled, so `AudioCommon` falls back to its null
-stream. This is the largest gap and the next thing to fix — either by guarding
-the vendored cubeb's macOS-only globals, or by adding an `AVAudioEngine`
-backend.
+**Speed is the real constraint, not the port.** Measured on an M4 Pro (cpu
+time over each title's first six billion guest cycles), DolVM runs Mario Party
+4 at 2.94× realtime, the SpongeBob movie game at 1.81×, and Melee at 1.39×.
+An A17 Pro core has roughly three quarters of that single-thread throughput
+and throttles under sustained load, so expect Melee-class titles to sit near
+full speed on a 15 Pro and lighter ones comfortably above it. Nothing about the
+iOS port changes that; it is a property of the interpreter, and
+`ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says where the time
+goes and what each change bought.
 
-**Speed is the real constraint, not the port.** Measured on an M-series Mac,
-DolVM runs Mario Party 4 at 1.72× realtime, the SpongeBob movie game at 1.23×,
-and Melee at 0.93× — Melee is already below full speed on a desktop. A phone
-has less sustained throughput and throttles hard under the kind of load an
-emulator generates, so expect lighter titles to play and Melee-class ones not
-to. Nothing about the iOS port changes that; it is a property of the
-interpreter.
+Three things in the build matter for it and are easy to lose: the interpreter
+is compiled with one indirect branch per handler (`-mllvm -tail-dup-*-size`),
+with LTO over the cpu helpers (and the same `-mllvm` flags handed to the
+linker, or LTO undoes the first), and with `-mcpu=apple-a16` rather than
+`native`, which on a cross build would name whatever Mac did the compiling.
+All three live in `ModernGekko/CMakeLists.txt` under `moderngekko_dolvm`.
+
+**A module from an older build is rebuilt, not refused.** The bytecode ABI
+changes as the interpreter does, and the library checks each `.dvm`'s header
+on load. A stale one shows as "needs a quick update" and is recompiled from
+the extracted disc the next time it is played -- seconds, since nothing is
+extracted again.
 
 **Memory during import.** Peak RSS scales at roughly 1.5 KB per guest
 instruction: 423 MB for Mario Party 4, 796 MB for Luigi's Mansion, 1.44 GB for

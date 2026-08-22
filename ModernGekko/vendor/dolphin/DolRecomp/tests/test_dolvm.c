@@ -103,6 +103,7 @@ static bool build_and_load(DolIRModule* ir, LoadedModule* loaded,
 }
 
 static void unload(LoadedModule* loaded) {
+    dolvm_module_close(&loaded->module);
     free(loaded->image);
     memset(loaded, 0, sizeof(*loaded));
 }
@@ -614,12 +615,12 @@ static int test_cr_fields(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Direct intra-module calls
+// Direct intra-module calls, and the gate that decides whether they are taken
 // ---------------------------------------------------------------------------
 
 static int test_direct_calls(void) {
-    // A caller that calls a callee twice and returns; with direct calls the
-    // whole thing runs in one dispatch.
+    // A caller that calls a callee twice and returns; gated with both regions
+    // open, the whole thing runs in one dispatch.
     // The caller does not save lr, so it leaves with an explicit branch rather
     // than a blr that the second bl would have overwritten.
     const u32 caller[] = {
@@ -641,6 +642,20 @@ static int test_direct_calls(void) {
     memset(&loaded, 0, sizeof(loaded));
     CHECK(build_and_load(&ir, &loaded, true, NULL));
     dolir_module_free(&ir);
+    CHECK(loaded.module.region_count == 2);
+    CHECK(loaded.module.flags & DOLVM_FLAG_DIRECT_CALLS);
+
+    u8 open[2] = {1, 1};
+    s32 budget = 100000;
+    u32 pending = 0;
+    DolVMGate gate;
+    memset(&gate, 0, sizeof(gate));
+    gate.region_open = open;
+    gate.budget = &budget;
+    gate.pending = &pending;
+    gate.pending_sync = 0x0000FFFFu;
+    gate.pending_async = 0xFFFF0000u;
+    dolvm_module_set_gate(&loaded.module, &gate);
 
     CPUState cpu;
     CHECK(cpu_init(&cpu));
@@ -650,16 +665,89 @@ static int test_direct_calls(void) {
     CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
     CHECK(cpu.gpr[3] == 2);
     CHECK(cpu.pc == 0x80040000u);
+
+    // The callee's region closed: the call leaves exactly as an exit would,
+    // with lr set and nothing of the callee run.
+    open[1] = 0;
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.pc == 0x80030030u);
+    CHECK(cpu.lr == 0x80030008u);
+    CHECK(cpu.gpr[3] == 0);
+    open[1] = 1;
+
+    // The caller's region closed: the return is what leaves, since the call
+    // went through but the callee's blr may not land back there.
+    open[0] = 0;
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[3] == 1);
+    CHECK(cpu.pc == 0x80030008u);
+    open[0] = 1;
+
+    // An exception the chassis is holding turns the next resolved edge into a
+    // leave: a synchronous one regardless of MSR, an asynchronous one only once
+    // interrupts are enabled.
+    pending = 0x00010000u;
+    cpu.msr &= ~0x00008000u;
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[3] == 2);
+    CHECK(cpu.pc == 0x80040000u);
+    cpu.msr |= 0x00008000u;
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[3] == 0);
+    CHECK(cpu.pc == 0x80030030u);
+    pending = 0x00000001u;
+    cpu.msr &= ~0x00008000u;
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[3] == 0);
+    CHECK(cpu.pc == 0x80030030u);
+    pending = 0;
+
+    // The budget bounds a dispatch: with nothing left of the slice the first
+    // call already leaves.
+    budget = 0;
+    cpu.downcount = -(s64)DOLVM_LOOP_CYCLE_BUDGET;
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[3] == 0);
+    CHECK(cpu.pc == 0x80030030u);
+    budget = 100000;
+
+    // No gate at all: a CALL is the EXIT it stands in for.
+    dolvm_module_set_gate(&loaded.module, NULL);
+    cpu.gpr[3] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.pc == 0x80030030u);
+    CHECK(cpu.lr == 0x80030008u);
+    CHECK(cpu.gpr[3] == 0);
     cpu_free(&cpu);
     unload(&loaded);
 
-    // Without the opt-in the same branches leave to the chassis instead.
+    // Lowered without calls, the same branches are EXITs outright.
     dolir_module_init(&ir);
     CHECK(add_chunk(&ir, caller, 3, 0x80030004u));
     CHECK(add_chunk(&ir, callee, 2, 0x80030030u));
     memset(&loaded, 0, sizeof(loaded));
     CHECK(build_and_load(&ir, &loaded, false, NULL));
     dolir_module_free(&ir);
+    CHECK(!(loaded.module.flags & DOLVM_FLAG_DIRECT_CALLS));
 
     CHECK(cpu_init(&cpu));
     cpu.gpr[3] = 0;
@@ -674,6 +762,164 @@ static int test_direct_calls(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Indirect branches across regions, and onto addresses that are not returns
+// ---------------------------------------------------------------------------
+
+static int test_gated_indirect(void) {
+    // A bctr into another region, onto an address no bl returns to. Ungated
+    // that is two things the interpreter declines to resolve; gated it is one
+    // dispatch.
+    const u32 jumper[] = {
+        0x3C608003u,  // lis   r3, 0x8003
+        0x60630030u,  // ori   r3, r3, 0x30
+        0x7C6903A6u,  // mtctr r3
+        0x4E800420u,  // bctr
+    };
+    const u32 landing[] = {
+        0x38840001u,  // addi r4, r4, 1
+        0x4E800020u,  // blr
+    };
+    DolIRModule ir;
+    dolir_module_init(&ir);
+    CHECK(add_chunk(&ir, jumper, 4, 0x80030004u));
+    CHECK(add_chunk(&ir, landing, 2, 0x80030030u));
+    CHECK(dolir_verify(&ir, stderr));
+
+    LoadedModule loaded;
+    memset(&loaded, 0, sizeof(loaded));
+    CHECK(build_and_load(&ir, &loaded, true, NULL));
+    dolir_module_free(&ir);
+
+    CPUState cpu;
+    CHECK(cpu_init(&cpu));
+    cpu.gpr[4] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[4] == 0);
+    CHECK(cpu.pc == 0x80030030u);
+
+    u8 open[2] = {1, 1};
+    s32 budget = 100000;
+    u32 pending = 0;
+    DolVMGate gate;
+    memset(&gate, 0, sizeof(gate));
+    gate.region_open = open;
+    gate.budget = &budget;
+    gate.pending = &pending;
+    dolvm_module_set_gate(&loaded.module, &gate);
+    cpu.gpr[4] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[4] == 1);
+    CHECK(cpu.pc == 0x80040000u);
+
+    open[1] = 0;
+    cpu.gpr[4] = 0;
+    cpu.lr = 0x80040000u;
+    cpu.downcount = 0;
+    CHECK(run(&loaded, &cpu, 0x80030004u) == 1);
+    CHECK(cpu.gpr[4] == 0);
+    CHECK(cpu.pc == 0x80030030u);
+
+    cpu_free(&cpu);
+    unload(&loaded);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Idle loops
+// ---------------------------------------------------------------------------
+
+// Runs `words` as one chunk at 0x80003000 with a gate whose slice is `budget`
+// cycles, and returns the dispatch's final state.
+static int run_loop(const u32* words, u32 count, s32 budget, CPUState* cpu) {
+    DolIRModule ir;
+    dolir_module_init(&ir);
+    CHECK(add_chunk(&ir, words, count, 0x80003000u));
+    CHECK(dolir_verify(&ir, stderr));
+    LoadedModule loaded;
+    memset(&loaded, 0, sizeof(loaded));
+    CHECK(build_and_load(&ir, &loaded, true, NULL));
+    dolir_module_free(&ir);
+
+    u8 open[1] = {1};
+    u32 pending = 0;
+    DolVMGate gate;
+    memset(&gate, 0, sizeof(gate));
+    gate.region_open = open;
+    gate.budget = &budget;
+    gate.pending = &pending;
+    dolvm_module_set_gate(&loaded.module, &gate);
+
+    cpu->lr = 0x80040000u;
+    cpu->downcount = 0;
+    CHECK(run(&loaded, cpu, 0x80003000u) == 1);
+    unload(&loaded);
+    return 0;
+}
+
+static int test_idle_loops(void) {
+    CPUState cpu;
+    CHECK(cpu_init(&cpu));
+
+    // GXDrawDone's wait: poll a word until an interrupt handler changes it.
+    // One pass, then the whole slice is charged and the pc is the loop head.
+    const u32 poll[] = {
+        0x80030000u,  // lwz    r0, 0(r3)
+        0x28000000u,  // cmplwi r0, 0
+        0x4182FFF8u,  // beq    -8
+        0x4E800020u,  // blr
+    };
+    cpu.gpr[3] = 0x80100000u;
+    mem_write32(&cpu, 0x80100000u, 0);
+    cpu.gpr[0] = 0xDEADBEEFu;
+    CHECK(run_loop(poll, 4, 5000, &cpu) == 0);
+    CHECK(cpu.pc == 0x80003000u);
+    CHECK(cpu.gpr[0] == 0);
+    CHECK(cpu.downcount == -5000);
+
+    // The same loop with the word already set exits on its first pass and
+    // charges only what it ran.
+    mem_write32(&cpu, 0x80100000u, 1);
+    CHECK(run_loop(poll, 4, 5000, &cpu) == 0);
+    CHECK(cpu.pc == 0x80040000u);
+    CHECK(cpu.gpr[0] == 1);
+    CHECK(cpu.downcount < 0 && cpu.downcount > -100);
+
+    // A counted loop carries r3 from one pass to the next, so it is run,
+    // not skipped: the budget ends it with the count well past one.
+    const u32 counted[] = {
+        0x38630001u,  // addi   r3, r3, 1
+        0x2C032710u,  // cmpwi  r3, 10000
+        0x4180FFF8u,  // blt    -8
+        0x4E800020u,  // blr
+    };
+    cpu.gpr[3] = 0;
+    CHECK(run_loop(counted, 4, 5000, &cpu) == 0);
+    CHECK(cpu.gpr[3] > 100);
+    CHECK(cpu.pc >= 0x80003000u && cpu.pc < 0x8000300Cu);
+
+    // A poll that also stores is producing something and is run as well.
+    const u32 storing[] = {
+        0x80030000u,  // lwz    r0, 0(r3)
+        0x90030004u,  // stw    r0, 4(r3)
+        0x28000000u,  // cmplwi r0, 0
+        0x4182FFF4u,  // beq    -12
+        0x4E800020u,  // blr
+    };
+    cpu.gpr[3] = 0x80100000u;
+    mem_write32(&cpu, 0x80100000u, 0);
+    CHECK(run_loop(storing, 5, 5000, &cpu) == 0);
+    CHECK(cpu.downcount < -1000);
+    CHECK(cpu.pc >= 0x80003000u && cpu.pc < 0x80003010u);
+
+    cpu_free(&cpu);
+    return 0;
+}
+
 int main(void) {
     if (test_programs())
         return 1;
@@ -682,6 +928,10 @@ int main(void) {
     if (test_cr_fields())
         return 1;
     if (test_direct_calls())
+        return 1;
+    if (test_gated_indirect())
+        return 1;
+    if (test_idle_loops())
         return 1;
     printf("dolvm: all checks passed\n");
     return 0;

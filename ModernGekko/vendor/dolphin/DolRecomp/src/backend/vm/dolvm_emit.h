@@ -16,10 +16,10 @@ extern "C" {
 #endif
 
 typedef struct {
-    // Resolve intra-module linked branches and returns inside the interpreter.
-    // Faster, and safe only for a chassis that does not need to inspect every
-    // dispatch; off by default for the same reason the C backend's direct calls
-    // are off by default.
+    // Lower intra-module linked branches and tail calls to CALL rather than
+    // EXIT, naming the target's region so a gated interpreter can follow them
+    // in place. Without a gate a CALL leaves exactly as the EXIT would have,
+    // so this is safe to leave on; the pipeline does.
     bool direct_calls;
     // Hold the guest's general purpose registers, LR and CTR in the VM's own
     // register file for the length of a dispatch rather than reading and

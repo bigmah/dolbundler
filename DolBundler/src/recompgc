@@ -313,6 +313,19 @@ if [ "$MODE" = play ]; then
   # instead of erroring.
   audio_args=()
   [ -n "$AUDIO_BACKEND" ] && audio_args=(--audio "$AUDIO_BACKEND")
+  # A bytecode module is tied to the interpreter that was built with it: the
+  # runtime refuses one from an older recompiler rather than misread it. The
+  # library remembers the path it was built at, so ask the port tool for the
+  # current one instead -- a cache hit when nothing changed, a rebuild in
+  # seconds when the recompiler did. Native modules are left alone; they are
+  # minutes to rebuild and their ABI has not moved.
+  case "$ARG_MODULE" in
+    *.dvm)
+      current="$("$MG_BUILD/moderngekko-port" build "$ARG_GAME_ROOT" --backend vm 2>/dev/null \
+        | grep -E '^(built module|cache hit): ' | tail -1 | sed 's/^[^:]*: "//; s/"$//')"
+      [ -f "$current" ] && ARG_MODULE="$current"
+      ;;
+  esac
   exec "$MG_BUILD/moderngekko-run" \
     --game "$ARG_GAME_ROOT" \
     --module "$ARG_MODULE" \

@@ -7,7 +7,17 @@
 // calls only the same `ppc_*` helpers the native backends call, so a module that
 // runs correctly here runs correctly there.
 //
-// Three decisions carry most of the speed.
+// Four decisions carry most of the speed.
+//
+// A dispatch runs until the chassis needs it back, not until the next call.
+// Given a gate (dolvm.h) saying which regions the chassis would dispatch into
+// itself, the interpreter follows calls, tail calls and returns into any of
+// them and stops only when the chassis's slice counter says to, when an edge
+// leads somewhere closed, or when the chassis is holding an exception. Without
+// one it behaves exactly as the native backends do. And a block that does
+// nothing but poll one word of memory and branch back to itself -- a guest
+// waiting for an interrupt -- is skipped rather than run, the way Dolphin's
+// JITs skip it: the back edge charges the rest of the slice and leaves.
 //
 // The guest's registers live in the VM's. All 32 general purpose registers plus
 // LR, CTR and XER have a fixed home at the top of the register file, filled
@@ -25,7 +35,11 @@
 //
 // Dispatch is direct-threaded where the compiler supports computed goto, and a
 // plain switch elsewhere. Both share one body via NEXT(), and every way out of
-// it goes through `leave` so the flush cannot be forgotten on a path.
+// it goes through `leave` so the flush cannot be forgotten on a path. Threaded
+// code only pays if every handler keeps its own indirect branch, and LLVM's
+// tail merger folds them into one unless told not to; the build flags that
+// tell it are in ModernGekko's CMakeLists.txt, and the README under src/vm
+// says what they are worth.
 
 #include "vm/dolvm.h"
 #include "vm/dolvm_interp.h"
@@ -37,6 +51,14 @@
 
 #if defined(__GNUC__) && !defined(DOLVM_FORCE_SWITCH)
 #define DOLVM_THREADED 1
+#endif
+
+#if defined(__GNUC__)
+#define DOLVM_ALWAYS_INLINE inline __attribute__((always_inline))
+#define DOLVM_NOINLINE __attribute__((noinline))
+#else
+#define DOLVM_ALWAYS_INLINE inline
+#define DOLVM_NOINLINE
 #endif
 
 // CPUState words a profiled build keeps a per-slot counter for.
@@ -80,6 +102,23 @@ static void dolvm_homes_flush(CPUState* ctx, const DolVMReg* regs) {
     ctx->ctr = (u32)regs[DOLVM_HOME_CTR].u;
 }
 
+// The LT, GT and EQ bits of a condition-register field, as the compare
+// instructions set them: exactly one of the three, at bit 3, 2 or 1. Written as
+// a shift of a two-bit index so it compiles to two flag extracts and a shift
+// rather than a chain of selects -- this runs on every counted loop's back
+// edge.
+static inline u32 dolvm_cr_bits(u32 left, u32 right, bool is_signed) {
+    u32 lt, gt;
+    if (is_signed) {
+        lt = (s32)left < (s32)right;
+        gt = (s32)left > (s32)right;
+    } else {
+        lt = left < right;
+        gt = left > right;
+    }
+    return 2u << ((lt << 1) | gt);
+}
+
 // XER's summary-overflow bit, which every condition-register field update
 // copies into its low bit. XER is homed whatever else the module does, so this
 // costs a register read and no test -- the alternative was a select on the
@@ -92,6 +131,8 @@ static inline u32 dolvm_summary_overflow(const DolVMReg* regs) {
 #define DOLVM_MSR_FP 0x00002000u
 // And the one that says the guest is in user mode (PPC bit 17).
 #define DOLVM_MSR_PR 0x00004000u
+// And the one that says external interrupts are enabled (PPC bit 16).
+#define DOLVM_MSR_EE 0x00008000u
 
 static inline u64 dolvm_payload(const DolVMInst* inst) {
     u64 value;
@@ -162,6 +203,9 @@ static inline f64 dolvm_f64_from_bits(u64 bits) {
 }
 
 static inline u32 dolvm_clz32(u32 value) {
+#if defined(__GNUC__)
+    return value ? (u32)__builtin_clz(value) : 32u;
+#else
     u32 count = 0;
     if (!value)
         return 32u;
@@ -170,9 +214,13 @@ static inline u32 dolvm_clz32(u32 value) {
         count++;
     }
     return count;
+#endif
 }
 
 static inline u32 dolvm_clz64(u64 value) {
+#if defined(__GNUC__)
+    return value ? (u32)__builtin_clzll(value) : 64u;
+#else
     u32 count = 0;
     if (!value)
         return 64u;
@@ -181,12 +229,9 @@ static inline u32 dolvm_clz64(u64 value) {
         count++;
     }
     return count;
+#endif
 }
 
-// Guest loads and stores follow the native backends exactly: fold away the
-// uncached-window bit, try MEM1, then MEM2, then hand the access to the
-// chassis. A chassis access can raise, and a raised exception means this
-// dispatch is over, so both return false to unwind the interpreter.
 // The guest's memory map does not move while a dispatch runs, but the compiler
 // cannot know that -- every helper call could in principle write through ctx --
 // so it reloads the base and the size on each access. Taking a copy once per
@@ -205,20 +250,32 @@ typedef struct {
     bool homed;
 } DolVMMemory;
 
-static bool dolvm_guest_load(CPUState* ctx, const DolVMMemory* mem, u32 address,
-                             u32 width, u32 pc, u64* out) {
-    u32 normalized = address & ~0x40000000u;
-    u32 offset = normalized - GC_RAM_BASE;
-    if (mem->ram_size >= width && offset <= mem->ram_size - width) {
-        const u8* p = mem->ram + offset;
-        switch (width) {
-        case 1: *out = p[0]; break;
-        case 2: *out = read_be16(p); break;
-        case 4: *out = read_be32(p); break;
-        default: *out = read_be64(p); break;
-        }
-        return true;
+// The MEM1 hit is the whole of a guest access almost always, and it is inlined
+// into every load and store handler with the width a constant: a range check,
+// the load and a byte swap. Everything else -- MEM2, the chassis, the homed
+// registers going back and forth around it -- is out of line, because code
+// that runs once in a million accesses only costs instruction cache when it
+// sits next to code that runs every time.
+static inline bool dolvm_ram_load(const DolVMMemory* mem, u32 address,
+                                  u32 width, u64* out) {
+    u32 offset = (address & ~0x40000000u) - GC_RAM_BASE;
+    if (mem->ram_size < width || offset > mem->ram_size - width)
+        return false;
+    const u8* p = mem->ram + offset;
+    switch (width) {
+    case 1: *out = p[0]; break;
+    case 2: *out = read_be16(p); break;
+    case 4: *out = read_be32(p); break;
+    default: *out = read_be64(p); break;
     }
+    return true;
+}
+
+static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
+                                                 const DolVMMemory* mem,
+                                                 u32 address, u32 width, u32 pc,
+                                                 u64* out) {
+    u32 normalized = address & ~0x40000000u;
     u32 mem2_offset = normalized - WII_MEM2_BASE;
     if (mem->exram && mem->exram_size >= width &&
         mem2_offset <= mem->exram_size - width) {
@@ -254,11 +311,24 @@ static bool dolvm_guest_load(CPUState* ctx, const DolVMMemory* mem, u32 address,
     return ctx->exception == 0;
 }
 
+// Guest loads and stores follow the native backends exactly: fold away the
+// uncached-window bit, try MEM1, then MEM2, then hand the access to the
+// chassis. A chassis access can raise, and a raised exception means this
+// dispatch is over, so both return false to unwind the interpreter.
+static DOLVM_ALWAYS_INLINE bool dolvm_guest_load(CPUState* ctx,
+                                                 const DolVMMemory* mem,
+                                                 u32 address, u32 width, u32 pc,
+                                                 u64* out) {
+    if (dolvm_ram_load(mem, address, width, out))
+        return true;
+    return dolvm_guest_load_slow(ctx, mem, address, width, pc, out);
+}
+
 // A store to mapped memory anywhere on the reserved cache line drops the
 // reservation. Both addresses are folded out of the uncached window first, and
 // a store the chassis handles does not clear anything -- which is what cpu.c
 // does, and cpu.c is what the shipping backend calls.
-static void dolvm_clear_reservation(CPUState* ctx, u32 address) {
+static inline void dolvm_clear_reservation(CPUState* ctx, u32 address) {
     // Almost no store lands on a reserved line, and most of the time there is
     // no reservation at all, so the cheap test goes first: reading
     // reserve_addr before knowing there is one is a load per guest store.
@@ -270,23 +340,11 @@ static void dolvm_clear_reservation(CPUState* ctx, u32 address) {
         ctx->reserve_valid = false;
 }
 
-static bool dolvm_guest_store(CPUState* ctx, const DolVMMemory* mem, u32 address,
-                              u64 value, u32 width, u32 pc) {
+static DOLVM_NOINLINE bool dolvm_guest_store_slow(CPUState* ctx,
+                                                  const DolVMMemory* mem,
+                                                  u32 address, u64 value,
+                                                  u32 width, u32 pc) {
     u32 normalized = address & ~0x40000000u;
-    u32 offset = normalized - GC_RAM_BASE;
-    if (mem->ram_size >= width && offset <= mem->ram_size - width) {
-        dolvm_clear_reservation(ctx, address);
-        if (mem->journal)
-            mem->journal(offset, width, mem->journal_user);
-        u8* p = (u8*)mem->ram + offset;
-        switch (width) {
-        case 1: p[0] = (u8)value; break;
-        case 2: write_be16(p, (u16)value); break;
-        case 4: write_be32(p, (u32)value); break;
-        default: write_be64(p, value); break;
-        }
-        return true;
-    }
     u32 mem2_offset = normalized - WII_MEM2_BASE;
     if (mem->exram && mem->exram_size >= width &&
         mem2_offset <= mem->exram_size - width) {
@@ -315,6 +373,27 @@ static bool dolvm_guest_store(CPUState* ctx, const DolVMMemory* mem, u32 address
     if (mem->homed)
         dolvm_homes_fill(ctx, mem->homes);
     return ctx->exception == 0;
+}
+
+static DOLVM_ALWAYS_INLINE bool dolvm_guest_store(CPUState* ctx,
+                                                  const DolVMMemory* mem,
+                                                  u32 address, u64 value,
+                                                  u32 width, u32 pc) {
+    u32 offset = (address & ~0x40000000u) - GC_RAM_BASE;
+    if (mem->ram_size >= width && offset <= mem->ram_size - width) {
+        dolvm_clear_reservation(ctx, address);
+        if (mem->journal)
+            mem->journal(offset, width, mem->journal_user);
+        u8* p = (u8*)mem->ram + offset;
+        switch (width) {
+        case 1: p[0] = (u8)value; break;
+        case 2: write_be16(p, (u16)value); break;
+        case 4: write_be32(p, (u32)value); break;
+        default: write_be64(p, value); break;
+        }
+        return true;
+    }
+    return dolvm_guest_store_slow(ctx, mem, address, value, width, pc);
 }
 
 // fadd/fmul/fmadd and friends are not plain IEEE here: the Gekko rounds through
@@ -424,49 +503,90 @@ static void dolvm_exact_paired(CPUState* ctx, u64 descriptor) {
     }
 }
 
-// Resolve an indirect branch target inside the module. `region` is the region
-// index the branch was emitted in, or DOLVM_NO_ENTRY for a module-wide lookup
-// (which a module only asks for when it opted into direct calls).
+// Resolve an indirect branch target inside the module. `region_index` is the
+// region the branch was emitted in.
+//
+// Without a gate this is what the native backends route locally and nothing
+// more: a target inside the same region, and only one a linked branch could
+// return to. Everything else goes back to the chassis, because the chassis
+// checks things on the way in -- that the region still matches guest RAM, that
+// no mod has hooked the address -- which the interpreter cannot see.
+//
+// With a gate it can. The gate says, per region, whether the chassis would
+// dispatch there right now, and that makes any entry in an open region as good
+// a landing site as a dispatch: the entry stubs exist precisely so the chassis
+// can resume at any instruction. On a title that calls and returns every thirty
+// guest instructions, this is the difference between a dispatch per return and
+// a dispatch per timing slice.
 #ifdef DOLVM_PROFILE
 u64 g_dolvm_miss_region;
 u64 g_dolvm_miss_target;
 u64 g_dolvm_miss_gap;
+u64 g_dolvm_miss_closed;
 #endif
 
-static const DolVMEntryPoint* dolvm_resolve_indirect(const DolVMModule* module,
-                                                     u32 region_index,
-                                                     u32 target) {
+static inline const DolVMEntryPoint* dolvm_resolve_indirect(
+    const DolVMModule* module, const DolVMGate* gate, u32 region_index,
+    u32 target) {
     if (target & 3u)
         return NULL;
-    const DolVMEntryPoint* entry;
-    if (region_index == DOLVM_NO_ENTRY) {
-        entry = dolvm_module_entry_inline(module, target);
-        if (!entry)
-            return NULL;
-    } else {
-        const DolVMRegion* region = &module->regions[region_index];
-        if (target < region->guest_start || target >= region->guest_end) {
+    const DolVMRegion* region = NULL;
+    if (region_index != DOLVM_NO_ENTRY) {
+        // Most returns land in the region they came from, and that needs no
+        // lookup at all.
+        region = &module->regions[region_index];
+        if (target < region->guest_start || target >= region->guest_end)
+            region = NULL;
+    }
+    if (!region) {
+        if (!gate) {
 #ifdef DOLVM_PROFILE
             ++g_dolvm_miss_region;
 #endif
             return NULL;
         }
-        entry = &module->map[region->map_index +
-                             (target - region->guest_start) / 4u];
-        if (entry->entry == DOLVM_NO_ENTRY) {
-#ifdef DOLVM_PROFILE
-            ++g_dolvm_miss_gap;
-#endif
+        region = dolvm_module_region_inline(module, target);
+        if (!region)
             return NULL;
-        }
+        region_index = (u32)(region - module->regions);
     }
-    // Only an address a linked branch could return to is a legal landing site,
-    // which is the same set the native backends route locally.
+    if (gate && !gate->region_open[region_index]) {
 #ifdef DOLVM_PROFILE
-    if (!(entry->entry & DOLVM_ENTRY_RETURN_TARGET))
+        ++g_dolvm_miss_closed;
+#endif
+        return NULL;
+    }
+    const DolVMEntryPoint* entry =
+        &module->map[region->map_index + (target - region->guest_start) / 4u];
+    if (entry->entry == DOLVM_NO_ENTRY) {
+#ifdef DOLVM_PROFILE
+        ++g_dolvm_miss_gap;
+#endif
+        return NULL;
+    }
+    if (!gate && !(entry->entry & DOLVM_ENTRY_RETURN_TARGET)) {
+#ifdef DOLVM_PROFILE
         ++g_dolvm_miss_target;
 #endif
-    return (entry->entry & DOLVM_ENTRY_RETURN_TARGET) ? entry : NULL;
+        return NULL;
+    }
+    return entry;
+}
+
+// Whether the chassis is holding an exception the interpreter should hand
+// control back for: a synchronous one always, an asynchronous one once the
+// guest has interrupts enabled. Tested at every resolved edge and nowhere else,
+// which is often enough -- an interrupt a guest store raised is delivered by
+// the time the function that raised it returns -- and cheap enough, since the
+// word is almost always zero.
+static inline bool dolvm_pending(const DolVMGate* gate, const CPUState* ctx) {
+    u32 pending = *gate->pending;
+    if (!pending)
+        return false;
+    u32 mask = gate->pending_sync;
+    if (ctx->msr & DOLVM_MSR_EE)
+        mask |= gate->pending_async;
+    return (pending & mask) != 0;
 }
 
 // Opt-in dynamic opcode histogram. Static counts over a module are a poor guide
@@ -486,6 +606,9 @@ u64 g_dolvm_leave_indirect;
 u64 g_dolvm_leave_resolved;
 u64 g_dolvm_leave_guard;
 u64 g_dolvm_leave_exit;
+u64 g_dolvm_leave_call;
+u64 g_dolvm_leave_called;
+u64 g_dolvm_leave_idle;
 u64 g_dolvm_slot_counts[DOLVM_PROFILE_SLOTS];
 u64 g_dolvm_gpr_span[33];
 u32 g_dolvm_gpr_mask;
@@ -500,7 +623,32 @@ u32 g_dolvm_gpr_mask;
 // Where each opcode's handler begins. A sampling profiler reports addresses
 // inside one enormous function, so this is what turns those back into opcodes.
 const void* g_dolvm_op_handlers[DOLVM_OP_COUNT];
-#define DOLVM_COUNT(op) (++g_dolvm_op_counts[(op)])
+// Where dispatches end, by guest pc: a loop that spins for whole slices shows
+// up here as one address with most of the leaves.
+#define DOLVM_PROFILE_LEAVE_SITES 4096u
+static u32 g_dolvm_leave_pc[DOLVM_PROFILE_LEAVE_SITES];
+static u64 g_dolvm_leave_pc_count[DOLVM_PROFILE_LEAVE_SITES];
+static void dolvm_count_leave(u32 pc) {
+    u32 slot = (pc >> 2) * 2654435761u >> 20;
+    for (u32 probe = 0; probe < DOLVM_PROFILE_LEAVE_SITES; probe++) {
+        u32 i = (slot + probe) & (DOLVM_PROFILE_LEAVE_SITES - 1u);
+        if (!g_dolvm_leave_pc_count[i] || g_dolvm_leave_pc[i] == pc) {
+            g_dolvm_leave_pc[i] = pc;
+            g_dolvm_leave_pc_count[i]++;
+            return;
+        }
+    }
+}
+// Dynamic opcode pairs: what follows what, which is what decides whether a
+// fused form would pay.
+u64 g_dolvm_pair_counts[DOLVM_OP_COUNT][DOLVM_OP_COUNT];
+static u32 g_dolvm_previous_op;
+#define DOLVM_COUNT(op)                                                       \
+    do {                                                                      \
+        ++g_dolvm_op_counts[(op)];                                            \
+        ++g_dolvm_pair_counts[g_dolvm_previous_op][(op)];                     \
+        g_dolvm_previous_op = (op);                                           \
+    } while (0)
 #else
 #define DOLVM_COUNT(op) ((void)0)
 #define DOLVM_COUNT_SLOT(off) ((void)0)
@@ -589,6 +737,44 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
     // base, so landing in the middle of a block still resolves to real pcs.
     u32 pc_base = entry->pc_base;
     u32 steps = 0;
+    // How long this dispatch may run. Ungated, it is the fixed allowance the
+    // native backends use. Gated, it is whatever is left of the chassis's
+    // timing slice, and the dispatch runs to the end of that, returning only
+    // when a resolved edge is closed or an exception is waiting. The slice
+    // counter is read live at every guard: a hook the interpreter calls can
+    // schedule an event and shorten it, and an event the guest is polling for
+    // has to land when it was scheduled, not at the end of the slice.
+    static const s32 fixed_budget = DOLVM_LOOP_CYCLE_BUDGET;
+    const DolVMGate* gate = module->gate;
+    const s32* budget = gate ? gate->budget : &fixed_budget;
+    u32 step_budget = DOLVM_LOOP_STEP_BUDGET;
+    if (gate && *budget > (s32)DOLVM_LOOP_STEP_BUDGET) {
+        // A loop whose blocks the cycle table prices at zero is bounded by
+        // steps instead, so that bound has to grow with the cycles.
+        step_budget = (u32)*budget;
+    }
+#define DOLVM_OVER_BUDGET() (ctx->downcount <= -(s64)*budget)
+// An idle loop's back edge: nothing the loop does can end the wait, so the
+// rest of the slice is charged in one go and the chassis gets control back to
+// run whatever event the guest is waiting on. Leaves at the loop head, so the
+// next dispatch polls once more.
+#define DOLVM_IDLE_LEAVE(leave_pc)                                            \
+    do {                                                                      \
+        s64 whole__ = -(s64)*budget;                                          \
+        if (whole__ < ctx->downcount)                                         \
+            ctx->downcount = whole__;                                         \
+        ctx->pc = (leave_pc);                                                 \
+        goto leave;                                                           \
+    } while (0)
+// Landing on a block head through a resolved edge: the head opens with its
+// cycle charge, and paying it here is one dispatch fewer per call and return.
+#define DOLVM_LAND()                                                          \
+    do {                                                                      \
+        if (ip->op == DOLVM_OP_CHARGE) {                                      \
+            ctx->downcount -= (s64)ip->imm;                                   \
+            ip++;                                                             \
+        }                                                                     \
+    } while (0)
 
 #ifdef DOLVM_THREADED
     static const void* const dispatch_table[DOLVM_OP_COUNT] = {
@@ -1068,8 +1254,7 @@ dispatch:
         // Two ceilings, exactly the pair the native backends use: cycles bound
         // an ordinary loop, and the step count bounds a loop whose body the
         // cycle table happens to price at zero.
-        if (ctx->downcount <= -(s64)DOLVM_LOOP_CYCLE_BUDGET ||
-            ++steps >= DOLVM_LOOP_STEP_BUDGET) {
+        if (DOLVM_OVER_BUDGET() || ++steps >= step_budget) {
             ctx->pc = inst->imm;
             goto leave;
         }
@@ -1103,11 +1288,12 @@ dispatch:
     OP(DOLVM_OP_INDIRECT): {
         u32 target = (u32)regs[inst->b].u & (inst->a ? ~3u : ~0u);
         const DolVMEntryPoint* landing =
-            dolvm_resolve_indirect(module, inst->imm, target);
+            dolvm_resolve_indirect(module, gate, inst->imm, target);
         // A resolvable target still goes back to the chassis once the budget
-        // is spent, so a mutually recursive pair cannot hold the dispatch.
-        if (!landing || ctx->downcount <= -(s64)DOLVM_LOOP_CYCLE_BUDGET ||
-            ++steps >= DOLVM_LOOP_STEP_BUDGET) {
+        // is spent, so a mutually recursive pair cannot hold the dispatch --
+        // and as soon as the chassis has an exception to deliver.
+        if (!landing || DOLVM_OVER_BUDGET() || ++steps >= step_budget ||
+            (gate && dolvm_pending(gate, ctx))) {
             ctx->pc = target;
 #ifdef DOLVM_PROFILE
             ++g_dolvm_leave_indirect;
@@ -1124,12 +1310,21 @@ dispatch:
 
     OP(DOLVM_OP_CALL): {
         // payload: target guest pc in the high half, target pc base in the low.
+        // Followed only where the gate says the chassis itself would go;
+        // otherwise this is the EXIT it stands in for.
         u64 payload = dolvm_payload(ip);
-        if (ctx->downcount <= -(s64)DOLVM_LOOP_CYCLE_BUDGET ||
-            ++steps >= DOLVM_LOOP_STEP_BUDGET) {
+        if (!gate || !gate->region_open[(u32)inst->a | (u32)inst->b << 8] ||
+            DOLVM_OVER_BUDGET() || ++steps >= step_budget ||
+            dolvm_pending(gate, ctx)) {
             ctx->pc = (u32)(payload >> 32);
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_call;
+#endif
             goto leave;
         }
+#ifdef DOLVM_PROFILE
+        ++g_dolvm_leave_called;
+#endif
         ip = code + inst->imm;
         pc_base = (u32)payload;
         NEXT();
@@ -1191,13 +1386,26 @@ dispatch:
         bool indexed = ((descriptor >> 12) & 1u) != 0;
         u32 ea = (u32)regs[inst->b].u;
         ctx->pc = inst->imm;
-        // Its memory access can land outside RAM and reach the chassis.
-        DOLVM_HOMES_OUT();
-        bool ok = load ? ppc_psq_load_inline(ctx, reg, ea, w, gqr, indexed,
-                                             inst->imm)
-                       : ppc_psq_store_inline(ctx, reg, ea, w, gqr, indexed,
-                                              inst->imm);
-        DOLVM_HOMES_IN();
+        // The helper touches nothing the register file is holding -- the
+        // quantization registers, the floating point file, and memory -- so the
+        // homed registers only have to be put back when the access can leave
+        // RAM and reach the chassis. A pair is at most eight bytes, and almost
+        // every one lands in MEM1, where the bracket was most of the cost.
+        bool ok;
+        if (mem.ram_size >= 8u &&
+            ((ea & ~0x40000000u) - GC_RAM_BASE) <= mem.ram_size - 8u) {
+            ok = load ? ppc_psq_load_inline(ctx, reg, ea, w, gqr, indexed,
+                                            inst->imm)
+                      : ppc_psq_store_inline(ctx, reg, ea, w, gqr, indexed,
+                                             inst->imm);
+        } else {
+            DOLVM_HOMES_OUT();
+            ok = load ? ppc_psq_load_inline(ctx, reg, ea, w, gqr, indexed,
+                                            inst->imm)
+                      : ppc_psq_store_inline(ctx, reg, ea, w, gqr, indexed,
+                                             inst->imm);
+            DOLVM_HOMES_IN();
+        }
         if (!ok)
             goto leave;
         NEXT();
@@ -1230,12 +1438,8 @@ dispatch:
 #define DOLVM_CMP_BRANCH(payload)                                             \
     u32 left = (u32)regs[inst->a].u;                                          \
     u32 right = (u32)(payload);                                               \
-    u32 bits;                                                                 \
-    if (inst->b & 0x08u)                                                      \
-        bits = (s32)left < (s32)right ? 8u : (s32)left > (s32)right ? 4u : 2u;\
-    else                                                                      \
-        bits = left < right ? 8u : left > right ? 4u : 2u;                    \
-    bits |= dolvm_summary_overflow(regs);                                     \
+    u32 bits = dolvm_cr_bits(left, right, (inst->b & 0x08u) != 0) |           \
+               dolvm_summary_overflow(regs);                                  \
     u32 shift = 4u * (7u - (u32)(inst->b & 7u));                              \
     ctx->cr = (ctx->cr & ~(0xFu << shift)) | (bits << shift);                 \
     bool taken = ((bits >> (3u - ((u32)inst->b >> 4 & 3u))) & 1u) ==          \
@@ -1268,8 +1472,13 @@ dispatch:
         DOLVM_CMP_BRANCH(payload);
         if (!taken)
             NEXT();
-        if (ctx->downcount <= -(s64)DOLVM_LOOP_CYCLE_BUDGET ||
-            ++steps >= DOLVM_LOOP_STEP_BUDGET) {
+        if (inst->b & 0x80u) {
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_idle;
+#endif
+            DOLVM_IDLE_LEAVE((u32)dolvm_payload(leave_word));
+        }
+        if (DOLVM_OVER_BUDGET() || ++steps >= step_budget) {
             ctx->pc = (u32)dolvm_payload(leave_word);
 #ifdef DOLVM_PROFILE
             ++g_dolvm_leave_guard;
@@ -1405,17 +1614,9 @@ dispatch:
         // are mutually exclusive, and XER's summary-overflow bit rides along
         // in bit 0 of the field.
         u32 shift = 4u * (7u - (inst->imm & 0xFFu));
-        u32 bits;
-        if ((inst->imm >> 8) & 1u) {
-            s32 left = (s32)(u32)regs[inst->b].u;
-            s32 right = (s32)(u32)regs[inst->c].u;
-            bits = left < right ? 8u : left > right ? 4u : 2u;
-        } else {
-            u32 left = (u32)regs[inst->b].u;
-            u32 right = (u32)regs[inst->c].u;
-            bits = left < right ? 8u : left > right ? 4u : 2u;
-        }
-        bits |= dolvm_summary_overflow(regs);
+        u32 bits = dolvm_cr_bits((u32)regs[inst->b].u, (u32)regs[inst->c].u,
+                                 ((inst->imm >> 8) & 1u) != 0) |
+                   dolvm_summary_overflow(regs);
         ctx->cr = (ctx->cr & ~(0xFu << shift)) | (bits << shift);
         NEXT();
     }
@@ -1526,12 +1727,8 @@ dispatch:
         ip++;
         u32 left = (u32)regs[inst->b].u;
         u32 right = (u32)payload;
-        u32 bits;
-        if ((inst->imm >> 8) & 1u)
-            bits = (s32)left < (s32)right ? 8u : (s32)left > (s32)right ? 4u : 2u;
-        else
-            bits = left < right ? 8u : left > right ? 4u : 2u;
-        bits |= dolvm_summary_overflow(regs);
+        u32 bits = dolvm_cr_bits(left, right, ((inst->imm >> 8) & 1u) != 0) |
+                   dolvm_summary_overflow(regs);
         u32 shift = 4u * (7u - (inst->imm & 0xFFu));
         ctx->cr = (ctx->cr & ~(0xFu << shift)) | (bits << shift);
         NEXT();
@@ -1556,13 +1753,18 @@ dispatch:
         // The whole of a loop's back edge. Not taken, this costs the payload
         // step and nothing else; taken, it is the budget check and the charge
         // that the separate guarded jump used to be.
-        if ((((ctx->cr << inst->a) >> 31) & 1u) != inst->b) {
+        if ((((ctx->cr << inst->a) >> 31) & 1u) != (inst->b & 1u)) {
             ip++;
             NEXT();
         }
         u64 payload = dolvm_payload(ip);
-        if (ctx->downcount <= -(s64)DOLVM_LOOP_CYCLE_BUDGET ||
-            ++steps >= DOLVM_LOOP_STEP_BUDGET) {
+        if (inst->b & 0x80u) {
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_idle;
+#endif
+            DOLVM_IDLE_LEAVE((u32)payload);
+        }
+        if (DOLVM_OVER_BUDGET() || ++steps >= step_budget) {
             ctx->pc = (u32)payload;
             goto leave;
         }
@@ -1578,8 +1780,13 @@ dispatch:
         // run the body once. The target's cycle charge rides in the high half
         // and is only paid when the edge is actually taken.
         u64 payload = dolvm_payload(ip);
-        if (ctx->downcount <= -(s64)DOLVM_LOOP_CYCLE_BUDGET ||
-            ++steps >= DOLVM_LOOP_STEP_BUDGET) {
+        if (inst->a) {
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_idle;
+#endif
+            DOLVM_IDLE_LEAVE((u32)payload);
+        }
+        if (DOLVM_OVER_BUDGET() || ++steps >= step_budget) {
             ctx->pc = (u32)payload;
             goto leave;
         }
@@ -1600,12 +1807,8 @@ dispatch:
         ip++;
         u32 left = *(const u32*)((const u8*)ctx + (u32)(payload >> 32));
         u32 right = (u32)payload;
-        u32 bits;
-        if ((inst->imm >> 8) & 1u)
-            bits = (s32)left < (s32)right ? 8u : (s32)left > (s32)right ? 4u : 2u;
-        else
-            bits = left < right ? 8u : left > right ? 4u : 2u;
-        bits |= dolvm_summary_overflow(regs);
+        u32 bits = dolvm_cr_bits(left, right, ((inst->imm >> 8) & 1u) != 0) |
+                   dolvm_summary_overflow(regs);
         u32 shift = 4u * (7u - (inst->imm & 0xFFu));
         ctx->cr = (ctx->cr & ~(0xFu << shift)) | (bits << shift);
         NEXT();
@@ -1616,12 +1819,8 @@ dispatch:
         ip++;
         u32 left = *(const u32*)((const u8*)ctx + (u32)(payload >> 32));
         u32 right = *(const u32*)((const u8*)ctx + (u32)payload);
-        u32 bits;
-        if ((inst->imm >> 8) & 1u)
-            bits = (s32)left < (s32)right ? 8u : (s32)left > (s32)right ? 4u : 2u;
-        else
-            bits = left < right ? 8u : left > right ? 4u : 2u;
-        bits |= dolvm_summary_overflow(regs);
+        u32 bits = dolvm_cr_bits(left, right, ((inst->imm >> 8) & 1u) != 0) |
+                   dolvm_summary_overflow(regs);
         u32 shift = 4u * (7u - (inst->imm & 0xFFu));
         ctx->cr = (ctx->cr & ~(0xFu << shift)) | (bits << shift);
         NEXT();
@@ -1637,6 +1836,9 @@ dispatch:
     ctx->pc = pc_base;
 
 leave:
+#ifdef DOLVM_PROFILE
+    dolvm_count_leave(ctx->pc);
+#endif
     dolvm_xer_out(ctx, regs);
     if (homed)
         dolvm_homes_flush(ctx, regs);
@@ -1658,21 +1860,39 @@ void dolvm_profile_report(FILE* out) {
                     dolvm_op_name(op));
     }
     fprintf(out,
-            "dolvm leaves: %llu unresolved indirect, %llu exit, %llu guard; "
-            "%llu indirects resolved in place\n",
+            "dolvm leaves: %llu unresolved indirect, %llu exit, %llu guard, "
+            "%llu idle, %llu call; %llu indirects and %llu calls resolved in place\n",
             (unsigned long long)g_dolvm_leave_indirect,
             (unsigned long long)g_dolvm_leave_exit,
             (unsigned long long)g_dolvm_leave_guard,
-            (unsigned long long)g_dolvm_leave_resolved);
+            (unsigned long long)g_dolvm_leave_idle,
+            (unsigned long long)g_dolvm_leave_call,
+            (unsigned long long)g_dolvm_leave_resolved,
+            (unsigned long long)g_dolvm_leave_called);
     fprintf(out,
             "dolvm indirect misses: %llu outside the region, %llu no entry, "
-            "%llu not a return target\n",
+            "%llu not a return target, %llu region closed\n",
             (unsigned long long)g_dolvm_miss_region,
             (unsigned long long)g_dolvm_miss_gap,
-            (unsigned long long)g_dolvm_miss_target);
+            (unsigned long long)g_dolvm_miss_target,
+            (unsigned long long)g_dolvm_miss_closed);
     fprintf(out, "dolvm profile: %llu ops over %llu dispatches (%.1f per dispatch)\n",
             (unsigned long long)total, (unsigned long long)g_dolvm_dispatches,
             g_dolvm_dispatches ? (double)total / (double)g_dolvm_dispatches : 0.0);
+    for (u32 round = 0; round < 8u; round++) {
+        u32 best = DOLVM_PROFILE_LEAVE_SITES;
+        for (u32 i = 0; i < DOLVM_PROFILE_LEAVE_SITES; i++) {
+            if (g_dolvm_leave_pc_count[i] &&
+                (best == DOLVM_PROFILE_LEAVE_SITES ||
+                 g_dolvm_leave_pc_count[i] > g_dolvm_leave_pc_count[best]))
+                best = i;
+        }
+        if (best == DOLVM_PROFILE_LEAVE_SITES)
+            break;
+        fprintf(out, "  leaves at 0x%08X: %llu\n", g_dolvm_leave_pc[best],
+                (unsigned long long)g_dolvm_leave_pc_count[best]);
+        g_dolvm_leave_pc_count[best] = 0;
+    }
     // Insertion sort by count; DOLVM_OP_COUNT is small and this runs once.
     u32 order[DOLVM_OP_COUNT];
     for (u32 op = 0; op < DOLVM_OP_COUNT; op++)
@@ -1694,6 +1914,23 @@ void dolvm_profile_report(FILE* out) {
                 (unsigned long long)count, dolvm_op_name(order[i]));
     }
     dolvm_slot_report(out, total);
+    fprintf(out, "dolvm hottest opcode pairs:\n");
+    for (u32 round = 0; round < 40u; round++) {
+        u32 best_a = 0, best_b = 0;
+        u64 best = 0;
+        for (u32 a = 0; a < DOLVM_OP_COUNT; a++)
+            for (u32 b = 0; b < DOLVM_OP_COUNT; b++)
+                if (g_dolvm_pair_counts[a][b] > best) {
+                    best = g_dolvm_pair_counts[a][b];
+                    best_a = a;
+                    best_b = b;
+                }
+        if (!best)
+            break;
+        fprintf(out, "  %6.2f%%  %14llu  %s -> %s\n", 100.0 * (double)best / (double)total,
+                (unsigned long long)best, dolvm_op_name(best_a), dolvm_op_name(best_b));
+        g_dolvm_pair_counts[best_a][best_b] = 0;
+    }
 }
 
 // Which slots the state traffic names, and how wide a working set one dispatch

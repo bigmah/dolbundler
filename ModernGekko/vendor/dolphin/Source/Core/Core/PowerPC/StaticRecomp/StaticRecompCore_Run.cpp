@@ -135,6 +135,9 @@ void StaticRecompCore::Run()
           if (m_has_rel_modules)
             ResolveNativeAddress(runtime_dispatch_address, &linked_dispatch_address, nullptr);
           m_guest.pc = linked_dispatch_address;
+          // A gated module runs through what is left of the slice before it
+          // comes back here, flushing its charge from inside any hook it
+          // calls; the flush below covers whatever it charged since.
           m_module->dispatch(&m_guest, linked_dispatch_address);
           if (m_has_rel_modules)
             m_guest.pc = TranslateRelAddress(m_guest.pc);
@@ -157,9 +160,7 @@ void StaticRecompCore::Run()
           const u64 effective_charge = static_cast<u64>(charge > 0 ? charge : 1);
           ppc.downcount -= static_cast<int>(effective_charge);
           m_charged_cycles += effective_charge;
-          const u64 total_cycles = m_timebase_cycle_remainder + effective_charge;
-          m_guest.timebase += total_cycles / SystemTimers::TIMER_RATIO;
-          m_timebase_cycle_remainder = total_cycles % SystemTimers::TIMER_RATIO;
+          AdvanceGuestTimebase(effective_charge);
 
           // Idle loop skipping for configured target loops (e.g. Wii Menu OSIdleThread)
           if (m_guest.pc == m_idle_pc && m_idle_pc != 0)

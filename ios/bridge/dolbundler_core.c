@@ -13,6 +13,7 @@
 #include "backend/emitter.h"
 #include "frontend/container/disc_extract.h"
 #include "frontend/container/dol.h"
+#include "vm/dolvm.h"
 
 static void set_err(char* err, size_t err_size, const char* fmt, ...)
 {
@@ -62,6 +63,80 @@ int db_is_imported(const DBGame* game)
   char dol[DB_PATH_SIZE];
   snprintf(dol, sizeof(dol), "%s/sys/main.dol", game->game_root);
   return path_exists(dol) && path_exists(game->module_path);
+}
+
+int db_module_is_current(const DBGame* game)
+{
+  FILE* f = fopen(game->module_path, "rb");
+  if (!f)
+    return 0;
+  DolVMHeader header;
+  const size_t read = fread(&header, 1, sizeof(header), f);
+  fclose(f);
+  if (read != sizeof(header))
+    return 0;
+  // The same checks the loader makes before it will run a module; a module
+  // that fails them here would fail them at boot, so it is rebuilt instead.
+  return memcmp(header.magic, DOLVM_MAGIC, DOLVM_MAGIC_SIZE) == 0 &&
+         header.version == DOLVM_VERSION && header.abi_version == DOLVM_ABI_VERSION;
+}
+
+// The recompile half of an import: main.dol out of the extracted game, bytecode
+// into the module path. Whatever module was there is replaced.
+static int recompile_module(DBGame* game, DBProgressFn progress, void* ctx, char* err,
+                            size_t err_size)
+{
+  char dol_path[DB_PATH_SIZE];
+  snprintf(dol_path, sizeof(dol_path), "%s/sys/main.dol", game->game_root);
+
+  if (progress)
+    progress(DB_STAGE_RECOMPILING, game->title, ctx);
+
+  DOLFile dol;
+  if (!dol_load(&dol, dol_path))
+  {
+    set_err(err, err_size, "Could not read main.dol from the extracted disc.");
+    return 0;
+  }
+
+  remove(game->module_path);
+
+  // make_module_path() swaps the extension, so handing it the final path
+  // with ".dvm" already on it lands the module exactly where we want it.
+  // jobs=1: the vm backend is single threaded, and the arg only ever fed
+  // the C backend's split output.
+  const int ok = emit_dol_split(&dol, game->module_path, DOLRECOMP_CPU_GEKKO, 1,
+                                /*local_chunks_dir=*/0, /*symbols=*/NULL,
+                                DOLRECOMP_BACKEND_VM, game->disc_id);
+  dol_free(&dol);
+
+  if (!ok || !path_exists(game->module_path))
+  {
+    set_err(err, err_size, "Recompiling %s to bytecode failed.", game->disc_id);
+    return 0;
+  }
+  return 1;
+}
+
+int db_rebuild_module(DBGame* game, DBProgressFn progress, void* ctx, char* err, size_t err_size)
+{
+  char modules_dir[DB_PATH_SIZE];
+  snprintf(modules_dir, sizeof(modules_dir), "%s", game->module_path);
+  char* slash = strrchr(modules_dir, '/');
+  if (slash)
+  {
+    *slash = '\0';
+    if (!make_dirs(modules_dir))
+    {
+      set_err(err, err_size, "Could not create the module directory.");
+      return 0;
+    }
+  }
+  if (!recompile_module(game, progress, ctx, err, err_size))
+    return 0;
+  if (progress)
+    progress(DB_STAGE_DONE, game->title, ctx);
+  return 1;
 }
 
 int db_probe_iso(const char* iso_path, DBGame* game, char* err, size_t err_size)
@@ -121,32 +196,12 @@ int db_import_iso(const char* iso_path, const char* library_dir, DBProgressFn pr
   }
 
   // --- recompile ---------------------------------------------------------
-  if (!path_exists(game->module_path))
+  // A module from an older build of the interpreter is rebuilt rather than
+  // kept: the loader would refuse it at boot.
+  if (!path_exists(game->module_path) || !db_module_is_current(game))
   {
-    if (progress)
-      progress(DB_STAGE_RECOMPILING, game->title, ctx);
-
-    DOLFile dol;
-    if (!dol_load(&dol, dol_path))
-    {
-      set_err(err, err_size, "Could not read main.dol from the extracted disc.");
+    if (!recompile_module(game, progress, ctx, err, err_size))
       return 0;
-    }
-
-    // make_module_path() swaps the extension, so handing it the final path
-    // with ".dvm" already on it lands the module exactly where we want it.
-    // jobs=1: the vm backend is single threaded, and the arg only ever fed
-    // the C backend's split output.
-    const int ok = emit_dol_split(&dol, game->module_path, DOLRECOMP_CPU_GEKKO, 1,
-                                  /*local_chunks_dir=*/0, /*symbols=*/NULL,
-                                  DOLRECOMP_BACKEND_VM, game->disc_id);
-    dol_free(&dol);
-
-    if (!ok || !path_exists(game->module_path))
-    {
-      set_err(err, err_size, "Recompiling %s to bytecode failed.", game->disc_id);
-      return 0;
-    }
   }
 
   if (progress)

@@ -67,6 +67,17 @@ void db_paths_for(const char* library_dir, const char* disc_id, DBGame* game);
 // 1 if both the extracted game root and the .dvm are present on disk.
 int db_is_imported(const DBGame* game);
 
+// 1 if the .dvm was written for the bytecode ABI this build interprets. A
+// module from an older build is still a complete import -- the extracted game
+// is what takes the time and the space -- but has to be rebuilt before it can
+// be played.
+int db_module_is_current(const DBGame* game);
+
+// Recompile an imported game's main.dol over whatever module is there.
+// Blocking; seconds to a minute depending on the game. `progress` may be NULL.
+// Returns 1 on success, 0 on failure with a message written to err.
+int db_rebuild_module(DBGame* game, DBProgressFn progress, void* ctx, char* err, size_t err_size);
+
 #ifdef __cplusplus
 }
 #endif

@@ -41,6 +41,61 @@ module was built from. ModernGekko opens one through
 `src/runtime/dolvm/` and hands the chassis an ordinary module descriptor whose
 `dispatch` runs the interpreter; nothing downstream can tell the difference.
 
+### The dispatch gate
+
+A chassis checks things on every dispatch -- that the region still matches
+guest RAM, that no mod has hooked the address, that its timing slice has
+something left -- and an interpreter that followed a call or a return by
+itself would skip all of them. So by itself it follows none: a `bl` leaves
+exactly as an `EXIT` would, and a `blr` is resolved only inside its own region
+and only onto an address a linked branch could return to, which is what the
+native backends route locally.
+
+A chassis that wants more installs a gate (`DolVMGate`, via
+`dolvm_module_set_gate`): one byte per region saying whether it would itself
+dispatch there right now, a pointer to its live slice counter, and a word it
+raises exceptions in. With that the interpreter follows calls, tail calls and
+indirect branches into any open region, landing on any entry -- the entry
+stubs exist so the chassis can resume anywhere, which makes every one of them
+as good a landing site as a dispatch -- and keeps going until the slice is
+spent, a closed region is reached, or an exception is waiting. On Melee that
+is one dispatch per timing slice instead of one per thirty guest instructions.
+
+Two things about the gate are easy to get wrong and were, both found by the
+game wandering down a different path rather than by a test:
+
+- **The budget is read live at every guard, not snapshotted.** Dolphin's
+  CoreTiming shortens the slice from inside the hooks the interpreter calls --
+  an MMIO write that schedules an event due before the slice was going to
+  end -- and an interpreter that ran to the old end delivered every such event
+  late. The chassis also flushes the charge accumulated so far at the top of
+  every hook, so an event is scheduled against the exact guest moment and not
+  the start of the dispatch.
+- **Exceptions are checked at resolved edges.** An interrupt the guest raised
+  with a store is delivered by the time the function that raised it returns,
+  without the interpreter having to poll a word on every back edge.
+
+ModernGekko's chassis publishes its gate through
+`StaticRecompModuleSource::publish_gate`; see `GXRuntime/include/core/
+dispatch_gate.h` for the shape and `StaticRecompCore::RefreshChunkOpen` for
+what closes a region.
+
+### Idle loops
+
+`lwz rX,d(rY); cmp[l]wi rX,n; bc` back to its own head is a guest waiting for
+an interrupt handler or the other processor to change one word of memory, and
+nothing the loop does can end the wait. Dolphin's JITs skip it -- they charge
+the rest of the slice and let the next event run -- and so does this: the
+emitter marks the back edge of a block with exactly that shape (one load, no
+stores, nothing written but the loaded register and CR), and the interpreter,
+when the edge is taken, charges what is left of the budget and leaves at the
+loop head. Counted delay loops and loops with a store are left to run, since
+a skipped iteration of those would be a visible one.
+
+It matters more than it sounds: `GXDrawDone`'s wait for the GPU is this loop,
+and before it was skipped it was 40% of Melee's guest cycles and half of Mario
+Party 4's.
+
 The interpreter is compiled against the chassis's own `CPUState`, not the
 recompiler's. The two agree on every field a bytecode state access can name and
 differ past the last of them, so `sizeof(CPUState)` is the wrong thing to check.
@@ -222,12 +277,13 @@ dolvm_bench                                        # interpreter vs generated co
 | Variable | Effect |
 |---|---|
 | `DOLRECOMP_VM_CHUNK` | guest instructions per region (default 65536); see Speed |
-| `DOLRECOMP_VM_DIRECT_CALLS` | `1` resolves intra-module calls inside the interpreter |
+| `DOLRECOMP_VM_DIRECT_CALLS` | `0` lowers intra-module calls to `EXIT` instead of `CALL`, for comparison |
 | `DOLRECOMP_VM_HOME_STATE` | `0` leaves the guest registers in `CPUState`, for comparison |
 
-Direct calls are off by default for the same reason the C backend's are: they
-bypass whatever the chassis checks on dispatch, including host-call interception
-and self-modifying-code retirement.
+Calls are lowered to `CALL` by default. Whether one is followed is decided at
+run time by the chassis's gate (above), and a chassis that installs none gets
+the `EXIT` behaviour back, so the module is the same either way and only the
+interpreter's permission differs.
 
 ## Speed
 
@@ -242,49 +298,59 @@ kernel: it branches constantly and its working set is the whole title. The
 figure to use is throughput -- cpu seconds to retire a fixed number of guest
 cycles, which `MODERNGEKKO_DOLVM_BENCH` reports and which a busy machine barely
 moves. Over each title's first six billion guest cycles, against the Gekko's
-486 MHz:
+486 MHz, on an M4 Pro:
 
-| Title | before | now |
+| Title | homed registers | + gate, idle loops, build flags |
 |---|---|---|
-| Mario Party 4 | 1.39x | **1.69x** |
-| The SpongeBob SquarePants Movie | 1.02x | **1.25x** |
-| Super Smash Bros Melee | 0.84x | **0.92x** |
+| Mario Party 4 | 1.69x | **2.94x** |
+| The SpongeBob SquarePants Movie | 1.25x | **1.81x** |
+| Super Smash Bros Melee | 0.92x | **1.39x** |
+
+Where the second column came from, in the order it was found: the dispatch gate
+(+5%, +21%, +9%); one indirect branch per handler, which LLVM's tail merger
+had folded into a single `br` for the whole loop until `-mllvm
+-tail-dup-pred-size` was raised (+3%, +7%, +5%); inlining the MEM1 fast path of
+guest loads and stores (+2%, +6%, +4%); bracketing `psq_l`/`psq_st` with the
+homes flush only when the access can leave RAM (+2%, 0%, +5%); LTO over the
+interpreter and the cpu helpers (Melee +3%); and idle loop skipping (+55%,
++13%, +17%). Folding the landing block's cycle charge into the resolved edge was
+tried and *lost* 3%: a dispatch that lands on a `charge` gives the next
+indirect branch its own history, and that is worth more than the dispatch.
 
 Measure that way and nothing else. A run of a fixed number of *seconds* measures
 whatever scene the game happened to reach, and a faster build reaches a
-different one, which reads as several percent in either direction.
+different one, which reads as several percent in either direction. The bench
+counts guest cycles off the timebase rather than off `downcount`, because the
+chassis flushes the latter from inside hooks.
+
+Two more rules, each learned the hard way:
 
 **Regenerate the PGO profile after every change to the interpreter, before
-believing any number.** A profile stale by one new opcode is worth about -10%,
-which is larger than most of the wins being measured; twice during this work it
-turned a real gain into an apparent regression. The recipe is in ModernGekko's
-`CMakeLists.txt`.
+believing any number.** A profile whose function hash no longer matches is
+dropped silently (`-Wno-profile-instr-out-of-date` sees to that), which costs
+6-10% -- larger than most of the wins being measured. The recipe is in
+ModernGekko's `CMakeLists.txt`.
 
-Melee is the one with room left, and the reason is not its opcode mix. It ends
-a dispatch every 26 guest cycles, against 90 for Mario Party 4, so it pays the
-fixed cost of a dispatch -- the home fill and flush, the prologue, the entry
-lookup -- three times as often over the same work. Nine tenths of those
-dispatches are an indirect branch whose target is in another region, which the
-interpreter will not resolve in place: a region is the unit the chassis verifies
-against guest RAM and the unit it drops to the fallback interpreter when a mod
-patches inside it, so jumping between them behind its back would skip both.
+**Check the executed op count, not just the speed.** With
+`MODERNGEKKO_DOLVM_PROFILE=ON` the interpreter is deterministic to the
+instruction from run to run (Melee: 7.94 billion ops over its first six billion
+cycles). A change that moves timing granularity shifts that by a fraction of a
+percent; a run that executes a wildly different number of ops, or a different
+opcode mix, has sent the game down a different path and is a bug wearing a
+speedup's clothes -- the live-budget trap above first showed up as a 30% "gain".
 
-`DOLRECOMP_VM_CHUNK` decides how large a region is, and it is the largest lever
-left. Raising it from the default 65536 guest instructions is worth, per title:
-
-| Title | 65536 (default) | 262144 | 1048576 |
-|---|---|---|---|
-| Mario Party 4 | 1.69x | 1.71x | 1.73x |
-| The SpongeBob Movie | 1.25x | 1.35x | 1.36x |
-| Melee | 0.92x | 0.97x | **1.03x** |
-
-It is not free. A larger region is a larger blast radius for a mod: one host
-call anywhere inside one drops the whole thing to the fallback interpreter, and
-at 1048576 that is the entire title. Recompilation also loses its parallelism --
-Melee goes from seconds to about a minute. The default stays where it is; the
-knob is there for a build that ships without mod support.
+What is left is the interpreter proper: about five host cycles per bytecode op
+on an M4 Pro, most of it the indirect branch that every op ends in and the
+store-to-load round trips through the register file. `DOLRECOMP_VM_CHUNK` no
+longer matters much, since the gate resolves across regions; the default stays
+at 65536, which keeps the blast radius of a mod's host call to one region.
 
 ## Correctness
+
+`test_dolvm` exercises the gate directly: calls followed into open regions and
+refused into closed ones, indirect branches landing on addresses that are not
+returns, an exception the chassis is holding turning the next resolved edge
+into a leave, and a spent budget doing the same.
 
 `test_dolvm_diff` runs every opcode the decoder knows through both backends on
 identical randomized state and compares the whole architectural state plus a

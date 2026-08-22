@@ -21,3 +21,6 @@ __pycache__/
 # Rust / CMake build output
 target/
 build/
+# ios/build.sh and the simulator recipe in ios/README.md
+build-ios/
+build-sim/

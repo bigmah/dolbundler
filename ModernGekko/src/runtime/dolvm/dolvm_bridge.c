@@ -12,6 +12,7 @@
 #include "dolvm_bridge.h"
 
 #include "core/cpu.h"
+#include "core/dispatch_gate.h"
 #include "vm/dolvm.h"
 #include "vm/dolvm_interp.h"
 
@@ -22,6 +23,7 @@
 #include <unistd.h>
 
 #ifdef DOLVM_SAMPLE
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <pthread.h>
 #endif
@@ -34,6 +36,11 @@ static DolVMModule s_module;
 static bool s_open;
 static DolVMBridgeRange* s_regions;
 static char s_game_id[8];
+// The interpreter's view of the chassis's gate: the same pointers, restated in
+// the interpreter's own type so DolRecomp never has to see a chassis header.
+static DolVMGate s_gate;
+static const u32 s_no_pending;
+static const s32 s_no_budget;
 
 int dolvm_bridge_open(const char* path, DolVMBridgeInfo* info, char* error,
                       size_t error_size)
@@ -76,6 +83,28 @@ int dolvm_bridge_open(const char* path, DolVMBridgeInfo* info, char* error,
     return 1;
 }
 
+void dolvm_bridge_set_gate(const StaticRecompDispatchGate* gate)
+{
+    if (!s_open || !gate || gate->chunk_count != s_module.region_count ||
+        !gate->chunk_open)
+    {
+        if (s_open)
+            dolvm_module_set_gate(&s_module, NULL);
+        if (gate && s_open)
+            fprintf(stderr,
+                    "dolvm: gate describes %u chunks, module has %u regions; "
+                    "resolving nothing across them\n",
+                    gate->chunk_count, s_module.region_count);
+        return;
+    }
+    s_gate.region_open = gate->chunk_open;
+    s_gate.budget = gate->budget ? gate->budget : &s_no_budget;
+    s_gate.pending = gate->pending ? gate->pending : &s_no_pending;
+    s_gate.pending_sync = gate->pending_sync;
+    s_gate.pending_async = gate->pending_async;
+    dolvm_module_set_gate(&s_module, &s_gate);
+}
+
 void dolvm_bridge_close(void)
 {
 #ifdef DOLVM_PROFILE
@@ -106,6 +135,103 @@ static mach_port_t s_sampled_thread;
 static u64 s_samples[512];
 static u64 s_samples_outside;
 static volatile int s_sampling;
+
+// Raw program-counter histogram, so a hot spot can be named to the instruction
+// rather than to whichever handler label happens to precede it in memory --
+// which, once PGO has split every handler into a hot and a cold half, is the
+// wrong one about half the time.
+#define DOLVM_PC_BUCKETS 65536u
+static uintptr_t s_pc_keys[DOLVM_PC_BUCKETS];
+static u64 s_pc_counts[DOLVM_PC_BUCKETS];
+
+static void dolvm_pc_record(uintptr_t pc) {
+    u32 slot = (u32)((pc >> 2) * 2654435761u) & (DOLVM_PC_BUCKETS - 1u);
+    for (u32 probe = 0; probe < DOLVM_PC_BUCKETS; probe++) {
+        u32 i = (slot + probe) & (DOLVM_PC_BUCKETS - 1u);
+        if (s_pc_keys[i] == pc || s_pc_keys[i] == 0) {
+            s_pc_keys[i] = pc;
+            s_pc_counts[i]++;
+            return;
+        }
+    }
+}
+
+static void dolvm_pc_report(u64 total) {
+    u32 order[256];
+    u32 live = 0;
+    for (u32 i = 0; i < DOLVM_PC_BUCKETS; i++) {
+        if (!s_pc_counts[i])
+            continue;
+        // Keep the 256 hottest with an insertion sort.
+        u32 j = live < 256u ? live : 255u;
+        if (live == 256u && s_pc_counts[order[255]] >= s_pc_counts[i])
+            continue;
+        while (j && s_pc_counts[order[j - 1u]] < s_pc_counts[i]) {
+            order[j] = order[j - 1u];
+            j--;
+        }
+        order[j] = i;
+        if (live < 256u)
+            live++;
+    }
+    // By symbol first, so the time outside the dispatch loop has names.
+    {
+        const char* names[256];
+        u64 counts[256];
+        u32 live_symbols = 0;
+        for (u32 i = 0; i < DOLVM_PC_BUCKETS; i++) {
+            if (!s_pc_counts[i])
+                continue;
+            Dl_info info;
+            const char* name = "?";
+            if (dladdr((void*)s_pc_keys[i], &info) && info.dli_sname)
+                name = info.dli_sname;
+            u32 j;
+            for (j = 0; j < live_symbols; j++)
+                if (strcmp(names[j], name) == 0)
+                    break;
+            if (j == live_symbols) {
+                if (live_symbols == 256u)
+                    continue;
+                names[live_symbols] = name;
+                counts[live_symbols] = 0;
+                live_symbols++;
+            }
+            counts[j] += s_pc_counts[i];
+        }
+        fprintf(stderr, "[dolvm-sample] by symbol:\n");
+        for (u32 round = 0; round < 24u && round < live_symbols; round++) {
+            u32 best = round;
+            for (u32 j = round + 1u; j < live_symbols; j++)
+                if (counts[j] > counts[best])
+                    best = j;
+            const char* name = names[best];
+            u64 count = counts[best];
+            names[best] = names[round];
+            counts[best] = counts[round];
+            names[round] = name;
+            counts[round] = count;
+            fprintf(stderr, "  %6.2f%%  %s\n", 100.0 * (double)count / (double)total, name);
+        }
+    }
+    fprintf(stderr, "[dolvm-sample] hottest program counters (offset from dolvm_dispatch):\n");
+    uintptr_t base = (uintptr_t)&dolvm_dispatch;
+    double running = 0.0;
+    for (u32 i = 0; i < live && i < 120u; i++) {
+        uintptr_t pc = s_pc_keys[order[i]];
+        double share = 100.0 * (double)s_pc_counts[order[i]] / (double)total;
+        running += share;
+        Dl_info info;
+        const char* name = "?";
+        uintptr_t off = 0;
+        if (dladdr((void*)pc, &info) && info.dli_sname) {
+            name = info.dli_sname;
+            off = pc - (uintptr_t)info.dli_saddr;
+        }
+        fprintf(stderr, "  %5.2f%% (cum %5.2f%%)  %s+0x%lx  [dispatch%+ld]\n", share, running,
+                name, (unsigned long)off, (long)(pc - base));
+    }
+}
 
 static void* dolvm_sampler(void* unused) {
     (void)unused;
@@ -147,6 +273,7 @@ static void* dolvm_sampler(void* unused) {
         if (rc != KERN_SUCCESS)
             continue;
         uintptr_t pc = (uintptr_t)arm_thread_state64_get_pc(state);
+        dolvm_pc_record(pc);
         if (!count || pc < bounds[0]) {
             s_samples_outside++;
             continue;
@@ -217,6 +344,7 @@ static void dolvm_sample_report(void) {
         fprintf(stderr, "  %6.2f %6.2f %7.2f  %s\n", share, ops, ns,
                 dolvm_op_name(op));
     }
+    dolvm_pc_report(total);
 }
 #endif
 
@@ -228,12 +356,13 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
     // Wall time to retire a fixed number of guest cycles. Running for a fixed
     // number of seconds instead measures whatever scene the game happened to
     // reach, and a faster build reaches a different one -- which is how a
-    // change that does nothing can look like several percent either way. The
-    // chassis only touches downcount between dispatches, so the difference
-    // across one is exactly what the module charged.
+    // change that does nothing can look like several percent either way.
+    // Guest cycles are read off the timebase, which the chassis advances by
+    // every cycle the module charges -- including the ones it flushes from
+    // inside a hook, which a per-dispatch difference of downcount would miss.
     {
         static u64 budget;
-        static u64 charged;
+        static u64 timebase_start;
         static double started;
         static double started_cpu;
         if (!budget) {
@@ -241,6 +370,7 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
             budget = configured ? strtoull(configured, NULL, 0) : 0;
             if (!budget)
                 budget = ~0ull;
+            timebase_start = ctx->timebase;
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             started = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
@@ -250,9 +380,9 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
             dolvm_sample_start();
 #endif
         }
-        s64 before = ctx->downcount;
         int rc = dolvm_dispatch(&s_module, ctx, address);
-        charged += (u64)(before - ctx->downcount);
+        // The Gekko's timebase ticks once per twelve cycles.
+        u64 charged = (ctx->timebase - timebase_start) * 12u;
         if (charged >= budget) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);

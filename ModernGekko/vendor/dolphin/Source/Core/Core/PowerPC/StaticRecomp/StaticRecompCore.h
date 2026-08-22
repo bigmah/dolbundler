@@ -111,6 +111,12 @@ private:
   };
 
   void OnICacheInvalidate(u32 address, u32 length);
+  // The dispatch gate: one byte per chunk saying whether a dispatch into it
+  // would go native right now, kept in step with every chunk state change so
+  // the module can resolve its own calls and returns without asking.
+  void PublishGate(bool publish);
+  void RefreshChunkOpen();
+  void RefreshChunkOpen(u32 index);
   int ChunkIndexOf(u32 address);
   bool IsForcedFallbackAddress(u32 address) const;
   bool ChunkContainsHostCall(u32 index) const;
@@ -127,6 +133,11 @@ private:
   void SyncIn();   // Dolphin PowerPCState -> m_guest
   void SyncOut();  // m_guest -> Dolphin PowerPCState
   void AdvanceGuestTimebase(u64 cpu_cycles);
+  // Moves what the module has charged so far into Dolphin's downcount and the
+  // guest timebase. Every hook calls it first, so that anything the hook
+  // reads or schedules against CoreTiming's clock sees the exact moment the
+  // guest is at rather than the start of the dispatch.
+  void FlushGuestCharge();
 
   // CPUState hooks (module -> chassis environment). `cpu->external_user_data`
   // is the StaticRecompCore*.
@@ -169,6 +180,9 @@ private:
 
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;
+  std::vector<u8> m_chunk_open;
+  StaticRecompDispatchGate m_gate{};
+  bool m_gate_published = false;
   mutable std::vector<u8> m_chunk_host_call_state;
   std::vector<StaticRecompRange> m_forced_fallback_ranges;
   struct ActiveRelSection
