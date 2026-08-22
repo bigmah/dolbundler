@@ -114,6 +114,11 @@ struct CPUState {
 
     u32 spr[1024];
     PPCCacheControl cache_control;
+
+    /* The Gekko's locked cache at 0xE0000000, when the host has one to offer.
+     * Mirrors GXRuntime's field of the same name; see the comment there. */
+    u8* l1cache;
+    u32 l1cache_size;
 };
 
 typedef void (*PPCMemWriteJournal)(u32 offset, u32 size, void* user);

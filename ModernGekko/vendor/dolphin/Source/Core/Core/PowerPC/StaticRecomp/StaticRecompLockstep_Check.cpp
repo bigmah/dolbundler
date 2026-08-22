@@ -138,6 +138,10 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   StaticRecompLockstep::g_ram_write_journal_user = this;
   StaticRecompLockstep::g_lc_write_journal = &StaticRecompLockstepVerifier::LsShadowLcJournalTrampoline;
   StaticRecompLockstep::g_lc_write_journal_user = this;
+  // A shadow re-run has to see every locked-cache write so it can undo them,
+  // and the guest's direct pointer to that buffer routes around this journal.
+  // Withdraw it for the duration; null puts the access back on the hook path.
+  m_core.m_guest.l1cache = nullptr;
   StaticRecompLockstep::g_vmem_write_journal = &StaticRecompLockstepVerifier::LsShadowVmemJournalTrampoline;
   StaticRecompLockstep::g_vmem_write_journal_user = this;
   StaticRecompLockstep::g_tb_override_active = true;
@@ -208,6 +212,7 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   StaticRecompLockstep::g_ram_write_journal_user = nullptr;
   StaticRecompLockstep::g_lc_write_journal = nullptr;
   StaticRecompLockstep::g_lc_write_journal_user = nullptr;
+  m_core.m_guest.l1cache = m_core.m_system.GetMemory().GetL1Cache();
   StaticRecompLockstep::g_vmem_write_journal = nullptr;
   StaticRecompLockstep::g_vmem_write_journal_user = nullptr;
   StaticRecompLockstep::g_tb_override_active = false;

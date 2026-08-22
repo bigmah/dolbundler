@@ -373,8 +373,26 @@ static void dolvm_count_mmio(u32 address) {
     }
 }
 #define DOLVM_COUNT_MMIO(a) dolvm_count_mmio(a)
+
+// Same, for the write side, which on a title that draws a lot is by far the
+// busier of the two.
+static u32 g_dolvm_mmio_waddr[DOLVM_PROFILE_MMIO_SITES];
+static u64 g_dolvm_mmio_wcount[DOLVM_PROFILE_MMIO_SITES];
+static void dolvm_count_mmio_write(u32 address) {
+    u32 slot = ((address >> 1) * 2654435761u) & (DOLVM_PROFILE_MMIO_SITES - 1u);
+    for (u32 probe = 0; probe < DOLVM_PROFILE_MMIO_SITES; probe++) {
+        u32 i = (slot + probe) & (DOLVM_PROFILE_MMIO_SITES - 1u);
+        if (!g_dolvm_mmio_wcount[i] || g_dolvm_mmio_waddr[i] == address) {
+            g_dolvm_mmio_waddr[i] = address;
+            g_dolvm_mmio_wcount[i]++;
+            return;
+        }
+    }
+}
+#define DOLVM_COUNT_MMIO_WRITE(a) dolvm_count_mmio_write(a)
 #else
 #define DOLVM_COUNT_MMIO(a) ((void)0)
+#define DOLVM_COUNT_MMIO_WRITE(a) ((void)0)
 #endif
 
 static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
@@ -479,6 +497,7 @@ static DOLVM_NOINLINE bool dolvm_guest_store_slow(CPUState* ctx,
     }
     if (!ctx->external_write)
         return true;
+    DOLVM_COUNT_MMIO_WRITE(address);
     mem->poll_run = 0;
     ctx->pc = pc;
     // Only the accessed bytes reach the chassis, matching the narrowed value
@@ -2131,6 +2150,20 @@ void dolvm_profile_report(FILE* out) {
         fprintf(out, "  0x%08X  %14llu\n", g_dolvm_mmio_addr[best],
                 (unsigned long long)g_dolvm_mmio_count[best]);
         g_dolvm_mmio_count[best] = 0;
+    }
+    fprintf(out, "dolvm hottest guest addresses written outside RAM:\n");
+    for (u32 round = 0; round < 12u; round++) {
+        u32 best = DOLVM_PROFILE_MMIO_SITES;
+        for (u32 i = 0; i < DOLVM_PROFILE_MMIO_SITES; i++)
+            if (g_dolvm_mmio_wcount[i] &&
+                (best == DOLVM_PROFILE_MMIO_SITES ||
+                 g_dolvm_mmio_wcount[i] > g_dolvm_mmio_wcount[best]))
+                best = i;
+        if (best == DOLVM_PROFILE_MMIO_SITES)
+            break;
+        fprintf(out, "  0x%08X  %14llu\n", g_dolvm_mmio_waddr[best],
+                (unsigned long long)g_dolvm_mmio_wcount[best]);
+        g_dolvm_mmio_wcount[best] = 0;
     }
     fprintf(out, "dolvm hottest guest blocks:\n");
     for (u32 round = 0; round < 24u; round++) {

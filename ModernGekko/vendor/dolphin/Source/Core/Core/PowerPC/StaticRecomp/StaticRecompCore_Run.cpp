@@ -65,6 +65,12 @@ void StaticRecompCore::Run()
   m_guest.ram_size = memory.GetRamSizeReal();
   m_guest.exram = memory.GetEXRAM();
   m_guest.exram_size = memory.GetExRamSizeReal();
+  // The locked cache is memory, and games use it as their fastest scratchpad,
+  // so handing the guest a pointer to it takes every access out of the hook
+  // path. MMU_Tables.cpp's WriteToHardware ends in exactly this store, past a
+  // page split, an address translation, a gather-pipe test and an MMIO test.
+  m_guest.l1cache = memory.GetL1Cache();
+  m_guest.l1cache_size = memory.GetL1CacheSize();
   InitLookupTable(m_guest.ram_size, m_guest.exram_size);
   const bool lockstep_enabled = m_lockstep_verifier->IsEnabled();
   const auto fast_dispatchable_at = [this](u32 address) {
