@@ -376,3 +376,77 @@ behaviour -- has to be measured there.
 `DOLBUNDLER_LOAD_STATE` exists so that measurement is 30 seconds rather than
 eight minutes: push the same savestate the desktop bench uses and the phone
 times the same scene.
+
+
+---
+
+# The device profile, at last (2026-08-22)
+
+The DolVM sampler ran on the phone against the same savestated scene the
+desktop bench uses. It answers the question the Mac could not.
+
+Disney skate, iPhone 15 Pro Max, gameplay, sustained **41% speed** (24-61%),
+against **269%** for the identical scene on an M4 Pro. Where the phone's time
+goes:
+
+| | share |
+|---|---|
+| `dolvm_dispatch` -- the interpreter | **48%** |
+| `__semwait_signal` + `swtch_pri` + `semaphore_timedwait_trap` | **32%** |
+| Dolphin's own interpreter (`SingleStepInner`, `GetOpInfo`, `ReadInstruction`, `NI_madd_msub`, `ps_madds0/1`, ...) | **~8-10%** |
+| chassis, video, texture cache | the rest |
+
+**Less than half of it is the interpreter.** Two things account for most of the
+rest, and neither is visible on a Mac.
+
+## The emulation thread is blocked a third of the time
+
+Nearly a third of the samples are in `__semwait_signal`, `swtch_pri` and
+`semaphore_timedwait_trap` -- the thread is not computing, it is waiting. In
+single-core mode the video work runs on this same thread, so presentation
+back-pressure (a blocking `nextDrawable` on the `CAMetalLayer`) or the audio
+stream would both look exactly like this. Nothing on the desktop bench does
+this: it runs headless with a null backend.
+
+This is the largest single item in the profile and it is not interpreter work
+at all.
+
+## The Mac has a JIT and the phone does not, which hid a real cost
+
+The shutdown counters, same scene, same savestate, byte-identical `main.dol`:
+
+| | native dispatches | fallback instructions |
+|---|---|---|
+| Mac | 4,710,750 | **0** |
+| iPhone | 2,222,896 | **173,351,892** |
+
+That zero is not "no fallback". `m_fallback_steps` only counts *interpreted*
+instructions, and the desktop build links `JitArm64` (264 symbols in the
+binary), so anything the DolVM module does not cover gets JIT-compiled there
+and never touches the counter. The iOS build has zero JIT symbols -- that is
+the whole point of the port -- so the same code runs on Dolphin's plain
+interpreter, one instruction at a time. 173 million of them, about 8-10% of the
+phone's run time.
+
+Disney skate ships no `.rel` files, so this is not dynamically linked game
+code: it is whatever the guest executes that is not in `main.dol` -- the OS and
+interrupt-vector code the game installs into low RAM at boot.
+
+**Every desktop measurement in this file understates the phone for this
+reason.** Module *coverage* is worth something on a phone and worth nothing on
+a Mac, and no amount of desktop benchmarking will ever show it.
+
+## What that means for what to do next
+
+On the phone, roughly half the time is not the interpreter. Before writing
+another fused opcode -- the remaining catalogue is worth about 5% of the
+interpreter's half, so ~2.5% of the whole -- the two items above are worth far
+more:
+
+1. Find what the emulation thread waits on and stop it waiting. 32%.
+2. Cover the fallback code, or make that path cheaper than one-instruction-at-
+   a-time interpretation. 8-10%.
+
+Both need the device to measure, which is now possible:
+`MODERNGEKKO_DOLVM_SAMPLE=ON` plus `DOLBUNDLER_LOAD_STATE` and
+`DOLBUNDLER_RUN_SECONDS` puts the whole breakdown in the run log.
