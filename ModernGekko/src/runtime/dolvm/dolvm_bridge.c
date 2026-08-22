@@ -105,11 +105,25 @@ void dolvm_bridge_set_gate(const StaticRecompDispatchGate* gate)
     dolvm_module_set_gate(&s_module, &s_gate);
 }
 
+#ifdef DOLVM_SAMPLE
+// Defined below, with the sampler; declared here so shutdown can report.
+static void dolvm_sample_report(void);
+extern volatile int dolvm_sample_running(void);
+#endif
+
 void dolvm_bridge_close(void)
 {
 #ifdef DOLVM_PROFILE
     if (s_open)
         dolvm_profile_report(stderr);
+#endif
+#ifdef DOLVM_SAMPLE
+    // Without the bench there is no _exit to report from, so a clean shutdown
+    // is the moment. This is how the profile comes off a phone: the app stops
+    // the game on a timer, the chassis closes the module, and the report lands
+    // in the run log with everything else.
+    if (s_open && dolvm_sample_running())
+        dolvm_sample_report();
 #endif
     if (s_open)
         dolvm_module_close(&s_module);
@@ -339,6 +353,8 @@ static void* dolvm_sampler(void* unused) {
     return NULL;
 }
 
+volatile int dolvm_sample_running(void) { return s_sampling; }
+
 static void dolvm_sample_start(void) {
     s_sampled_thread = mach_thread_self();
     s_sampling = 1;
@@ -404,6 +420,12 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
 {
     if (!s_open)
         return 0;
+#if defined(DOLVM_SAMPLE) && !defined(DOLVM_BENCH)
+    // The bench starts the sampler when its window opens; with no bench, the
+    // first dispatch is the start of everything there is to measure.
+    if (!s_sampling)
+        dolvm_sample_start();
+#endif
 #ifdef DOLVM_BENCH
     // Wall time to retire a fixed number of guest cycles. Running for a fixed
     // number of seconds instead measures whatever scene the game happened to

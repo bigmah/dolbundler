@@ -215,6 +215,13 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   run_log("module:     %s", module_path);
   mkdir((std::string(user_dir) + "/Logs").c_str(), 0755);
   Platform::SetIOSDiagnosticLog(s_log_path.c_str());
+  // Anything the runtime writes to stderr -- the DolVM sampler's report, most
+  // of all -- goes into the same file, because stderr on a device goes nowhere
+  // a `devicectl copy from` can reach. Only when the perf log is on, so a
+  // normal run is unaffected.
+  if (const char* perf = getenv("DOLBUNDLER_PERF_LOG"))
+    if (perf[0] == '1')
+      freopen(s_log_path.c_str(), "a", stderr);
 
   moderngekko::RuntimeConfig config;
   config.game_root = game_root;
