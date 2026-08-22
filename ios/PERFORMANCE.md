@@ -558,3 +558,55 @@ this interpreter, and the cheapest opcodes are free.** The rate measured on the
 `rlwinm` fusion -- 0.4% of wall clock per 1% of opcodes -- is an *average* over
 opcodes that do real work. For a trivial one it is zero. Measure the specific
 fusion; do not budget from the average.
+
+
+## And a second one: `lfs` as a single opcode is also worth nothing
+
+The other lead in the catalogue, and a better-looking one than the FP check,
+because unlike that check it removes *work* rather than just a dispatch.
+
+The Gekko fills both halves of a paired register from a single-precision load,
+so the builder writes `lfs frD,d(rA)` as four instructions -- the guest load,
+the widening to double, and a store to each half. One opcode
+(`load.float.single`) does all of it: the load, the conversion, and both state
+writes, with the slots written only after the load succeeds, exactly as the
+four did.
+
+It works. `store.statef` went 223M -> 29.8M, `fpext` disappeared entirely, and
+the executed opcode count fell 7.093G -> 6.803G, **-4.1%**.
+
+Measured the same controlled way -- fusion gated in the emitter, so both arms
+ran one interpreter binary against one PGO profile:
+
+| | throughput |
+|---|---|
+| without | 2.4354x |
+| with | 2.4306x |
+
+Nothing again. Reverted.
+
+## The conclusion those two negatives add up to
+
+**This interpreter is no longer dispatch-bound, and opcode count has stopped
+predicting time.**
+
+Two fusions, measured carefully, removing 4.5% and 4.1% of every opcode
+executed -- one of them removing a float conversion and a state store, not just
+a dispatch -- both returned zero. That is not noise around a small win; it is
+the out-of-order core absorbing the work.
+
+The `rlwinm` fusion earlier in the session did pay, 1.8% for 4.6% of opcodes,
+and the rate quoted in this file (0.4% of wall clock per 1% of opcodes) came
+from it. **That rate should not be believed any more.** It was measured on a
+build that still had the wait loop's cost, the data-section fallback and a
+different bottleneck; as the workload got faster, dispatch stopped being the
+limiter.
+
+Anyone picking this up should measure a specific fusion in a controlled A/B
+before writing it, and should expect zero. The remaining catalogue -- indexed
+load/store, `stfs` -- is not worth writing on current evidence.
+
+Where the time actually goes now, on the phone-equivalent path: `load32` 9.6%,
+`store32` 5.0%, `add32i` 5.0%, `trunc` 4.9% -- guest memory access and plain
+integer work, spread flat, with no single item worth attacking. The interpreter
+is at its structural floor for this design.
