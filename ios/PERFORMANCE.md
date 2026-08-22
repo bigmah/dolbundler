@@ -349,3 +349,30 @@ every one of them on a dependency chain -- bought 1.8%. That is the going rate;
 budget against it before writing another fused form. The remaining candidates
 (`lfs`/`stfs` as single opcodes, indexed load/store, deduplicating
 `fp.available`) are together worth about 5%.
+
+
+## Where the desktop work ended, and why the rest is on the device
+
+Disney skate's profile is now flat: 82% inside the dispatch loop, no guest
+block above 2.4M executions in a 12-billion-cycle window, and 601 thousand
+accesses leaving RAM where there were 272 million. The cost is spread evenly
+across the common integer opcodes -- `load32` 9.6% of run time, `add32i` 5.0%,
+`store32` 5.0%, `trunc` 4.9% -- which is what an interpreter looks like when
+there is nothing left to find in the *game*.
+
+The remaining catalogue is fusion, and its exchange rate is measured: about
+0.4% of wall clock per 1% of opcodes removed. `lfs` as one opcode instead of
+four is worth ~4.6% of Disney's opcodes, `stfs` ~2%, indexed load/store ~3.7%.
+Together about 5% of wall clock.
+
+**The device gap is not something the Mac can reproduce.** Running the same
+savestated scene with a real graphics backend instead of Null costs 3.9% here
+(2.733x -> 2.627x), so the CPU-side video work is small on this machine. Yet
+the phone runs this title at roughly a quarter of the Mac's rate, against the
+three quarters the single-thread CPU ratio predicts. Whatever accounts for the
+rest -- the Metal backend on a mobile GPU, memory bandwidth, sustained thermal
+behaviour -- has to be measured there.
+
+`DOLBUNDLER_LOAD_STATE` exists so that measurement is 30 seconds rather than
+eight minutes: push the same savestate the desktop bench uses and the phone
+times the same scene.
