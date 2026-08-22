@@ -261,6 +261,10 @@ int emit_code_sections_vm(const LoadedCodeSection* sections, u32 section_count,
     }
 
     dolvm_stats_report(&stats, "dolvm", stdout);
+    extern u32 g_dolvm_stub_bytes;
+    printf("dolvm: %u bytes of entry stubs (%.1f%%), laid out after every body\n",
+           g_dolvm_stub_bytes,
+           size ? 100.0 * (double)g_dolvm_stub_bytes / (double)size : 0.0);
     printf("dolvm: %zu bytes of module%s\n", size,
            options.direct_calls ? ", intra-module calls resolved inline" : "");
     if (smc_count)

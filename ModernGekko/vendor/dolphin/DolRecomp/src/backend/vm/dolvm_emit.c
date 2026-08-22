@@ -57,6 +57,26 @@ typedef struct {
     u32 code_count;
     u32 code_capacity;
 
+    // Entry stubs, kept apart from the bodies until the whole module is laid
+    // out. A stub rebuilds the values a mid-block entry needs and jumps in; it
+    // runs only when the chassis dispatches into the middle of a block, which
+    // is a few hundred thousand times against six billion executed opcodes.
+    // Emitting one after each block put that cold code *inside* the hot
+    // instruction stream, interrupting it every few cache lines -- 8-9% of the
+    // module, and the machine this has to run well on has about a fifth of the
+    // memory bandwidth of the one it is developed on. Bodies first, stubs
+    // after, and the entry map is fixed up once the split point is known.
+    DolVMInst* stub_code;
+    u32 stub_count;
+    u32 stub_capacity;
+    bool stub_mode;
+    u32* stub_fixups;       // entry-map indices whose offset is a stub offset
+    u32 stub_fixup_count;
+    u32 stub_fixup_capacity;
+    u32* code_fixups;       // code indices patched with a stub offset
+    u32 code_fixup_count;
+    u32 code_fixup_capacity;
+
     u64* constants;
     u32 constant_count;
     u32 constant_capacity;
@@ -195,7 +215,24 @@ typedef enum {
         }                                                                     \
     } while (0)
 
+// Marks an offset as relative to the stub buffer rather than to the bodies.
+// Emit-time only: every one is resolved and cleared before the module is
+// written, and a module never contains it. Bit 30 is free -- the offset field
+// is 31 bits and the largest module here is a couple of million instructions.
+#define DOLVM_STUB_MARK 0x40000000u
+
 static bool emit_raw(Builder* builder, u8 op, u8 a, u8 b, u8 c, u32 imm) {
+    if (builder->stub_mode) {
+        GROW(builder->stub_code, builder->stub_count, builder->stub_capacity,
+             DolVMInst);
+        DolVMInst* stub = &builder->stub_code[builder->stub_count++];
+        stub->op = op;
+        stub->a = a;
+        stub->b = b;
+        stub->c = c;
+        stub->imm = imm;
+        return true;
+    }
     GROW(builder->code, builder->code_count, builder->code_capacity, DolVMInst);
     DolVMInst* inst = &builder->code[builder->code_count++];
     inst->op = op;
@@ -207,6 +244,13 @@ static bool emit_raw(Builder* builder, u8 op, u8 a, u8 b, u8 c, u32 imm) {
 }
 
 static bool emit_payload(Builder* builder, u64 payload) {
+    if (builder->stub_mode) {
+        GROW(builder->stub_code, builder->stub_count, builder->stub_capacity,
+             DolVMInst);
+        memcpy(&builder->stub_code[builder->stub_count++], &payload,
+               sizeof(payload));
+        return true;
+    }
     GROW(builder->code, builder->code_count, builder->code_capacity, DolVMInst);
     memcpy(&builder->code[builder->code_count++], &payload, sizeof(payload));
     return true;
@@ -2148,6 +2192,12 @@ static bool emit_recipe(FunctionEmitter* fn, const DolVMRecipe* recipe) {
     return ok && emit_raw(builder, DOLVM_OP_CONST64, reg, 0, 0, pool);
 }
 
+// How much of the emitted module is entry stubs -- cold code that only runs
+// when the chassis dispatches into the middle of a block. Reported at build
+// time because it is the part of the module that used to sit in the middle of
+// the hot instruction stream, and knowing its size is how that was found.
+u32 g_dolvm_stub_bytes;
+
 static bool emit_block(FunctionEmitter* fn, u32 block_index) {
     Builder* builder = fn->builder;
     DolIRFunction* function = fn->function;
@@ -2249,18 +2299,29 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
                 wanted++;
         }
         u32 offset;
+        bool in_stub_region = false;
         if (wanted) {
-            offset = builder->code_count;
+            // Into the stub buffer, which is appended after every body in the
+            // module; the offset recorded here is relative to that buffer and
+            // is fixed up once the split point is known.
+            builder->stub_mode = true;
+            in_stub_region = true;
+            offset = builder->stub_count | DOLVM_STUB_MARK;
             for (u32 r = 0; r < entry->recipe_count; r++) {
                 const DolVMRecipe* recipe =
                     &layout->recipes[entry->recipe_start + r];
                 if (!recipe_needs_code(fn, recipe, entry->instruction))
                     continue;
-                if (!emit_recipe(fn, recipe))
+                if (!emit_recipe(fn, recipe)) {
+                    builder->stub_mode = false;
                     return false;
+                }
             }
-            if (!emit_raw(builder, DOLVM_OP_JMP, 0, 0, 0,
-                          fn->inst_offset[entry->instruction]))
+            // The jump lands in the body, whose offsets do not move.
+            bool ok = emit_raw(builder, DOLVM_OP_JMP, 0, 0, 0,
+                               fn->inst_offset[entry->instruction]);
+            builder->stub_mode = false;
+            if (!ok)
                 return false;
         } else if (entry->guest_address == block->guest_address) {
             // The head of a block enters through its prologue, so the cycle
@@ -2271,7 +2332,13 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
         } else {
             offset = fn->inst_offset[entry->instruction];
         }
-        DolVMEntryPoint* point = &builder->map[fn->map_base + e];
+        u32 map_index = fn->map_base + e;
+        if (in_stub_region) {
+            GROW(builder->stub_fixups, builder->stub_fixup_count,
+                 builder->stub_fixup_capacity, u32);
+            builder->stub_fixups[builder->stub_fixup_count++] = map_index;
+        }
+        DolVMEntryPoint* point = &builder->map[map_index];
         point->entry =
             offset | (entry->return_target ? DOLVM_ENTRY_RETURN_TARGET : 0u);
         point->pc_base = fn->pc_base_at[entry->instruction];
@@ -2383,8 +2450,13 @@ static bool emit_function(Builder* builder, DolIRFunction* function,
             ok = false;
             break;
         }
-        builder->code[patch->code_index].imm =
-            point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        u32 target = point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        if (target & DOLVM_STUB_MARK) {
+            GROW(builder->code_fixups, builder->code_fixup_count,
+                 builder->code_fixup_capacity, u32);
+            builder->code_fixups[builder->code_fixup_count++] = patch->code_index;
+        }
+        builder->code[patch->code_index].imm = target;
     }
 
     free(fn.block_start);
@@ -2419,6 +2491,9 @@ static int compare_functions(const void* left, const void* right) {
 
 static void builder_free(Builder* builder) {
     free(builder->code);
+    free(builder->stub_code);
+    free(builder->stub_fixups);
+    free(builder->code_fixups);
     free(builder->constants);
     free(builder->regions);
     free(builder->map);
@@ -2605,10 +2680,37 @@ bool dolvm_build_module(DolIRModule* module, const DolVMEmitOptions* options,
         }
         builder.code[patch->code_index].a = (u8)(region_index & 0xFFu);
         builder.code[patch->code_index].b = (u8)(region_index >> 8);
-        builder.code[patch->code_index].imm =
-            point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        u32 landing = point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        if (landing & DOLVM_STUB_MARK) {
+            GROW(builder.code_fixups, builder.code_fixup_count,
+                 builder.code_fixup_capacity, u32);
+            builder.code_fixups[builder.code_fixup_count++] = patch->code_index;
+        }
+        builder.code[patch->code_index].imm = landing;
         u64 payload = ((u64)target << 32) | point->pc_base;
         memcpy(&builder.code[patch->code_index + 1u], &payload, sizeof(payload));
+    }
+
+    // Bodies are laid out; the stubs go after all of them, and everything that
+    // named one gets its offset rebased. Nothing that names a *body* moves.
+    if (ok && !builder.failed && builder.stub_count) {
+        u32 base = builder.code_count;
+        g_dolvm_stub_bytes = builder.stub_count * (u32)sizeof(DolVMInst);
+        for (u32 i = 0; i < builder.stub_count && ok; i++) {
+            GROW(builder.code, builder.code_count, builder.code_capacity,
+                 DolVMInst);
+            builder.code[builder.code_count++] = builder.stub_code[i];
+        }
+        for (u32 i = 0; i < builder.stub_fixup_count; i++) {
+            DolVMEntryPoint* point = &builder.map[builder.stub_fixups[i]];
+            u32 flags = point->entry & DOLVM_ENTRY_RETURN_TARGET;
+            u32 offset = point->entry & DOLVM_ENTRY_OFFSET_MASK;
+            point->entry = ((offset & ~DOLVM_STUB_MARK) + base) | flags;
+        }
+        for (u32 i = 0; i < builder.code_fixup_count; i++) {
+            DolVMInst* inst = &builder.code[builder.code_fixups[i]];
+            inst->imm = (inst->imm & ~DOLVM_STUB_MARK) + base;
+        }
     }
 
     if (ok && !builder.failed)
