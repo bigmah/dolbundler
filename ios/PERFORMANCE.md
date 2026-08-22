@@ -236,3 +236,45 @@ and puts both builds in the same scene.
 **Sustained benching moves the number by 3%.** Back-to-back runs spread 0.9%;
 runs half an hour apart under continuous load spread 3%. A/B back to back, or
 idle the machine first.
+
+
+---
+
+# The heavy-game case: Melee, and the locked cache (2026-08-22)
+
+Disney skate's problem turned out to be specific to Disney skate. Profiling the
+heaviest title to hand -- Melee, savestated in its slowest scene, 0.77x on an
+M4 Pro -- found a different one, and a more general one.
+
+Melee's hottest opcode is `fp.available` at 14% of everything executed, and its
+opcode mix is nothing like Disney's. But the opcode mix was the wrong place to
+look: sampling put a quarter of the time *outside* the dispatch loop, split
+between the paired-single helpers (~10%) and Dolphin's MMU write path (~13%).
+
+Counting every write the chassis had to service explained the second:
+**220 million of them per twelve guest seconds, 99.7% to
+0xE0000000-0xE0003FFF** -- the Gekko's locked cache. Games use it as their
+fastest scratchpad and Melee stages every paired-single store there. Each one
+was an indirect call, a guest-charge flush, an address translation, a
+page-split test, a gather-pipe test and an MMIO test, to reach a `memcpy`.
+
+The locked cache is memory: a 256 KB buffer, big-endian, same as MEM1. So the
+guest now gets a pointer to it (`CPUState::l1cache`, published beside
+`ram`/`exram`, checked last in `get_ram_ptr`). Melee's heavy scene went
+**0.765x -> 0.932x, +22%**, measured back to back.
+
+**Editing CPUState is a three-file operation.** GXRuntime's, the mirror in
+`ModernGekko/include/moderngekko/cpu_state.h` that the C++ side sizes module
+descriptors against, and DolRecomp's. The chassis rejects a module whose
+descriptor disagrees about `sizeof(CPUState)` -- and on the bytecode path it
+does so *without printing anything*, so the game silently falls back to
+Dolphin's interpreter and simply runs slowly. `runtime_test.cpp` pins the size
+to turn that into a build failure.
+
+**This machine drifts 25% under sustained load.** Disney skate's gameplay
+window measured 2.88x in the morning and 2.13x after several hours of
+continuous benching -- same commit, same binary. Every conclusion here that
+compares two builds was measured back to back within a minute of a rebuild.
+Numbers taken hours apart are not comparable, and one of them nearly cost a
+good change: the locked-cache work looked like a 26% Disney regression until
+HEAD was re-measured beside it and read the same.

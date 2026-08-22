@@ -483,6 +483,34 @@ void MMU::GenerateDSIException(u32 effective_address, bool write)
   // DSI exceptions are only supported in MMU mode.
   if (!m_system.IsMMUMode())
   {
+    // Throttled, because a game can do this in a loop. Star Fox Assault stores
+    // through an untranslatable address roughly two million times per second of
+    // guest time, and one panic alert each -- which formats the message and
+    // writes it whether or not alerts are enabled -- came to two thirds of the
+    // emulator's entire run time. The condition is the guest's, not the
+    // emulator's, and the first few say everything the hundred millionth does.
+    //
+    // Deliberately not reset per boot: the count is about protecting the log
+    // and the frame rate, and a session that has already produced this many is
+    // not going to be diagnosed by more of them.
+    static constexpr u64 ALERT_LIMIT = 8;
+    static u64 s_alerts = 0;
+    const u64 seen = s_alerts++;
+    if (seen >= ALERT_LIMIT)
+    {
+      if (seen == ALERT_LIMIT)
+      {
+        // Said through the alert path, once, so that whoever is watching knows
+        // the reports stopped on purpose rather than the game stopping.
+        PanicAlertFmtT("Further invalid memory accesses will not be reported.");
+      }
+      if (m_system.IsPauseOnPanicMode())
+      {
+        m_system.GetCPU().Break();
+        m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+      }
+      return;
+    }
     if (write)
     {
       PanicAlertFmtT(
