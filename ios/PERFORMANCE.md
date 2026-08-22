@@ -278,3 +278,65 @@ compares two builds was measured back to back within a minute of a rebuild.
 Numbers taken hours apart are not comparable, and one of them nearly cost a
 good change: the locked-cache work looked like a 26% Disney regression until
 HEAD was re-measured beside it and read the same.
+
+
+---
+
+# Star Fox Assault, and where this pass ended up (2026-08-22)
+
+Star Fox Assault was profiled last, as the heaviest title available. It ran at
+0.45x, and sampling put **76% of the time outside the dispatch loop** -- 55% in
+`__write_nocancel` and 12% in fmt's formatter.
+
+It was logging. The game stores through an address that does not translate
+about two million times per second of guest time, and Dolphin panics on each
+one; a panic alert formats its message and writes it whether or not alerts are
+enabled. **42 million of them in a minute.** Dolphin's own interpreter produces
+the identical storm, so this is the emulator's reaction to the game, not a
+DolVM bug -- and `GenerateDSIException` now reports eight and then says once
+that it has stopped.
+
+What was left was the quantized paired-single path: `psq_store_value` at 11%
+and `ldexpf` at 2.7%, because each scaled lane asked libm for a power of two.
+The GQR scale is a sign-extended six-bit field, so the exponent is always
+normal and can be assembled directly -- bit-identical, verified by both titles
+retiring exactly the same number of opcodes either way.
+
+## Where the three titles ended up
+
+Measured back to back against the commit this session started from, same
+machine, same thermal state, same savestated scene:
+
+| scene | before | after | |
+|---|---|---|---|
+| Disney skate, attract-demo gameplay | 1.023x | **2.692x** | 2.6x |
+| Melee, its slowest scene | 0.974x | **1.326x** | 1.4x |
+| Star Fox Assault, its heavy scene | 0.451x | **1.093x** | 2.4x |
+
+Boot windows (first 6e9 cycles): Mario Party 4 2.94x -> 4.06x, SpongeBob
+1.81x -> 11.89x, Melee 1.39x -> 1.62x, Luigi's Mansion 6.05x, Disney skate
+1.46x -> 1.39x (unchanged; its wait loop does not run during boot).
+
+## What the three wins have in common
+
+None of them were in the interpreter. Every one came from asking what the
+*game* was doing and what the *chassis* was being asked to do for it:
+
+1. A wait loop the idle-loop test could not see, because it was behind a call.
+2. Guest memory the chassis was servicing by hand -- the locked cache -- when
+   it could have handed over a pointer.
+3. An emulator diagnostic with no rate limit.
+
+The tooling that found them is in `MODERNGEKKO_DOLVM_PROFILE`: hottest guest
+blocks, and hottest guest addresses read and written outside RAM. On all three
+titles the *opcode* histogram pointed somewhere else.
+
+The interpreter itself is near its structural limit: ~5.9 host cycles per
+bytecode op, and removing an opcode buys about 0.4% of wall clock per 1% of
+opcodes removed. Forcing the plain-switch dispatch instead of 269 threaded
+handlers costs only 1.8%, so the cost is the register-file round trip per
+opcode, not branch prediction. Fusing `rlwinm` -- 9% of Disney's opcodes, and
+every one of them on a dependency chain -- bought 1.8%. That is the going rate;
+budget against it before writing another fused form. The remaining candidates
+(`lfs`/`stfs` as single opcodes, indexed load/store, deduplicating
+`fp.available`) are together worth about 5%.

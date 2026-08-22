@@ -338,15 +338,20 @@ cycles, which `MODERNGEKKO_DOLVM_BENCH` reports and which a busy machine barely
 moves. Over each title's first six billion guest cycles, against the Gekko's
 486 MHz, on an M4 Pro:
 
-| Title | homed registers | + gate, idle loops, build flags | + polled waits |
+| Title | homed registers | + gate, idle loops, build flags | now |
 |---|---|---|---|
-| Mario Party 4 | 1.69x | 2.94x | **3.80x** |
-| The SpongeBob SquarePants Movie | 1.25x | 1.81x | **12.36x** |
-| Super Smash Bros Melee | 0.92x | 1.39x | **1.41x** |
-| Disney's Extreme Skate Adventure | -- | 1.46x | 1.43x |
+| Mario Party 4 | 1.69x | 2.94x | **4.06x** |
+| The SpongeBob SquarePants Movie | 1.25x | 1.81x | **11.89x** |
+| Super Smash Bros Melee | 0.92x | 1.39x | **1.62x** |
+| Disney's Extreme Skate Adventure | -- | 1.46x | 1.39x |
+| Luigi's Mansion | -- | -- | **6.05x** |
+| Star Fox Assault | -- | -- | **34.4x** |
 
 Those are each title's first six billion cycles, which for most of them is
-boot -- and the boot column is misleading enough to be worth a warning. It
+boot -- and the boot column is misleading enough to be worth a warning. Star
+Fox Assault's 34x is not a fast game; it is a game that spends its first
+seventy guest seconds waiting on the disc, which the interpreter now skips. In
+its heavy scene it runs at 1.09x. It
 moves by a factor of six on SpongeBob, whose boot is almost entirely hardware
 waiting, and by nothing at all on Disney skate, whose wait loop does not run
 until the game is playing. Measured instead over a fixed *gameplay* window --
