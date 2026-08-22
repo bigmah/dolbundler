@@ -516,3 +516,45 @@ blocking.
 With the limiter accounted for and the data-section fallback covered, the
 phone's profile is the simulator's: the interpreter is the cost, and further
 gains have to come from the opcode count.
+
+
+## A lead that looked certain and was worth nothing
+
+Recorded so nobody spends a day on it twice.
+
+With the data-section fallback covered, `fp.available` is the second most
+executed opcode in Disney skate -- **8.34% of everything the interpreter
+runs**, 591 million of them, and on Melee's heavy scene 14%. The DolIR builder
+puts one in front of every floating-point instruction, because the guest's OS
+clears MSR[FP] on a context switch and expects the first FP instruction of a
+thread to trap.
+
+It cannot be hoisted out of the block: every guest instruction is a possible
+mid-block entry, and moving the check earlier would fault before instructions
+that should already have run. But it *can* be folded forward into the
+instruction it guards, which keeps the trap at exactly the same program point
+-- an entry naming the check lands on the fused opcode. On Disney skate 100% of
+`exact.paired` is immediately preceded by one, so two guarded opcodes
+(`exact.float.fp`, `exact.paired.fp`) collapse the pair.
+
+It works, and it removes **4.5% of every opcode executed** -- 7.093G to 6.776G.
+
+Measured back to back, with the fusion gated in the *emitter* so both arms run
+the same interpreter binary against the same PGO profile:
+
+| | throughput |
+|---|---|
+| without | 2.3536x |
+| with | 2.3530x |
+
+**Nothing. Not a slow win, not noise around a small win -- zero.**
+`fp.available` is one MSR test with a perfectly predicted branch, and the
+out-of-order machine absorbs the dispatch entirely. The bandwidth argument does
+not rescue it either: 317 million eight-byte instructions not fetched is about
+85 MB/s against a phone's ~50 GB/s.
+
+Reverted. The lesson generalises: **opcode count is not a proxy for time on
+this interpreter, and the cheapest opcodes are free.** The rate measured on the
+`rlwinm` fusion -- 0.4% of wall clock per 1% of opcodes -- is an *average* over
+opcodes that do real work. For a trivial one it is zero. Measure the specific
+fusion; do not budget from the average.
