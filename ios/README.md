@@ -168,6 +168,12 @@ xcodebuild -project build-sim/DolBundlerIOS.xcodeproj -target DolBundler \
   -configuration Release -sdk iphonesimulator -arch arm64 CODE_SIGNING_ALLOWED=NO build
 ```
 
+A simulator build is silent: it would otherwise play through the Mac's
+speakers, and the loop here is launch-run-relaunch. `DOLBUNDLER_SIM_AUDIO=1`
+turns the sound back on when audio is the thing being worked on. Device builds
+are unaffected -- the switch is `TARGET_OS_SIMULATOR`, a compile-time property
+of a separate binary.
+
 There is no way to script a tap, so `DOLBUNDLER_AUTOPLAY=<disc id>` starts a
 game directly. It works on both:
 
@@ -194,6 +200,11 @@ full speed on a 15 Pro and lighter ones comfortably above it. Nothing about the
 iOS port changes that; it is a property of the interpreter, and
 `ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says where the time
 goes and what each change bought.
+
+[`PERFORMANCE.md`](PERFORMANCE.md) is the device-side companion to that: how to
+measure emulation speed on a phone without a console attached, and what a
+week's worth of measuring found -- including which plausible-sounding fixes
+(dual core, the DSP, graphics settings) are already done or worth nothing.
 
 Three things in the build matter for it and are easy to lose: the interpreter
 is compiled with one indirect branch per handler (`-mllvm -tail-dup-*-size`),

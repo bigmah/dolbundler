@@ -60,9 +60,18 @@ void db_paths_for(const char* library_dir, const char* disc_id, DBGame* game)
 
 int db_is_imported(const DBGame* game)
 {
+  // The extracted disc is the import: it is the slow half, the large half, and
+  // the one that needs the ISO back to redo. The .dvm is derived from it and
+  // costs seconds, so a missing one is reported as stale rather than as a
+  // missing game, and the library offers to rebuild it from the disc already
+  // on the device.
+  //
+  // Requiring the module here instead makes a game disappear outright whenever
+  // its .dvm is absent -- an interrupted import, a deleted module -- when
+  // everything needed to bring it back is sitting right there.
   char dol[DB_PATH_SIZE];
   snprintf(dol, sizeof(dol), "%s/sys/main.dol", game->game_root);
-  return path_exists(dol) && path_exists(game->module_path);
+  return path_exists(dol);
 }
 
 int db_module_is_current(const DBGame* game)

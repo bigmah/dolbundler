@@ -64,7 +64,9 @@ int db_import_iso(const char* iso_path, const char* library_dir, DBProgressFn pr
 // the filesystem. Used to rebuild a library entry from a disc id.
 void db_paths_for(const char* library_dir, const char* disc_id, DBGame* game);
 
-// 1 if both the extracted game root and the .dvm are present on disk.
+// 1 if the extracted game root is on disk. The module is not part of the test:
+// it is derived from the disc and cheap to rebuild, so one that is missing or
+// from an older build shows up through db_module_is_current() instead.
 int db_is_imported(const DBGame* game);
 
 // 1 if the .dvm was written for the bytecode ABI this build interprets. A

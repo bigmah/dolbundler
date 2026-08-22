@@ -4,6 +4,7 @@
 
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
+#include "Core/Config/MainSettings.h"  // BACKEND_NULLSOUND
 #include "Core/Core.h"
 #include "Core/HW/GCPad.h"
 #include "Core/System.h"
@@ -16,12 +17,15 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <chrono>
 #include <ctime>
+#include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <sys/stat.h>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -129,6 +133,61 @@ void ForceDolphinFileLog()
   run_log("dolphin.log enabled at LDEBUG");
 }
 
+// Sample emulation speed into the run log. Off unless asked for.
+//
+// The on-screen overlay shows the same two numbers live, but a device with no
+// console attached cannot be read that way, and a phone in your hand cannot be
+// watched and benchmarked at once. This leaves a trace to pull off afterwards.
+//
+// Read `speed`, not `fps`: a GameCube game's own frame rate varies by scene --
+// 30 in one, 60 in another -- so only speed says whether emulation is keeping
+// up. See PERFORMANCE.md.
+void StartPerfLog(std::atomic<bool>* running)
+{
+  const char* wanted = getenv("DOLBUNDLER_PERF_LOG");
+  if (!wanted || wanted[0] != '1')
+    return;
+
+  std::thread([running] {
+    while (running->load())
+    {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      if (!running->load())
+        break;
+      const auto& metrics = Core::System::GetInstance().GetPerfMetrics();
+      run_log("perf: %.1f fps  %.0f%% speed", metrics.GetFPS(), metrics.GetSpeed() * 100.0);
+    }
+  }).detach();
+}
+
+// Stop the game by itself after N seconds. Without this a scripted run can only
+// be killed, and a kill skips Core shutdown -- which is where StaticRecomp
+// prints how much of the guest ran natively versus through the chassis:
+//
+//   [staticrecomp] shutdown: native=... fallback=... hook_fb=... smc_failed=...
+//
+// Those counters are a property of the module and the game rather than of the
+// host, so they are the one performance question the simulator can answer.
+void StartRunTimer(std::atomic<bool>* running)
+{
+  const char* seconds = getenv("DOLBUNDLER_RUN_SECONDS");
+  if (!seconds)
+    return;
+  const int wanted = atoi(seconds);
+  if (wanted <= 0)
+    return;
+
+  std::thread([running, wanted] {
+    for (int i = 0; i < wanted && running->load(); ++i)
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (running->load())
+    {
+      run_log("run timer expired after %ds, stopping", wanted);
+      db_request_stop();
+    }
+  }).detach();
+}
+
 void set_err(char* err, size_t err_size, const std::string& message)
 {
   if (err && err_size)
@@ -164,7 +223,18 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   config.graphics.backend = "Metal";
   // AudioCommon's own default resolves to this on iOS too, but naming it means
   // a silent game is a wrong-backend bug rather than an unnoticed fallback.
+  //
+  // Except on the simulator, which plays through the Mac's speakers while the
+  // development loop is launch-run-relaunch. Silent by default there;
+  // DOLBUNDLER_SIM_AUDIO=1 turns it back on when audio is the thing being
+  // worked on. Device builds are unaffected -- TARGET_OS_SIMULATOR is a
+  // compile-time property of a separate binary.
+#if TARGET_OS_SIMULATOR
+  const char* sim_audio = getenv("DOLBUNDLER_SIM_AUDIO");
+  config.audio.backend = (sim_audio && sim_audio[0] == '1') ? "AudioUnit" : BACKEND_NULLSOUND;
+#else
   config.audio.backend = "AudioUnit";
+#endif
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
   // A .dvm covers the whole title; letting the chassis fall back to its own
@@ -190,6 +260,9 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     std::lock_guard<std::mutex> lock(s_runtime_mutex);
     s_runtime = std::move(created.runtime);
   }
+
+  StartPerfLog(&s_running);
+  StartRunTimer(&s_running);
 
   // Installed before Run() so no boot state transition is missed, but it only
   // attaches the overrider once the pads actually exist.
