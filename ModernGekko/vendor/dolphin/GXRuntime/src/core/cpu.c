@@ -191,10 +191,29 @@ static u32 psq_type_size(u8 type) {
  *  - Quantization: round the lane to f32 first, multiply by the f32
  *    power-of-two scale, clamp in f32, truncate. NaN quantizes to 0
  *    (matching SType(NaN-after-clamp) in release Dolphin on arm64). */
+/* 2^e, built rather than called. `scale` is a sign-extended six-bit GQR field,
+ * so e is always within [-32, 32] and the result is always a normal number --
+ * which makes assembling the exponent exact, and exactly what ldexp would have
+ * returned. Multiplying by an exact power of two is correctly rounded, so the
+ * results are bit-identical to the calls these replace; the difference is that
+ * a quantized paired-single store no longer makes a libm call per lane, and
+ * Star Fox Assault makes several million of those per second of guest time. */
+static inline f32 psq_pow2f(s32 e) {
+    union { u32 u; f32 f; } bits;
+    bits.u = (u32)(e + 127) << 23;
+    return bits.f;
+}
+
+static inline f64 psq_pow2(s32 e) {
+    union { u64 u; f64 d; } bits;
+    bits.u = (u64)(u32)(e + 1023) << 52;
+    return bits.d;
+}
+
 static f64 psq_dequant(f64 value, s32 scale) {
     if (scale == 0)
         return (f64)(f32)value;
-    return (f64)(f32)ldexp(value, -scale);
+    return (f64)(f32)(value * psq_pow2(-scale));
 }
 
 static f64 psq_load_value(CPUState* cpu, u32 ea, u8 type, s32 scale) {
@@ -215,7 +234,7 @@ static f64 psq_load_value(CPUState* cpu, u32 ea, u8 type, s32 scale) {
 }
 
 static s64 psq_quantize_int(f64 value, s64 min_value, s64 max_value, s32 scale) {
-    f32 conv = (f32)value * ldexpf(1.0f, scale);
+    f32 conv = (f32)value * psq_pow2f(scale);
     if (isnan(conv))
         return 0;
     if (conv <= (f32)min_value)
