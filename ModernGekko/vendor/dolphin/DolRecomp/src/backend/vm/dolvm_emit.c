@@ -375,6 +375,115 @@ static bool assign_result(FunctionEmitter* fn, DolIRValue value,
     return true;
 }
 
+// Copy coalescing for the paired-single lane operations.
+//
+// A v2f64 lives in two registers, and building, extracting or shuffling one
+// used to mean allocating a fresh pair and moving the lanes into it. On a title
+// that lives in paired singles those moves are the single hottest thing the
+// interpreter does -- 7.5% of Star Fox Assault's run time, 6% of every opcode
+// Melee executes -- and they move nothing: the value is already in a register.
+//
+// So when every lane the result wants is in a register that dies right here,
+// the result simply *is* those registers. Four conditions make that safe, and
+// all four are checked rather than assumed:
+//
+//   - each source lane's last use is this instruction, so nothing reads it
+//     afterwards under its own name;
+//   - the two lanes are in *different* registers, or the result's halves would
+//     alias and writing one would change the other;
+//   - neither is a home, which outlives any value sitting in it and belongs to
+//     a guest register rather than to this block;
+//   - the result is not itself being computed straight into a home.
+//
+// A source register the result does not take is released as usual. The
+// operands are marked retired so the normal retirement pass leaves the
+// registers alone -- they have an owner now.
+static bool try_coalesce_lanes(FunctionEmitter* fn, const DolIRInstruction* inst,
+                               u32 index) {
+    if (!inst->result || fn->home_dest[index] != DOLVM_NO_REG ||
+        fn->home_read[index] == 1u)
+        return false;
+
+    const u32 dies = index + 1u;
+    // Every source has to be an ordinary block-local register that dies here.
+    for (u32 o = 0; o < inst->operand_count; o++) {
+        DolIRValue v = inst->operands[o];
+        if (!v || fn->retired[v] || fn->last_use[v] != dies ||
+            fn->reg[v] >= DOLVM_USABLE_REGISTERS)
+            return false;
+        if (fn->reg_hi[v] != DOLVM_NO_REG &&
+            fn->reg_hi[v] >= DOLVM_USABLE_REGISTERS)
+            return false;
+    }
+
+    u8 low, high = DOLVM_NO_REG, spare = DOLVM_NO_REG;
+    switch (inst->op) {
+    case DOLIR_OP_VECTOR_BUILD:
+        if (inst->operand_count != 2 || inst->operands[0] == inst->operands[1])
+            return false;
+        low = fn->reg[inst->operands[0]];
+        high = fn->reg[inst->operands[1]];
+        break;
+    case DOLIR_OP_VECTOR_EXTRACT: {
+        if (inst->operand_count != 1)
+            return false;
+        DolIRValue src = inst->operands[0];
+        low = inst->aux ? fn->reg_hi[src] : fn->reg[src];
+        spare = inst->aux ? fn->reg[src] : fn->reg_hi[src];
+        if (low == DOLVM_NO_REG)
+            return false;
+        break;
+    }
+    case DOLIR_OP_VECTOR_SHUFFLE: {
+        u32 lanes[2] = {inst->aux & 0xFFu, (inst->aux >> 8) & 0xFFu};
+        u8 pick[2];
+        for (u32 lane = 0; lane < 2; lane++) {
+            DolIRValue source =
+                lanes[lane] < 2 ? inst->operands[0] : inst->operands[1];
+            if (!source)
+                return false;
+            pick[lane] = (lanes[lane] & 1u) ? fn->reg_hi[source]
+                                            : fn->reg[source];
+            if (pick[lane] == DOLVM_NO_REG)
+                return false;
+        }
+        if (pick[0] == pick[1])
+            return false;
+        low = pick[0];
+        high = pick[1];
+        break;
+    }
+    default:
+        return false;
+    }
+    if (low == DOLVM_NO_REG || (vector_type(inst->type) && high == DOLVM_NO_REG))
+        return false;
+
+    fn->reg[inst->result] = low;
+    fn->reg_hi[inst->result] = vector_type(inst->type) ? high : DOLVM_NO_REG;
+    for (u32 o = 0; o < inst->operand_count; o++)
+        if (inst->operands[o])
+            fn->retired[inst->operands[o]] = 1;
+    // A half of a pair the result did not take has no owner left.
+    if (spare != DOLVM_NO_REG && spare != low)
+        release_register(fn, spare);
+    // A shuffle that reads two pairs and keeps one lane from each leaves the
+    // other two lanes ownerless.
+    if (inst->op == DOLIR_OP_VECTOR_SHUFFLE) {
+        for (u32 o = 0; o < inst->operand_count; o++) {
+            DolIRValue v = inst->operands[o];
+            if (!v)
+                continue;
+            if (fn->reg[v] != low && fn->reg[v] != high)
+                release_register(fn, fn->reg[v]);
+            if (fn->reg_hi[v] != DOLVM_NO_REG && fn->reg_hi[v] != low &&
+                fn->reg_hi[v] != high)
+                release_register(fn, fn->reg_hi[v]);
+        }
+    }
+    return true;
+}
+
 static DolIRValue effective_operand(FunctionEmitter* fn,
                                     const DolIRBlock* block,
                                     const DolIRInstruction* inst, u32 slot);
@@ -2088,6 +2197,10 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
         fn->inst_offset[i] = builder->code_count;
         fn->pc_base_at[i] = fn->pc_base;
         if (fn->folded[i])
+            continue;
+        // A lane operation whose sources all die here does not move anything:
+        // the result takes their registers and nothing is emitted.
+        if (inst->result && try_coalesce_lanes(fn, inst, i))
             continue;
         if (inst->result) {
             // A value that lives in a home is not allocated out of the block's
