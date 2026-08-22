@@ -242,6 +242,29 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   config.allow_interpreter = false;
   config.show_fps_in_title = false;
 
+  // Test hook, off unless asked for: boot straight into a savestate.
+  //
+  // Measuring emulation speed on a phone means measuring the same scene twice,
+  // and the scenes that matter are minutes into an autoplay run -- Disney
+  // skate's attract demo is eight minutes in at the speed the phone manages,
+  // and its menus, where the speed is quite different, are everything before
+  // it. The desktop bench solved this by pinning a savestate; this is the same
+  // savestate, so the two are directly comparable.
+  //
+  // Relative paths resolve inside the app's Documents directory, which is what
+  // a state pushed over devicectl lands in.
+  if (const char* state = getenv("DOLBUNDLER_LOAD_STATE"))
+  {
+    if (state[0] != '\0')
+    {
+      std::string path = state;
+      if (path.front() != '/')
+        path = std::string(user_dir) + "/../" + path;
+      config.load_state_path = path;
+      run_log("load-state: %s", path.c_str());
+    }
+  }
+
   run_log("Runtime::Create ...");
   auto created = moderngekko::Runtime::Create(std::move(config));
   run_log("Runtime::Create returned");
