@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <utility>
+#include <vector>
 #include "Core/System.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
@@ -238,6 +245,28 @@ void StaticRecompCore::Run()
         }
         else
         {
+          // Where the interpreter is entered from, when it is entered at all.
+          // A run of interpreted instructions belongs to whatever address the
+          // module could not dispatch, so counting the first pc of each run
+          // names the code the module is missing.
+          if (getenv("MODERNGEKKO_FALLBACK_TRACE"))
+          {
+            static std::map<u32, unsigned long long> sites;
+            static unsigned long long runs = 0;
+            sites[ppc.pc]++;
+            if (++runs % 20000ull == 0)
+            {
+              std::vector<std::pair<u32, unsigned long long>> v(sites.begin(),
+                                                                sites.end());
+              std::sort(v.begin(), v.end(),
+                        [](const auto& a, const auto& b) { return a.second > b.second; });
+              std::fprintf(stderr, "[fallback] %llu runs, %zu distinct sites\n",
+                           runs, v.size());
+              for (size_t i = 0; i < v.size() && i < 14; i++)
+                std::fprintf(stderr, "[fallback]   0x%08X  %14llu\n", v[i].first,
+                             v[i].second);
+            }
+          }
           do
           {
             ppc.downcount -= interpreter.SingleStepInner();

@@ -188,10 +188,20 @@ void StaticRecompCore::Init()
   // works if every dispatch is one the chassis made.
   PublishGate(m_module != nullptr && !m_lockstep_verifier->IsEnabled());
 
+  // Code the module does not cover goes to a JIT on a desktop and to Dolphin's
+  // plain interpreter on iOS, where there is no JIT to have. That difference is
+  // invisible in every desktop measurement -- the fallback counter only counts
+  // interpreted steps, so a desktop run reports zero fallback while a phone
+  // running the same scene from the same savestate reports 173 million. Setting
+  // MODERNGEKKO_NO_FALLBACK_JIT reproduces the phone's CPU path here, which is
+  // the only way to work on module coverage without a device in hand.
+  const bool no_fallback_jit = getenv("MODERNGEKKO_NO_FALLBACK_JIT") != nullptr;
 #ifdef _M_ARM_64
-  m_fallback_jit = std::make_unique<JitArm64>(m_system);
+  if (!no_fallback_jit)
+    m_fallback_jit = std::make_unique<JitArm64>(m_system);
 #elif defined(_M_X86_64)
-  m_fallback_jit = std::make_unique<Jit64>(m_system);
+  if (!no_fallback_jit)
+    m_fallback_jit = std::make_unique<Jit64>(m_system);
 #endif
   if (m_fallback_jit)
   {

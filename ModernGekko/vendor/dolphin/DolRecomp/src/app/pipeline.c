@@ -1179,8 +1179,10 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
                           DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
                           const DolRecompSymbolMap* symbols,
                           DolRecompBackend backend, const char* game_id) {
-    LoadedCodeSection sections[DOL_NUM_TEXT];
+    LoadedCodeSection sections[DOL_NUM_TEXT + DOL_NUM_DATA];
     u32 section_count = 0;
+    u32 text_low = 0xFFFFFFFFu;
+    u32 text_high = 0;
 
     for (u32 i = 0; i < DOL_NUM_TEXT; i++) {
         if (dol->header.text_sizes[i] == 0)
@@ -1190,14 +1192,60 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
         if (!data)
             continue;
 
+        u32 start = dol->header.text_addresses[i];
+        u32 end = start + dol->header.text_sizes[i];
+        if (start < text_low)
+            text_low = start;
+        if (end > text_high)
+            text_high = end;
+
         LoadedCodeSection* section = &sections[section_count++];
         section->label = "text";
         section->name = NULL;
         section->data = data;
         section->index = i;
         section->file_offset = dol->header.text_offsets[i];
-        section->address = dol->header.text_addresses[i];
+        section->address = start;
         section->size = dol->header.text_sizes[i];
+        section->embedded_data_mode = EMBEDDED_DATA_DOL;
+    }
+
+    // A data section wedged *between* two text sections is code. The linker
+    // puts the exception handlers there -- on Disney's Extreme Skate Adventure
+    // it is 1,984 bytes at 0x800032E0, sitting between text[0] and text[1] --
+    // and because the recompiler only ever looked at text, none of it reached
+    // the module. Every address the chassis then could not dispatch went to
+    // Dolphin's own interpreter instead, one guest instruction at a time. On a
+    // desktop that is free, because uncovered code is handed to a JIT and the
+    // cost never appears; on iOS there is no JIT to hand it to, and it was
+    // costing half the emulator's throughput.
+    //
+    // The bracketing test is what makes this safe to do blindly: a data
+    // section that begins after the last text section is data, and is left
+    // alone. Anything inside the range that does not decode becomes embedded
+    // data exactly as it does inside a text section, and a region whose bytes
+    // do not match guest RAM at run time is closed by the chassis's own
+    // verification -- which is the behaviour these addresses have today.
+    for (u32 i = 0; i < DOL_NUM_DATA; i++) {
+        if (dol->header.data_sizes[i] == 0)
+            continue;
+        u32 start = dol->header.data_addresses[i];
+        u32 end = start + dol->header.data_sizes[i];
+        if (text_low == 0xFFFFFFFFu || start < text_low || end > text_high)
+            continue;
+
+        const u8* data = dol_get_data_section(dol, (int)i);
+        if (!data)
+            continue;
+
+        LoadedCodeSection* section = &sections[section_count++];
+        section->label = "data";
+        section->name = NULL;
+        section->data = data;
+        section->index = i;
+        section->file_offset = dol->header.data_offsets[i];
+        section->address = start;
+        section->size = dol->header.data_sizes[i];
         section->embedded_data_mode = EMBEDDED_DATA_DOL;
     }
 
