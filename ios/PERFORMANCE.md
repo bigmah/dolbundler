@@ -309,15 +309,24 @@ machine, same thermal state, same savestated scene:
 
 | scene | before | after | |
 |---|---|---|---|
-| Disney skate, attract-demo gameplay | 1.023x | **2.692x** | 2.6x |
-| Melee, its slowest scene | 0.974x | **1.326x** | 1.4x |
-| Star Fox Assault, its heavy scene | 0.451x | **1.093x** | 2.4x |
+| Disney skate, attract-demo gameplay | 1.023x | **2.693x** | 2.6x |
+| Melee, its slowest scene | 0.974x | **1.341x** | 1.4x |
+| Star Fox Assault, its heavy scene | 0.451x | **1.203x** | 2.7x |
 
 Boot windows (first 6e9 cycles): Mario Party 4 2.94x -> 4.06x, SpongeBob
 1.81x -> 11.89x, Melee 1.39x -> 1.62x, Luigi's Mansion 6.05x, Disney skate
 1.46x -> 1.39x (unchanged; its wait loop does not run during boot).
 
-## What the three wins have in common
+Two more followed, both in the paired-single path that heavy titles live in.
+The GQR scale was fetched from libm (`ldexpf` per stored lane); it is a
+sign-extended six-bit field, so the exponent is always normal and can be
+assembled directly -- bit-identical, and worth 4% on Star Fox. And a v2f64 lane
+operation allocated a fresh register pair and moved the lanes into it, when the
+value was already in registers that die at that instruction; letting the result
+take them is worth 10% on Star Fox and removes what was the single hottest
+instruction in the interpreter.
+
+## What the wins have in common
 
 None of them were in the interpreter. Every one came from asking what the
 *game* was doing and what the *chassis* was being asked to do for it:

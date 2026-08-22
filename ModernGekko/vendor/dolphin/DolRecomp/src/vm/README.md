@@ -347,6 +347,10 @@ moves. Over each title's first six billion guest cycles, against the Gekko's
 | Luigi's Mansion | -- | -- | **6.05x** |
 | Star Fox Assault | -- | -- | **34.4x** |
 
+In savestated **heavy scenes**, which is the number that matters: Disney skate
+1.023x -> **2.693x**, Melee 0.974x -> **1.341x**, Star Fox Assault 0.451x ->
+**1.203x**.
+
 Those are each title's first six billion cycles, which for most of them is
 boot -- and the boot column is misleading enough to be worth a warning. Star
 Fox Assault's 34x is not a fast game; it is a game that spends its first
