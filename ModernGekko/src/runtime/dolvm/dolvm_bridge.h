@@ -63,6 +63,13 @@ void dolvm_bridge_on_state_loaded(struct CPUState* ctx);
 // gate's chunk count does not match the module's regions.
 void dolvm_bridge_set_gate(const struct StaticRecompDispatchGate* gate);
 
+// Raised once the bench's DOLVM_BENCH_SKIP has been charged, so a benchmark
+// harness outside this file can act on a *guest* moment rather than a wall
+// one. A savestate written here is the same scene every time, which is the
+// only way to compare two builds on a game that keeps moving; see the bench
+// block in dolvm_bridge.c. Always zero in a build without DOLVM_BENCH.
+int dolvm_bridge_bench_at_skip(void);
+
 #ifdef __cplusplus
 }
 #endif

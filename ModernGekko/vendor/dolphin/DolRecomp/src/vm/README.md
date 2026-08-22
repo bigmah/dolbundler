@@ -96,6 +96,39 @@ It matters more than it sounds: `GXDrawDone`'s wait for the GPU is this loop,
 and before it was skipped it was 40% of Melee's guest cycles and half of Mario
 Party 4's.
 
+### Waits the loop shape cannot see
+
+That test wants one load, no stores and no call, and plenty of waits have all
+three. Disney's Extreme Skate Adventure spends 45% of every frame here:
+
+```
+loop:   bl    GXGetGPStatus      ; lhz from 0xCC000000, unpacks five bits
+        lbz   r0, overhi
+        cmpwi r0, 0
+        beq   loop
+```
+
+`overhi` is the command processor's FIFO-overflow bit and only a FIFO *write*
+can set it, so nothing the loop does can end the wait -- but the loop calls a
+function, and that function stores. Run faithfully it was 57% of every opcode
+the interpreter executed and a quarter of its wall clock, most of the second
+part because the `lhz` leaves RAM and the chassis services it.
+
+So the interpreter recognises the wait at the poll instead of at the loop. It
+counts consecutive reads the chassis had to service that come back with the
+same value, from the same guest instruction, at the same address; past
+`DOLVM_POLL_SPIN` of them the next back edge charges the slice and leaves,
+exactly as a recognised idle loop does. Nothing a loop can do while making
+progress produces that run: a write the chassis services resets it, and a
+`poll_fresh` flag stops a run left behind by a loop that has already exited
+from firing on the next loop's first back edge. A wait that has once been
+proved is remembered by (pc, address, value), so the threshold is paid once and
+not once per timing slice -- worth another 11% on top, because the loop is
+re-entered six hundred thousand times over a run.
+
+The value is part of that key on purpose: the read that finally *answers* the
+wait does not match the site that recorded the waiting.
+
 The interpreter is compiled against the chassis's own `CPUState`, not the
 recompiler's. The two agree on every field a bytecode state access can name and
 differ past the last of them, so `sizeof(CPUState)` is the wrong thing to check.
@@ -198,6 +231,7 @@ work as the sequence it replaces and costs one dispatch instead of several:
 | `jmp.if.cr.guard` | a loop's entire back edge -- the test, the budget guard and the charge -- which a loop pays on every iteration |
 | `cmp.jmp.if.cr`, `.charge`, `.guard` | a compare against a constant *and* the branch that reads the field it just wrote |
 | `supervisor` | the MSR read, mask, compare and raise every privileged instruction opens with |
+| `rotl32i.and`, `shl32i.and`, `lshr32i.and`, `ashr32i.and` | a shift or rotate by a constant and the mask that follows it -- `rlwinm`, which is how PowerPC extracts every bitfield there is |
 
 A fused branch is also allowed to name its target block directly instead of
 jumping over the other edge's code, which takes the unconditional jump off the
@@ -210,7 +244,11 @@ compare stored it -- a store-to-load round trip on the loop's carried
 dependency. And every privileged instruction opens with a check that the guest
 is in supervisor mode, which the builder writes out longhand; a game's operating
 system runs `mfmsr`/`mtmsr` around every interrupt mask it takes, so those four
-opcodes came to a tenth of everything the interpreter executed.
+opcodes came to a tenth of everything the interpreter executed. And `rlwinm` is
+one guest instruction that the builder writes as two, with the second reading
+back through the register file what the first just wrote: on Disney skate every
+single `rotl32i` executed was followed by the `andi` that consumed it, together
+9% of all opcodes.
 
 What pays and what does not is worth stating, because it is not what counting
 opcodes suggests, and the rule has held through every change since. **Removing a
@@ -300,11 +338,20 @@ cycles, which `MODERNGEKKO_DOLVM_BENCH` reports and which a busy machine barely
 moves. Over each title's first six billion guest cycles, against the Gekko's
 486 MHz, on an M4 Pro:
 
-| Title | homed registers | + gate, idle loops, build flags |
-|---|---|---|
-| Mario Party 4 | 1.69x | **2.94x** |
-| The SpongeBob SquarePants Movie | 1.25x | **1.81x** |
-| Super Smash Bros Melee | 0.92x | **1.39x** |
+| Title | homed registers | + gate, idle loops, build flags | + polled waits |
+|---|---|---|---|
+| Mario Party 4 | 1.69x | 2.94x | **3.80x** |
+| The SpongeBob SquarePants Movie | 1.25x | 1.81x | **12.36x** |
+| Super Smash Bros Melee | 0.92x | 1.39x | **1.41x** |
+| Disney's Extreme Skate Adventure | -- | 1.46x | 1.43x |
+
+Those are each title's first six billion cycles, which for most of them is
+boot -- and the boot column is misleading enough to be worth a warning. It
+moves by a factor of six on SpongeBob, whose boot is almost entirely hardware
+waiting, and by nothing at all on Disney skate, whose wait loop does not run
+until the game is playing. Measured instead over a fixed *gameplay* window --
+a savestate 82 billion cycles into a run -- Disney skate goes from **1.055x to
+2.88x**. Bench the scene you care about.
 
 Where the second column came from, in the order it was found: the dispatch gate
 (+5%, +21%, +9%); one indirect branch per handler, which LLVM's tail merger

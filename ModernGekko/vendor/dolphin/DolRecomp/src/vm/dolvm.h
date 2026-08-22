@@ -41,7 +41,7 @@ extern "C" {
 // 4: CALL names the region its target lies in, and INDIRECT always names its
 //    own; both are what a gated chassis checks before the interpreter resolves
 //    the edge in place.
-#define DOLVM_ABI_VERSION 4u
+#define DOLVM_ABI_VERSION 5u
 
 // Register file size. Values are block-local, and the emitter recycles a
 // register as soon as its last use retires, so real blocks land far below this;
@@ -344,6 +344,20 @@ typedef enum {
     DOLVM_OP_CMP_JMP_IF_CR,
     DOLVM_OP_CMP_JMP_IF_CR_CHARGE,
     DOLVM_OP_CMP_JMP_IF_CR_GUARD,
+
+    // A shift or rotate by a constant, and the mask that always follows it.
+    // `rlwinm` is how PowerPC spells every field extraction there is, and the
+    // builder writes it out as a rotate and an and -- two dispatches, with the
+    // second reading back through the register file what the first just wrote.
+    // One opcode does both, and the dependency between them stops existing.
+    //
+    // a = destination, b = source, c = shift amount, imm = mask. The source is
+    // read as 32 bits and the result is zero-extended before the mask, exactly
+    // as the pair was.
+    DOLVM_OP_ROTL32I_AND,
+    DOLVM_OP_SHL32I_AND,
+    DOLVM_OP_LSHR32I_AND,
+    DOLVM_OP_ASHR32I_AND,
 
     DOLVM_OP_COUNT
 } DolVMOp;

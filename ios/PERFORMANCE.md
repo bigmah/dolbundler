@@ -97,17 +97,19 @@ interpreter already has.
 
 **What is worth measuring next on the bytecode path:**
 
-- `hook_fb` was 63.7M guest instructions per 45s handed back to the chassis to
+- ~~`hook_fb` was 63.7M guest instructions per 45s handed back to the chassis to
   interpret one at a time, and no change above touched it. Whether DolVM pays
-  something similar is unmeasured. The DolIR builder does not lower 17 opcodes
-  at all (the `o` overflow forms, `lsw*`/`stsw*`), so there is a comparable
-  path.
-- The interpreter's build flags are worth 10-20% together and are easy to lose
-  silently: PGO (a stale profile is dropped without a warning), one indirect
-  branch per handler via `-mllvm -tail-dup-*-size`, LTO with the same flags
-  passed to the linker, and `-mcpu=apple-a16`. All live in ModernGekko's
-  `CMakeLists.txt` under `moderngekko_dolvm`. Confirm they are active in an iOS
-  build before concluding anything about interpreter speed.
+  something similar is unmeasured.~~ Measured: it does not. The bytecode path's
+  equivalent -- opcodes the IR builder does not lower, which become `fallback`
+  -- did not appear in the executed opcode mix at all. What *was* there is
+  below. (The 17 opcodes the DolIR builder does not lower -- the `o` overflow
+  forms and `lsw*`/`stsw*` -- are simply not instructions this game executes.)
+- ~~The interpreter's build flags are worth 10-20% together and are easy to lose
+  silently.~~ Checked in `build-ios/DolBundlerIOS.xcodeproj`: `-mcpu=apple-a16`,
+  `-mllvm -tail-dup-pred-size=256`, `-mllvm -tail-dup-succ-size=256`, `-flto`
+  and `-fprofile-instr-use=.../dolvm.profdata` are all on the interpreter's
+  `OTHER_CFLAGS`, and the tail-duplication flags reach the linker too. The
+  device was not missing them.
 - `DolRecomp/src/vm/README.md` has the desktop breakdown of where interpreter
   time goes.
 
@@ -121,3 +123,116 @@ be compiled *and signed* before install, so the app can only ever run games it
 was built with -- which is neither the emulator that guideline 4.7 permits nor
 something this project can distribute. The bytecode path exists for that reason
 and remains the shipping architecture.
+
+---
+
+# What was slow, and what was done about it (2026-08-22)
+
+The section above was written before the bytecode path had been profiled against
+this title at all. When it was, the answer was not the interpreter.
+
+## Disney skate spent 45% of every frame in one wait loop
+
+Profiled over a fixed gameplay window -- a savestate taken 82 billion guest
+cycles into a run, so two builds measure the same scene rather than whichever
+one they happened to reach:
+
+- 16.16 billion interpreted opcodes over 12 billion guest cycles.
+- One guest block ran **272,012,114** times. The next busiest ran 2.4 million.
+- One hardware address, `0xCC000000` (the command processor's status
+  register), accounted for **272,013,641** of 272,300,000 accesses that left
+  RAM -- 99.97%.
+- The four hottest opcode *pairs* were one chain:
+  `load32 -> rotl32i -> andi -> store8`, together 46% of everything executed.
+
+That chain is `GXGetGPStatus`, which reads the 16-bit CP status word and unpacks
+five bits into five bools with `lwz; rlwinm; stb` five times over. Its caller:
+
+    loop: bl   GXGetGPStatus
+          lbz  r0, overhi
+          cmpwi r0, 0
+          beq  loop
+          lwz  r0, -0x70C8(r13)
+          cmpwi r0, 0
+          beq  loop
+
+`overhi` is CP status bit 0, the FIFO overflow high watermark, and only a FIFO
+*write* can set it. Nothing in the loop writes the FIFO, so the bit cannot
+change while the loop runs: this is the game's idle thread, waiting for an
+interrupt. Emulating it faithfully cost ~57% of interpreted opcodes and ~26% of
+wall clock, the second part because every iteration's `lhz` left RAM -- a homed
+register flush and refill around a chassis MMIO round trip that runs the
+emulated GPU.
+
+DolVM already skips idle loops, but its test (Dolphin's `IsBusyWaitLoop`) wants
+one load, no stores and no call. This loop has all three.
+
+## The fix: recognise the wait at the poll, not at the loop
+
+`DOLVM_POLL_SPIN` in `dolvm_interp.c`. The interpreter counts consecutive reads
+the chassis had to service that come back with the same value, from the same
+guest instruction, at the same address. Past sixteen, the next back edge is
+treated exactly as a recognised idle loop: charge what is left of the slice,
+leave at the loop head, poll once more next slice. A write the chassis services
+resets the run, and a `poll_fresh` flag stops a run left behind by a loop that
+has since exited from firing on the next loop's first back edge.
+
+A wait that has once been proved is remembered by (guest pc, address, value) in
+an eight-entry table, so the threshold is paid once rather than once per timing
+slice. The value is part of the key, so the read that finally answers the wait
+is not covered by the site that recorded the waiting.
+
+## Also: `rlwinm` as one opcode
+
+With the spin gone, the hottest remaining pair was `rotl32i -> andi` at 4.9% of
+all opcodes, and *every* `rotl32i` was followed by one. That pair is `rlwinm`,
+which is how PowerPC spells every bitfield extraction there is. Four fused
+opcodes (`rotl32i.and`, `shl32i.and`, `lshr32i.and`, `ashr32i.and`) collapse it,
+folded in the emitter the same way an address add folds into a load. Module ABI
+went to 5.
+
+## Numbers (M4 Pro, cpu time, gameplay savestate window)
+
+| | throughput |
+|---|---|
+| before | 1.055x |
+| + poll-spin skip | 2.607x |
+| + remembered wait sites | 2.885x |
+| + `rlwinm` fused | **2.88x** |
+
+Each step measured on its own; the last two are within the 3% band the machine
+drifts by under sustained load, so treat them as "about 2.9x" rather than as
+three decimal places. The same title's *boot* window (first 6e9 cycles) went
+1.46x -> 1.43x, which is to say it did not move: the wait loop does not run
+until the game is playing, which is the whole argument for benching a scene.
+
+The same 180-billion-cycle boot run, window by window, before and after: every
+scene transition lands at the same guest time (152.3s, 156.4s, 168.7s into the
+first attract demo, 197.5s back to the menu, 284.0s into the second demo), and
+non-idle guest blocks execute the same number of times to within 0.001%. Only
+the idle spin collapsed -- 272M iterations to 600k.
+
+Other titles, first 6e9 cycles, against the figures in `src/vm/README.md`:
+Mario Party 4 2.94x -> 3.80x, SpongeBob 1.81x -> 12.36x (its boot is almost all
+hardware waiting), Melee 1.39x -> 1.41x. Luigi's Mansion, not previously
+measured, 6.80x. `test_dolvm` and `test_dolvm_diff` unchanged.
+
+## Two measurement notes for next time
+
+**The desktop bench needs the throttle off.** Without `[Core] EmulationSpeed =
+0.0000` in `<user-dir>/Config/Dolphin.ini` the runner sleeps to hold 100% and
+only the cpu-time figure moves; the wall figure reads 1.0000x whatever the
+interpreter does.
+
+**A gameplay window needs a savestate, not a longer run.** Disney skate's
+attract loop alternates menus (1.4x) and skating (1.06x before this work), and a
+window that opens at the first dispatch measures twelve seconds of logos.
+`DOLVM_BENCH_SKIP` charges past the boot, `DOLVM_BENCH_WINDOW` reports every so
+many cycles so the scene a window landed in can be identified, and
+`MODERNGEKKO_SAVE_STATE_AT_SKIP=<path>` writes a state at that exact guest
+instant. Loading it makes the measurement 23 seconds instead of three minutes
+and puts both builds in the same scene.
+
+**Sustained benching moves the number by 3%.** Back-to-back runs spread 0.9%;
+runs half an hour apart under continuous load spread 3%. A/B back to back, or
+idle the machine first.

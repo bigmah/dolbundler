@@ -189,6 +189,10 @@ static const char* const g_op_names[DOLVM_OP_COUNT] = {
     [DOLVM_OP_CMP_JMP_IF_CR] = "cmp.jmp.if.cr",
     [DOLVM_OP_CMP_JMP_IF_CR_CHARGE] = "cmp.jmp.if.cr.charge",
     [DOLVM_OP_CMP_JMP_IF_CR_GUARD] = "cmp.jmp.if.cr.guard",
+    [DOLVM_OP_ROTL32I_AND] = "rotl32i.and",
+    [DOLVM_OP_SHL32I_AND] = "shl32i.and",
+    [DOLVM_OP_LSHR32I_AND] = "lshr32i.and",
+    [DOLVM_OP_ASHR32I_AND] = "ashr32i.and",
 };
 
 const char* dolvm_op_name(u32 op) {

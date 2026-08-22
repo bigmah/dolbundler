@@ -193,13 +193,17 @@ straight away whether the interpreter or the module is at fault.
 
 **Speed is the real constraint, not the port.** Measured on an M4 Pro (cpu
 time over each title's first six billion guest cycles), DolVM runs Mario Party
-4 at 2.94× realtime, the SpongeBob movie game at 1.81×, and Melee at 1.39×.
-An A17 Pro core has roughly three quarters of that single-thread throughput
-and throttles under sustained load, so expect Melee-class titles to sit near
-full speed on a 15 Pro and lighter ones comfortably above it. Nothing about the
-iOS port changes that; it is a property of the interpreter, and
-`ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says where the time
-goes and what each change bought.
+4 at 3.80× realtime, the SpongeBob movie game at 12.36×, Disney's Extreme Skate
+Adventure at 1.43× and Melee at 1.41×. An A17 Pro core has roughly three
+quarters of that single-thread throughput and throttles under sustained load.
+
+Those are boot windows, and how much of a boot is spent waiting on hardware
+varies enormously by title -- which is also where most of the 2026-08-22 gain
+came from. Over a fixed *gameplay* window Disney skate went from 1.055× to
+2.92×, because the game's idle thread polls the command processor's status
+register for 45% of every frame and the interpreter now recognises that as a
+wait. `ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says how, where
+the rest of the time goes, and what each change bought.
 
 [`PERFORMANCE.md`](PERFORMANCE.md) is the device-side companion to that: how to
 measure emulation speed on a phone without a console attached, and what a

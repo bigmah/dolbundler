@@ -320,9 +320,15 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
                 "building the interpreter without it")
         endif()
     endif()
+    # Sampling deliberately does *not* turn the opcode counters on. Counting is
+    # two global increments per opcode, which is enough to make every handler's
+    # epilogue identical again -- LLVM's tail merger then folds them into one
+    # shared indirect branch, and the profile that comes back describes a build
+    # nobody ships. Turn MODERNGEKKO_DOLVM_PROFILE on as well when the executed
+    # mix is what is wanted; leave it off when the question is where time goes.
     if(MODERNGEKKO_DOLVM_SAMPLE)
         target_compile_definitions(moderngekko_dolvm PRIVATE
-            DOLVM_BENCH=1 DOLVM_PROFILE=1 DOLVM_SAMPLE=1)
+            DOLVM_BENCH=1 DOLVM_SAMPLE=1)
     endif()
     if(NOT WIN32)
         target_link_libraries(moderngekko_dolvm PRIVATE m)

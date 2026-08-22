@@ -107,6 +107,9 @@ typedef struct {
     u8* home_write;         // state write: 1 = the producer wrote it, 2 = copy
     u8* home_dest;          // instruction index: home to compute straight into
     u8* supervisor;         // instruction index: the privilege test folded in
+    u8* shift_fused;        // AND index: the fused opcode the shift before it
+                            // collapsed into, or 0
+    u8* shift_amount;       // AND index: that shift's constant amount
     u32* mem_write;         // for a fused load, the state write folded into it
     // Slot offsets decided during analysis. Like the CR forms, they cannot be
     // recomputed at lowering: choosing to fuse is what drops the use counts the
@@ -427,6 +430,13 @@ static DolIRValue effective_operand(FunctionEmitter* fn,
         return 0;
     if (fn->mem_fused[index] == 2u && slot == 1u)
         return 0;
+    // A shift folded into the mask that consumed it: the mask reads what the
+    // shift read, not what it wrote.
+    if (fn->shift_fused[index] && slot == 0u) {
+        u32 def = fn->def_index[value];
+        if (def < block->instruction_count && fn->folded[def])
+            return block->instructions[def].operands[0];
+    }
     if (slot != 0)
         return value;
     if (inst->op != DOLIR_OP_GUEST_LOAD && inst->op != DOLIR_OP_GUEST_STORE)
@@ -940,6 +950,8 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
         fn->cr_form[i] = CR_FIELD_REGS;
         fn->mem_fused[i] = 0;
         fn->supervisor[i] = 0;
+        fn->shift_fused[i] = 0;
+        fn->shift_amount[i] = 0;
     }
 
     // A first, literal count decides which address adds can fold.
@@ -1100,6 +1112,47 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
         }
     }
 
+    // A shift or rotate by a constant whose only reader is the mask that
+    // follows it. That pair is `rlwinm`, and `rlwinm` is how PowerPC extracts
+    // every bitfield there is: on this title the two opcodes were 9% of
+    // everything executed, with the second waiting on the first through the
+    // register file. Run last, so an AND some earlier fold has already claimed
+    // -- the condition-register branch's bit mask, the privilege test's, the
+    // indirect branch's alignment mask -- is left alone.
+    for (u32 i = 0; i < count; i++) {
+        if (fn->folded[i] || fn->cr_form[i] != CR_FIELD_REGS)
+            continue;
+        const DolIRInstruction* inst = &block->instructions[i];
+        if (inst->op != DOLIR_OP_AND || inst->operand_count != 2 ||
+            !inst->result)
+            continue;
+        u64 mask = 0;
+        if (!constant_in_block(fn, block, inst->operands[1], &mask) ||
+            mask > 0xFFFFFFFFull)
+            continue;
+        u32 shift_index = 0;
+        const DolIRInstruction* shift =
+            single_use_def(fn, block, inst->operands[0], &shift_index);
+        if (!shift || shift->type != DOLIR_TYPE_I32 ||
+            shift->operand_count != 2 || !shift->result)
+            continue;
+        u64 amount = 0;
+        if (!constant_in_block(fn, block, shift->operands[1], &amount) ||
+            amount > 31ull)
+            continue;
+        u8 fused;
+        switch (shift->op) {
+        case DOLIR_OP_ROTL: fused = DOLVM_OP_ROTL32I_AND; break;
+        case DOLIR_OP_SHL: fused = DOLVM_OP_SHL32I_AND; break;
+        case DOLIR_OP_LSHR: fused = DOLVM_OP_LSHR32I_AND; break;
+        case DOLIR_OP_ASHR: fused = DOLVM_OP_ASHR32I_AND; break;
+        default: continue;
+        }
+        fn->shift_fused[i] = fused;
+        fn->shift_amount[i] = (u8)amount;
+        fn->folded[shift_index] = 1;
+    }
+
     // Recount against what will actually be emitted, then drop whatever the
     // folding just orphaned -- typically the constant the add was carrying.
     for (u32 i = 0; i < count; i++) {
@@ -1198,6 +1251,7 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
             single_use_def(fn, block, block->terminator.target_value, &def_index);
         u64 mask = 0;
         if (def && def->op == DOLIR_OP_AND && def->operand_count == 2 &&
+            !fn->shift_fused[def_index] &&
             constant_in_block(fn, block, def->operands[1], &mask) &&
             mask == 0xFFFFFFFCull) {
             fn->indirect_mask = true;
@@ -1420,6 +1474,14 @@ static bool lower_instruction(FunctionEmitter* fn, const DolIRBlock* block,
         return lower_binary(fn, block, inst, ops);
     }
     case DOLIR_OP_AND: {
+        if (fn->shift_fused[index]) {
+            u32 shift_index = fn->def_index[inst->operands[0]];
+            u64 mask = 0;
+            constant_in_block(fn, block, inst->operands[1], &mask);
+            return emit_raw(builder, fn->shift_fused[index], dst,
+                            fn->reg[block->instructions[shift_index].operands[0]],
+                            fn->shift_amount[index], (u32)mask);
+        }
         OpPair ops = {DOLVM_OP_AND, DOLVM_OP_ANDI};
         return lower_binary(fn, block, inst, ops);
     }
@@ -2172,10 +2234,13 @@ static bool emit_function(Builder* builder, DolIRFunction* function,
     fn.home_write = (u8*)calloc(largest ? largest : 1u, 1);
     fn.home_dest = (u8*)malloc(largest ? largest : 1u);
     fn.supervisor = (u8*)calloc(largest ? largest : 1u, 1);
+    fn.shift_fused = (u8*)calloc(largest ? largest : 1u, 1);
+    fn.shift_amount = (u8*)calloc(largest ? largest : 1u, 1);
     fn.homed = builder->homed;
     bool ok = fn.block_start && fn.reg && fn.reg_hi && fn.last_use &&
               fn.def_index && fn.use_count && fn.memory_use_count &&
               fn.retired && fn.folded && fn.cr_form && fn.mem_fused &&
+              fn.shift_fused && fn.shift_amount &&
               fn.mem_write && fn.mem_base_off && fn.mem_value_off &&
               fn.home_read && fn.home_write && fn.home_dest &&
               fn.supervisor;

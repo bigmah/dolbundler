@@ -248,7 +248,88 @@ typedef struct {
     // only XER, which is homed whatever the module does.
     DolVMReg* homes;
     bool homed;
+    // The last read the chassis had to service, and how many times in a row it
+    // has come back unchanged. A guest that reads one hardware register from
+    // one instruction and gets the same answer every time is waiting, not
+    // working: nothing it does in the loop can change what it is reading, so
+    // the answer can only come from an interrupt or from an event the chassis
+    // has yet to run. See DOLVM_POLL_SPIN.
+    u32 poll_pc;
+    u32 poll_address;
+    u64 poll_value;
+    u32 poll_run;
+    // Whether the run was extended since the last back edge looked at it. A
+    // long run left behind by a loop that has since exited must not make the
+    // *next* loop's first back edge look like a wait.
+    u32 poll_fresh;
 } DolVMMemory;
+
+// How many identical hardware reads in a row make a wait. The interpreter then
+// treats the next back edge the way it treats a recognised idle loop: charge
+// what is left of the slice and hand control back, so whatever the guest is
+// waiting for actually happens.
+//
+// The shape this exists for is the one the simple idle-loop test cannot see,
+// because the poll is behind a call:
+//
+//     loop: bl GXGetGPStatus       ; lhz from 0xCC000000, unpacks five bits
+//           lbz r0, overhi
+//           cmpwi r0, 0
+//           beq loop
+//
+// Disney's Extreme Skate Adventure sits in exactly that loop for 45% of every
+// frame -- it is the game's idle thread -- and `overhi` is the command
+// processor's FIFO-overflow bit, which cannot become set while the loop runs
+// because only a FIFO *write* can set it. Running it faithfully cost more than
+// half of everything the interpreter did.
+//
+// A run only counts while the address, the instruction reading it and the value
+// all stay the same, and any write the chassis has to service resets it, so a
+// loop that is making progress never reaches the threshold.
+#ifndef DOLVM_POLL_SPIN
+#define DOLVM_POLL_SPIN 16u
+#endif
+
+// Waits that have already been proved. The threshold above exists to be sure a
+// loop really is waiting, and paying it again in every timing slice is pure
+// repetition: the spin in Disney skate is re-entered around six hundred
+// thousand times over a run, and each re-entry spun the full threshold before
+// the interpreter would believe it again. A read that has once come back
+// unchanged DOLVM_POLL_SPIN times in a row is trusted from its first
+// occurrence afterwards -- but only while the address, the instruction and the
+// value all still match, so the read that finally answers the wait is not
+// covered by the site that recorded the waiting.
+#define DOLVM_POLL_SITES 8u
+static struct {
+    u32 pc;
+    u32 address;
+    u64 value;
+    u32 live;
+} g_dolvm_poll_sites[DOLVM_POLL_SITES];
+static u32 g_dolvm_poll_next;
+
+static void dolvm_poll_remember(u32 pc, u32 address, u64 value) {
+    for (u32 i = 0; i < DOLVM_POLL_SITES; i++)
+        if (g_dolvm_poll_sites[i].live && g_dolvm_poll_sites[i].pc == pc &&
+            g_dolvm_poll_sites[i].address == address) {
+            g_dolvm_poll_sites[i].value = value;
+            return;
+        }
+    u32 slot = g_dolvm_poll_next++ % DOLVM_POLL_SITES;
+    g_dolvm_poll_sites[slot].pc = pc;
+    g_dolvm_poll_sites[slot].address = address;
+    g_dolvm_poll_sites[slot].value = value;
+    g_dolvm_poll_sites[slot].live = 1;
+}
+
+static bool dolvm_poll_known(u32 pc, u32 address, u64 value) {
+    for (u32 i = 0; i < DOLVM_POLL_SITES; i++)
+        if (g_dolvm_poll_sites[i].live && g_dolvm_poll_sites[i].pc == pc &&
+            g_dolvm_poll_sites[i].address == address &&
+            g_dolvm_poll_sites[i].value == value)
+            return true;
+    return false;
+}
 
 // The MEM1 hit is the whole of a guest access almost always, and it is inlined
 // into every load and store handler with the width a constant: a range check,
@@ -271,8 +352,33 @@ static inline bool dolvm_ram_load(const DolVMMemory* mem, u32 address,
     return true;
 }
 
+#ifdef DOLVM_PROFILE
+// Which guest addresses leave RAM. An access the chassis has to service costs
+// two orders of magnitude more than one that hits MEM1 -- the homed registers
+// go out and come back around it, and on this chassis a command-processor read
+// runs the emulated GPU -- so knowing *which* register a title polls is worth
+// more than knowing how many slow accesses there were.
+#define DOLVM_PROFILE_MMIO_SITES 4096u
+static u32 g_dolvm_mmio_addr[DOLVM_PROFILE_MMIO_SITES];
+static u64 g_dolvm_mmio_count[DOLVM_PROFILE_MMIO_SITES];
+static void dolvm_count_mmio(u32 address) {
+    u32 slot = ((address >> 1) * 2654435761u) & (DOLVM_PROFILE_MMIO_SITES - 1u);
+    for (u32 probe = 0; probe < DOLVM_PROFILE_MMIO_SITES; probe++) {
+        u32 i = (slot + probe) & (DOLVM_PROFILE_MMIO_SITES - 1u);
+        if (!g_dolvm_mmio_count[i] || g_dolvm_mmio_addr[i] == address) {
+            g_dolvm_mmio_addr[i] = address;
+            g_dolvm_mmio_count[i]++;
+            return;
+        }
+    }
+}
+#define DOLVM_COUNT_MMIO(a) dolvm_count_mmio(a)
+#else
+#define DOLVM_COUNT_MMIO(a) ((void)0)
+#endif
+
 static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
-                                                 const DolVMMemory* mem,
+                                                 DolVMMemory* mem,
                                                  u32 address, u32 width, u32 pc,
                                                  u64* out) {
     u32 normalized = address & ~0x40000000u;
@@ -292,6 +398,7 @@ static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
         *out = 0;
         return true;
     }
+    DOLVM_COUNT_MMIO(address);
     ctx->pc = pc;
     // The chassis owns CPUState for the length of this call and may do anything
     // with it, so the homed registers go back before it and are read out again
@@ -308,6 +415,18 @@ static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
     // the accessed bytes are the load's result, exactly as cpu.c's mem_read8
     // and friends narrow it.
     *out = width >= 8u ? value : (value & ((1ull << (width * 8u)) - 1ull));
+    if (address == mem->poll_address && pc == mem->poll_pc &&
+        *out == mem->poll_value) {
+        if (mem->poll_run < DOLVM_POLL_SPIN &&
+            ++mem->poll_run == DOLVM_POLL_SPIN)
+            dolvm_poll_remember(pc, address, *out);
+    } else {
+        mem->poll_pc = pc;
+        mem->poll_address = address;
+        mem->poll_value = *out;
+        mem->poll_run = dolvm_poll_known(pc, address, *out) ? DOLVM_POLL_SPIN : 1u;
+    }
+    mem->poll_fresh = 1;
     return ctx->exception == 0;
 }
 
@@ -316,7 +435,7 @@ static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
 // chassis. A chassis access can raise, and a raised exception means this
 // dispatch is over, so both return false to unwind the interpreter.
 static DOLVM_ALWAYS_INLINE bool dolvm_guest_load(CPUState* ctx,
-                                                 const DolVMMemory* mem,
+                                                 DolVMMemory* mem,
                                                  u32 address, u32 width, u32 pc,
                                                  u64* out) {
     if (dolvm_ram_load(mem, address, width, out))
@@ -341,7 +460,7 @@ static inline void dolvm_clear_reservation(CPUState* ctx, u32 address) {
 }
 
 static DOLVM_NOINLINE bool dolvm_guest_store_slow(CPUState* ctx,
-                                                  const DolVMMemory* mem,
+                                                  DolVMMemory* mem,
                                                   u32 address, u64 value,
                                                   u32 width, u32 pc) {
     u32 normalized = address & ~0x40000000u;
@@ -360,6 +479,7 @@ static DOLVM_NOINLINE bool dolvm_guest_store_slow(CPUState* ctx,
     }
     if (!ctx->external_write)
         return true;
+    mem->poll_run = 0;
     ctx->pc = pc;
     // Only the accessed bytes reach the chassis, matching the narrowed value
     // cpu.c's mem_write8/16/32 pass on.
@@ -376,7 +496,7 @@ static DOLVM_NOINLINE bool dolvm_guest_store_slow(CPUState* ctx,
 }
 
 static DOLVM_ALWAYS_INLINE bool dolvm_guest_store(CPUState* ctx,
-                                                  const DolVMMemory* mem,
+                                                  DolVMMemory* mem,
                                                   u32 address, u64 value,
                                                   u32 width, u32 pc) {
     u32 offset = (address & ~0x40000000u) - GC_RAM_BASE;
@@ -593,6 +713,17 @@ static inline bool dolvm_pending(const DolVMGate* gate, const CPUState* ctx) {
 // to where interpretation time goes -- entry stubs alone outnumber the code
 // they lead into -- so speed work needs the executed mix, not the emitted one.
 // Off by default and compiled out entirely; the dispatch below is unchanged.
+// Where each opcode's handler begins. A sampling profiler reports addresses
+// inside one enormous function, so this is what turns those back into opcodes.
+// Kept outside DOLVM_PROFILE: the per-opcode counters below are two global
+// increments on the hot path, which is enough to let LLVM's tail merger fold
+// the handlers' epilogues back into one shared indirect branch -- so a build
+// that counts opcodes is no longer the build whose time is being measured.
+// This table costs one compare per dispatch and leaves the handlers alone.
+#if defined(DOLVM_PROFILE) || defined(DOLVM_SAMPLE)
+const void* g_dolvm_op_handlers[DOLVM_OP_COUNT];
+#endif
+
 #ifdef DOLVM_PROFILE
 u64 g_dolvm_op_counts[DOLVM_OP_COUNT];
 u64 g_dolvm_dispatches;
@@ -609,6 +740,7 @@ u64 g_dolvm_leave_exit;
 u64 g_dolvm_leave_call;
 u64 g_dolvm_leave_called;
 u64 g_dolvm_leave_idle;
+u64 g_dolvm_leave_poll;
 u64 g_dolvm_slot_counts[DOLVM_PROFILE_SLOTS];
 u64 g_dolvm_gpr_span[33];
 u32 g_dolvm_gpr_mask;
@@ -620,9 +752,6 @@ u32 g_dolvm_gpr_mask;
         if ((u32)(off) < 128u)                                                \
             g_dolvm_gpr_mask |= 1u << ((u32)(off) / 4u);                      \
     } while (0)
-// Where each opcode's handler begins. A sampling profiler reports addresses
-// inside one enormous function, so this is what turns those back into opcodes.
-const void* g_dolvm_op_handlers[DOLVM_OP_COUNT];
 // Where dispatches end, by guest pc: a loop that spins for whole slices shows
 // up here as one address with most of the leaves.
 #define DOLVM_PROFILE_LEAVE_SITES 4096u
@@ -639,6 +768,27 @@ static void dolvm_count_leave(u32 pc) {
         }
     }
 }
+// Which guest blocks the time is spent in. An opcode mix says what the
+// interpreter runs; it does not say which of the game's functions asked for it,
+// and the two questions have different answers -- one chain of four opcodes
+// came to 40% of everything executed here and belonged to a single loop.
+// Sampled at every block head, keyed by the block's guest pc.
+#define DOLVM_PROFILE_BLOCK_SITES 65536u
+static u32 g_dolvm_block_pc[DOLVM_PROFILE_BLOCK_SITES];
+static u64 g_dolvm_block_count[DOLVM_PROFILE_BLOCK_SITES];
+static void dolvm_count_block(u32 pc) {
+    u32 slot = ((pc >> 2) * 2654435761u) & (DOLVM_PROFILE_BLOCK_SITES - 1u);
+    for (u32 probe = 0; probe < DOLVM_PROFILE_BLOCK_SITES; probe++) {
+        u32 i = (slot + probe) & (DOLVM_PROFILE_BLOCK_SITES - 1u);
+        if (!g_dolvm_block_count[i] || g_dolvm_block_pc[i] == pc) {
+            g_dolvm_block_pc[i] = pc;
+            g_dolvm_block_count[i]++;
+            return;
+        }
+    }
+}
+#define DOLVM_COUNT_BLOCK(pc) dolvm_count_block(pc)
+
 // Dynamic opcode pairs: what follows what, which is what decides whether a
 // fused form would pay.
 u64 g_dolvm_pair_counts[DOLVM_OP_COUNT][DOLVM_OP_COUNT];
@@ -652,6 +802,7 @@ static u32 g_dolvm_previous_op;
 #else
 #define DOLVM_COUNT(op) ((void)0)
 #define DOLVM_COUNT_SLOT(off) ((void)0)
+#define DOLVM_COUNT_BLOCK(pc) ((void)0)
 #endif
 
 // A helper that reaches into CPUState for something the register file is now
@@ -728,6 +879,11 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
     mem.journal_user = g_mem_write_journal_user;
     mem.homes = regs;
     mem.homed = homed;
+    mem.poll_pc = 0;
+    mem.poll_address = 0;
+    mem.poll_value = 0;
+    mem.poll_run = 0;
+    mem.poll_fresh = 0;
     const DolVMInst* code = module->code;
     const DolVMInst* ip = code + (entry->entry & DOLVM_ENTRY_OFFSET_MASK);
     const DolVMInst* inst;
@@ -766,6 +922,19 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
         ctx->pc = (leave_pc);                                                 \
         goto leave;                                                           \
     } while (0)
+// A back edge taken while the chassis keeps handing back the same answer to the
+// same hardware read. Nothing in the loop can change that answer, so this is
+// the recognised idle loop's situation reached by a route the emitter cannot
+// see -- through a call, past stores to scratch memory. Treated identically:
+// charge the rest of the slice, leave at the loop head, poll once more next
+// time. The run is cleared so a loop that spins across several slices pays the
+// threshold again in each, which is what bounds how wrong this can be.
+#define DOLVM_POLLING()                                                       \
+    (mem.poll_fresh                                                           \
+         ? (mem.poll_fresh = 0,                                               \
+            mem.poll_run >= DOLVM_POLL_SPIN ? (mem.poll_run = 0, 1) : 0)      \
+         : 0)
+
 // Landing on a block head through a resolved edge: the head opens with its
 // cycle charge, and paying it here is one dispatch fewer per call and return.
 #define DOLVM_LAND()                                                          \
@@ -837,8 +1006,10 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
         LABEL(DOLVM_OP_CMP_JMP_IF_CR),
         LABEL(DOLVM_OP_CMP_JMP_IF_CR_CHARGE),
         LABEL(DOLVM_OP_CMP_JMP_IF_CR_GUARD),
+        LABEL(DOLVM_OP_ROTL32I_AND), LABEL(DOLVM_OP_SHL32I_AND),
+        LABEL(DOLVM_OP_LSHR32I_AND), LABEL(DOLVM_OP_ASHR32I_AND),
     };
-#ifdef DOLVM_PROFILE
+#if defined(DOLVM_PROFILE) || defined(DOLVM_SAMPLE)
     if (!g_dolvm_op_handlers[DOLVM_OP_NOP])
         memcpy(g_dolvm_op_handlers, dispatch_table, sizeof(dispatch_table));
 #endif
@@ -1057,6 +1228,32 @@ dispatch:
         NEXT();
     }
 
+    // `rlwinm` and the rest of the field extractions, as one opcode. The mask
+    // is applied to a value that is already zero-extended from 32 bits, which
+    // is what the rotate or shift that used to precede this left behind.
+    OP(DOLVM_OP_ROTL32I_AND): {
+        u32 value = (u32)regs[inst->b].u;
+        u32 shift = inst->c & 31u;
+        u32 rotated = shift ? ((value << shift) | (value >> (32u - shift)))
+                            : value;
+        regs[inst->a].u = rotated & inst->imm;
+        NEXT();
+    }
+
+    OP(DOLVM_OP_SHL32I_AND):
+        regs[inst->a].u =
+            (u32)(regs[inst->b].u << (inst->c & 31u)) & inst->imm;
+        NEXT();
+
+    OP(DOLVM_OP_LSHR32I_AND):
+        regs[inst->a].u = ((u32)regs[inst->b].u >> (inst->c & 31u)) & inst->imm;
+        NEXT();
+
+    OP(DOLVM_OP_ASHR32I_AND):
+        regs[inst->a].u =
+            (u32)((s32)(u32)regs[inst->b].u >> (inst->c & 31u)) & inst->imm;
+        NEXT();
+
     OP(DOLVM_OP_ROTL32I): {
         u32 value = (u32)regs[inst->b].u;
         u32 shift = inst->imm & 31u;
@@ -1243,6 +1440,7 @@ dispatch:
 #undef DOLVM_STORE
 
     OP(DOLVM_OP_CHARGE):
+        DOLVM_COUNT_BLOCK(pc_base);
         ctx->downcount -= (s64)inst->imm;
         NEXT();
 
@@ -1254,6 +1452,12 @@ dispatch:
         // Two ceilings, exactly the pair the native backends use: cycles bound
         // an ordinary loop, and the step count bounds a loop whose body the
         // cycle table happens to price at zero.
+        if (DOLVM_POLLING()) {
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_poll;
+#endif
+            DOLVM_IDLE_LEAVE(inst->imm);
+        }
         if (DOLVM_OVER_BUDGET() || ++steps >= step_budget) {
             ctx->pc = inst->imm;
             goto leave;
@@ -1472,7 +1676,7 @@ dispatch:
         DOLVM_CMP_BRANCH(payload);
         if (!taken)
             NEXT();
-        if (inst->b & 0x80u) {
+        if ((inst->b & 0x80u) || DOLVM_POLLING()) {
 #ifdef DOLVM_PROFILE
             ++g_dolvm_leave_idle;
 #endif
@@ -1758,7 +1962,7 @@ dispatch:
             NEXT();
         }
         u64 payload = dolvm_payload(ip);
-        if (inst->b & 0x80u) {
+        if ((inst->b & 0x80u) || DOLVM_POLLING()) {
 #ifdef DOLVM_PROFILE
             ++g_dolvm_leave_idle;
 #endif
@@ -1780,7 +1984,7 @@ dispatch:
         // run the body once. The target's cycle charge rides in the high half
         // and is only paid when the edge is actually taken.
         u64 payload = dolvm_payload(ip);
-        if (inst->a) {
+        if (inst->a || DOLVM_POLLING()) {
 #ifdef DOLVM_PROFILE
             ++g_dolvm_leave_idle;
 #endif
@@ -1914,6 +2118,34 @@ void dolvm_profile_report(FILE* out) {
                 (unsigned long long)count, dolvm_op_name(order[i]));
     }
     dolvm_slot_report(out, total);
+    fprintf(out, "dolvm hottest guest addresses outside RAM:\n");
+    for (u32 round = 0; round < 16u; round++) {
+        u32 best = DOLVM_PROFILE_MMIO_SITES;
+        for (u32 i = 0; i < DOLVM_PROFILE_MMIO_SITES; i++)
+            if (g_dolvm_mmio_count[i] &&
+                (best == DOLVM_PROFILE_MMIO_SITES ||
+                 g_dolvm_mmio_count[i] > g_dolvm_mmio_count[best]))
+                best = i;
+        if (best == DOLVM_PROFILE_MMIO_SITES)
+            break;
+        fprintf(out, "  0x%08X  %14llu\n", g_dolvm_mmio_addr[best],
+                (unsigned long long)g_dolvm_mmio_count[best]);
+        g_dolvm_mmio_count[best] = 0;
+    }
+    fprintf(out, "dolvm hottest guest blocks:\n");
+    for (u32 round = 0; round < 24u; round++) {
+        u32 best = DOLVM_PROFILE_BLOCK_SITES;
+        for (u32 i = 0; i < DOLVM_PROFILE_BLOCK_SITES; i++)
+            if (g_dolvm_block_count[i] &&
+                (best == DOLVM_PROFILE_BLOCK_SITES ||
+                 g_dolvm_block_count[i] > g_dolvm_block_count[best]))
+                best = i;
+        if (best == DOLVM_PROFILE_BLOCK_SITES)
+            break;
+        fprintf(out, "  0x%08X  %14llu\n", g_dolvm_block_pc[best],
+                (unsigned long long)g_dolvm_block_count[best]);
+        g_dolvm_block_count[best] = 0;
+    }
     fprintf(out, "dolvm hottest opcode pairs:\n");
     for (u32 round = 0; round < 40u; round++) {
         u32 best_a = 0, best_b = 0;

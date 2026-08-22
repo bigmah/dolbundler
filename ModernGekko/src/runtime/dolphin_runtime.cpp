@@ -15,6 +15,7 @@
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h"
+#include "Core/State.h"
 #include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
 #include "UICommon/UICommon.h"
@@ -33,10 +34,18 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
+
+// The interpreter's bench raises this once it has charged past
+// DOLVM_BENCH_SKIP. Declared rather than included: dolvm_bridge.h is the one
+// header in the tree that speaks DolRecomp's CPUState, and this translation
+// unit already has the chassis's.
+extern "C" int dolvm_bridge_bench_at_skip(void);
 
 namespace {
 static_assert(sizeof(ModernGekkoModuleDesc) == sizeof(StaticRecompModuleDesc));
@@ -439,6 +448,28 @@ RuntimeRunResult Runtime::Run() {
                          "Dolphin could not boot sys/main.dol"}};
   }
   m_impl->booted = true;
+  // Comparing two builds means measuring the same scene in both, and a game
+  // does not stand still: an attract loop that alternates menus and gameplay
+  // differs by 30% in interpretation cost between the two. The interpreter's
+  // bench raises a flag once it has charged past DOLVM_BENCH_SKIP, so a state
+  // written at that moment is a fixed guest instant rather than a wall one --
+  // which turns a two-minute warm-up per measurement into a load. Off unless
+  // MODERNGEKKO_SAVE_STATE_AT_SKIP names a file to write.
+  std::jthread bench_state_thread;
+  if (const char* bench_state = std::getenv("MODERNGEKKO_SAVE_STATE_AT_SKIP")) {
+    bench_state_thread =
+        std::jthread([path = std::string(bench_state)](std::stop_token stop) {
+          while (!stop.stop_requested()) {
+            if (dolvm_bridge_bench_at_skip()) {
+              State::SaveAs(Core::System::GetInstance(), path);
+              std::fprintf(stderr, "[dolvm-bench] savestate written to %s\n",
+                           path.c_str());
+              return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          }
+        });
+  }
   std::jthread title_thread;
   if (!m_impl->config.headless && m_impl->config.show_fps_in_title) {
     title_thread = std::jthread([](std::stop_token stop_token) {
@@ -450,6 +481,7 @@ RuntimeRunResult Runtime::Run() {
     });
   }
   m_impl->platform->MainLoop();
+  bench_state_thread.request_stop();
   title_thread.request_stop();
   if (title_thread.joinable())
     title_thread.join();
