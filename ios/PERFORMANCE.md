@@ -487,13 +487,32 @@ section was flattered by a JIT the product cannot ship.** Use
 `MODERNGEKKO_NO_FALLBACK_JIT=1` for anything that is supposed to predict the
 phone.
 
-## Still open: the emulation thread waits a third of the time
+## The "emulation thread is blocked a third of the time" was the frame limiter
 
-`__semwait_signal` 23.6%, `swtch_pri` 4.7%, `semaphore_timedwait_trap` 3.5% on
-the device. In single-core mode the video work shares the emulation thread, so
-audio and presentation are both candidates and cannot be told apart from
-outside. `DOLBUNDLER_NULL_AUDIO=1` and `DOLBUNDLER_NULL_VIDEO=1` turn each off
-on a device build; two fifty-second runs answer it.
+Worth recording because it was wrong, and wrong in a way that would have cost
+somebody a week.
 
-The simulator cannot stand in for this one: it holds 100% speed and throttles,
-so its idle time is the frame limiter rather than back-pressure.
+The device profile put 23.6% in `__semwait_signal`, 4.7% in `swtch_pri` and
+3.5% in `semaphore_timedwait_trap`, and this file said that was the largest
+item in the profile and the thing to fix next. It was the frame limiter. The
+sampled run averaged 68% speed with **38% of its samples at or above 98%** --
+the emulator was ahead of real time for over a third of the window and slept,
+exactly as it is supposed to.
+
+What settled it: the simulator holds 100% and throttles, so its idle time looks
+the same. Dropping `[Core] EmulationSpeed = 0.0000` into
+`Documents/moderngekko/Config/Dolphin.ini` turns the limiter off there too, and
+the profile changes completely -- **90.95% in `dolvm_dispatch`, 9.0% outside
+it, and not one semaphore sample.**
+
+So the simulator *can* answer this class of question after all, as long as the
+limiter is off. That is the same trick the desktop bench needs, and it should
+have been the first thing tried on the device profile rather than the last.
+
+`DOLBUNDLER_NULL_AUDIO=1` and `DOLBUNDLER_NULL_VIDEO=1` exist now anyway; they
+are the right tools if presentation or audio ever *does* look like it is
+blocking.
+
+With the limiter accounted for and the data-section fallback covered, the
+phone's profile is the simulator's: the interpreter is the cost, and further
+gains have to come from the opcode count.
