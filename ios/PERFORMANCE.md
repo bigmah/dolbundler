@@ -450,3 +450,50 @@ more:
 Both need the device to measure, which is now possible:
 `MODERNGEKKO_DOLVM_SAMPLE=ON` plus `DOLBUNDLER_LOAD_STATE` and
 `DOLBUNDLER_RUN_SECONDS` puts the whole breakdown in the run log.
+
+
+## The largest single win, and it was not the interpreter
+
+The device profile said 8-10% of the phone's time was Dolphin's own
+interpreter. That undercounted it badly. Reproducing the phone's CPU path on
+the Mac -- `MODERNGEKKO_NO_FALLBACK_JIT=1`, which simply declines to construct
+the fallback JIT -- showed what it really costs:
+
+| Disney skate, gameplay scene | throughput |
+|---|---|
+| desktop, fallback handled by JitArm64 | 2.70x |
+| **same build, same module, no JIT** | **1.35x** |
+
+Half the emulator's speed, and structurally invisible to every desktop
+measurement ever made on this project, because `m_fallback_steps` only counts
+*interpreted* instructions and a desktop always had a JIT to hand them to.
+
+`MODERNGEKKO_FALLBACK_TRACE=1` names the addresses. On Disney skate, 53% of
+them were one place: **0x80003724, inside `data[0]`** -- a 1,984-byte section
+at 0x800032E0 sitting between text[0] and text[1]. That is where the linker
+puts the exception handlers, and the recompiler had only ever decoded *text*
+sections.
+
+Covering data sections that lie between text sections took it from
+**1.354x to 2.411x on the phone's path, +78%**, for 17 KB of module. Fallback
+instructions went 335,254,697 -> 37,229,885. What is left is the exception
+vectors at 0x00000500 and 0x00000C00, copies the OS writes into low RAM that
+cannot be covered statically -- and they turn out to cost nothing measurable:
+with data[0] covered, the JIT-less path and the JIT path are within 0.5% of
+each other, so there is nothing left for a JIT to help with.
+
+**Every desktop figure in this file for a title with hidden code in a data
+section was flattered by a JIT the product cannot ship.** Use
+`MODERNGEKKO_NO_FALLBACK_JIT=1` for anything that is supposed to predict the
+phone.
+
+## Still open: the emulation thread waits a third of the time
+
+`__semwait_signal` 23.6%, `swtch_pri` 4.7%, `semaphore_timedwait_trap` 3.5% on
+the device. In single-core mode the video work shares the emulation thread, so
+audio and presentation are both candidates and cannot be told apart from
+outside. `DOLBUNDLER_NULL_AUDIO=1` and `DOLBUNDLER_NULL_VIDEO=1` turn each off
+on a device build; two fifty-second runs answer it.
+
+The simulator cannot stand in for this one: it holds 100% speed and throttles,
+so its idle time is the frame limiter rather than back-pressure.

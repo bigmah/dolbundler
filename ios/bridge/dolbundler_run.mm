@@ -242,6 +242,20 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
 #else
   config.audio.backend = "AudioUnit";
 #endif
+  // Two switches for isolating what the emulation thread waits on. Profiling
+  // the phone put a third of that thread's samples in __semwait_signal and
+  // swtch_pri -- blocked, not computing -- and in single-core mode the video
+  // work runs on the same thread, so audio and presentation are both
+  // candidates and neither can be told apart from the outside. Turning each
+  // off in turn on the device answers it in two runs. Off unless set, so a
+  // normal build is untouched.
+  if (const char* quiet = getenv("DOLBUNDLER_NULL_AUDIO"))
+    if (quiet[0] == '1')
+      config.audio.backend = BACKEND_NULLSOUND;
+  if (const char* blind = getenv("DOLBUNDLER_NULL_VIDEO"))
+    if (blind[0] == '1')
+      config.graphics.backend = "Null";
+
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
   // A .dvm covers the whole title; letting the chassis fall back to its own
