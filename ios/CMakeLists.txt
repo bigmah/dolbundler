@@ -106,3 +106,25 @@ if(DOLBUNDLER_DEVELOPMENT_TEAM)
     XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${DOLBUNDLER_DEVELOPMENT_TEAM}"
     XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic")
 endif()
+
+# Dolphin's data folder, into the app bundle. Not optional, and not only for
+# parity with the desktop: `Sys/GC/font_western.bin` is the GameCube's ROM
+# font. Games draw their system text by reading it back out of the emulated
+# IPL -- memory card prompts, and in Star Fox Assault the menus as well -- and
+# with the file absent CEXIIPL hands them a page of zeroes. That shows up as a
+# menu drawn correctly with no text in it, and the only complaint anywhere is a
+# PanicAlert nobody sees on a phone.
+#
+# It lands at <DolBundler.app>/Sys, not Contents/Resources/Sys: ModernGekko
+# forces LINUX_LOCAL_DEV, which makes Dolphin's SYSDATA_DIR plain "Sys", and an
+# iOS bundle is flat. GetSysDirectory() is GetBundleDirectory() + "/Sys/".
+#
+# The whole tree goes in rather than the handful of files known to be read
+# today -- which is what the desktop build does with it as well. Leaving one
+# out costs a game that misbehaves with nothing on screen to say why, which is
+# exactly how the missing font was found.
+add_custom_command(TARGET DolBundler POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/vendor/dolphin/Data/Sys"
+          "$<TARGET_BUNDLE_CONTENT_DIR:DolBundler>/Sys"
+  COMMENT "Copying Dolphin's Sys data into DolBundler.app")

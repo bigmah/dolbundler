@@ -115,6 +115,23 @@ SDL3 builds for iOS and handles MFi and Bluetooth pads. The on-screen pad feeds
 carries no Android dependencies. The overlay hides itself whenever a real
 controller is connected.
 
+**Dolphin's `Sys` folder rides inside the app.** The desktop build copies
+`Data/Sys` next to `moderngekko-run`; `ios/CMakeLists.txt` copies the same tree
+to `DolBundler.app/Sys`. Flat, not `Contents/Resources/Sys`: an iOS bundle has
+no `Contents`, and ModernGekko forces `LINUX_LOCAL_DEV`, which is what makes
+Dolphin's `SYSDATA_DIR` a plain `Sys` — so `GetSysDirectory()` comes out as
+`GetBundleDirectory() + "/Sys/"`, which is exactly where an iOS resource
+belongs.
+
+It is load-bearing, and the way it fails is worth knowing. `Sys/GC/
+font_western.bin` is the GameCube's ROM font: a game asks the IPL for it and
+draws its system text with it, so with the file absent `CEXIIPL` hands back a
+page of zeroes and the game draws every glyph as nothing. Star Fox Assault's
+menus are drawn that way, which is how the missing folder was found — the
+memory card prompt came up as an empty box with a highlighted button and no
+words anywhere. Dolphin says so, but only through a `PanicAlert`, which on a
+phone goes nowhere anyone will look.
+
 ## Audio
 
 `AudioCommon/IOSSoundStream.mm` outputs through a RemoteIO audio unit at 48 kHz
