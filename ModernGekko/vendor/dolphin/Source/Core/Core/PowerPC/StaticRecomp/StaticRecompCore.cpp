@@ -217,12 +217,14 @@ void StaticRecompCore::Shutdown()
   g_static_recomp_core = nullptr;
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
-               "smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu cycles=%llu\n",
+               "smc_failed=%u smc_lost=%lluB verifications=%llu reverify_events=%llu "
+               "bursts=%llu cycles=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
                (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
-               (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
-               (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
+               (unsigned long long)m_smc_lost_bytes, (unsigned long long)m_verifications,
+               (unsigned long long)m_reverify_events, (unsigned long long)m_bursts,
+               (unsigned long long)m_charged_cycles);
   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
                                                     m_dispatch_samples.end());
   std::sort(dispatch_samples.begin(), dispatch_samples.end(),
@@ -324,6 +326,8 @@ void StaticRecompCore::LoadModule()
   m_effective_chunk_hashes.assign(desc->chunk_hashes,
                                   desc->chunk_hashes + desc->num_chunk_ranges);
   m_chunk_rel_sections.assign(desc->num_chunk_ranges, -1);
+  m_chunk_last_invalidate.assign(desc->num_chunk_ranges, LastInvalidation{});
+  m_chunk_reported.assign(desc->num_chunk_ranges, 0);
   for (u32 chunk_index = 0; chunk_index < desc->num_chunk_ranges; ++chunk_index)
   {
     const StaticRecompRange& chunk = desc->chunk_ranges[chunk_index];

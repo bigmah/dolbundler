@@ -196,6 +196,21 @@ private:
   std::vector<ActiveRelSection> m_active_rel_sections;
   std::vector<int> m_chunk_rel_sections;
   std::vector<u64> m_effective_chunk_hashes;
+  // The last range the guest invalidated inside each chunk. A chunk that fails
+  // verification failed because the guest rewrote an instruction in it, and the
+  // guest has to invalidate what it rewrote or the CPU would not see it -- so
+  // this names the patched address, which is otherwise a day's work to find.
+  struct LastInvalidation
+  {
+    u32 address = 0;
+    u32 length = 0;
+  };
+  std::vector<LastInvalidation> m_chunk_last_invalidate;
+  // One report per chunk. A failing chunk is re-verified on every invalidation
+  // that touches it, and a game that invalidates in a loop would otherwise
+  // print thousands of identical lines.
+  std::vector<u8> m_chunk_reported;
+  u64 m_smc_lost_bytes = 0;  // guest code the module stopped covering
   u64 m_rel_mapping_generation = 0;
   u32 m_failed_chunks = 0;    // chunks currently failing verification (real SMC)
   u64 m_verifications = 0;    // chunk hash checks performed
