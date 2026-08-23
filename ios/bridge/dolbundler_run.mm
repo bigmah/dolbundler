@@ -237,7 +237,16 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   // normal run is unaffected.
   if (const char* perf = getenv("DOLBUNDLER_PERF_LOG"))
     if (perf[0] == '1')
+    {
       freopen(s_log_path.c_str(), "a", stderr);
+      // stderr is unbuffered only while it is a terminal; redirected to a file
+      // it becomes fully buffered, and the last few kilobytes of a run then
+      // sit in that buffer until the process exits. Pulling the log off the
+      // device mid-run then reads a truncated one, which looks exactly like a
+      // run that stopped early -- and cost an afternoon reading a 150-second
+      // measurement as a 30-second crash.
+      setvbuf(stderr, nullptr, _IOLBF, 0);
+    }
 
   moderngekko::RuntimeConfig config;
   config.game_root = game_root;
