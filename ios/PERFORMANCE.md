@@ -896,11 +896,12 @@ the guest cycle count is identical, so the game is not taking a different path.
 Disney skate boots, renders and plays correctly with it on -- attract demo,
 menu with text, and Olliewood all check out -- and Melee boots too.
 
-It is on for iOS (`config.cpu_thread = true` in `dolbundler_run.mm`);
-`DOLBUNDLER_SINGLE_CORE=1` puts it back, which is how the two get compared on a
-device. The desktop runner is left alone so that every figure recorded in this
-file stays comparable -- but it gains the same amount, and `[Core] CPUThread =
-True` in `Dolphin.ini` turns it on there.
+**And on the phone it is a 15% loss. See the device section below** -- this
+subsection is kept because the desktop numbers are real and reproducible, and
+because "the desktop said +19%" is the whole reason the device had to be asked.
+iOS ships single core; `DOLBUNDLER_DUAL_CORE=1` turns it on for experiments.
+The desktop runner is left alone so every figure recorded in this file stays
+comparable, and `[Core] CPUThread = True` in `Dolphin.ini` turns it on there.
 
 Not at 3x internal resolution either -- the desktop config renders at 3x and
 the phone at 1x, which looked like the obvious confound and is not: at 1x the
@@ -958,3 +959,106 @@ per-second cost in this level is that difference. Nothing here forces the game
 to 30 -- the frame rate is the guest's own decision, made in guest code -- but
 if a patch were ever wanted, halving it would be worth more than every
 interpreter optimisation in this file put together.
+
+---
+
+# What the phone said about Olliewood (2026-08-23)
+
+Everything above this line is a Mac's opinion. Here is the device: iPhone 15
+Pro Max, the same `olliewood_plaza.sav` pushed to `Documents/`, booted straight
+into it with `DOLBUNDLER_LOAD_STATE`, 60-second runs, `DOLBUNDLER_PERF_LOG=1`.
+Read the median of the samples after the first four (those are the state load).
+
+## The number
+
+| run | median | mean |
+|---|---|---|
+| shipping build, run 1 (phone idle beforehand) | **88%** | 84% |
+| shipping build, run 2 | 75% | 79% |
+| shipping build, run 3 | 71% | 73% |
+
+**Olliewood runs at roughly 70-88% on an A17 Pro, and the spread is thermal.**
+Three identical back-to-back runs decline monotonically, so the first run after
+the phone has been idle is the fastest and nothing measured late in a session
+is comparable to anything measured early. Interleave arms; never compare two
+runs by their position in a list.
+
+That is the reported "slow downs", and it is a genuine one: the game asks for
+60fps in this level and the phone delivers about three quarters of it.
+
+## Where the time goes on the device
+
+`MODERNGEKKO_DOLVM_SAMPLE=ON`, built for the device, same scene:
+
+| | share |
+|---|---|
+| `dolvm_dispatch` -- the interpreter | **48.2%** |
+| `__semwait_signal` + `swtch_pri` + `semaphore_timedwait_trap` | **31.8%** |
+| Dolphin's own interpreter (`GetOpInfo`, `ReadInstruction`, `SingleStepInner`, `Cache::GetCache`, `TryReplaceFunction`, `MMU::TranslateAddress`, `NI_madd_msub`, `ps_madds0/1`, `ClassifyFloat`) | **~9%** |
+| chassis (`ResolveNativeAddress`, `Run`, `RefreshRelSections`, `DispatchableAt`, `GetMurmurHash3`) | ~3% |
+
+The waiting is not the frame limiter this time -- the emulator is below full
+speed for most of the window, so it has nothing to sleep off. Turning each
+consumer off in turn says what it is:
+
+| configuration | median |
+|---|---|
+| shipping | 70-88% |
+| `DOLBUNDLER_NULL_VIDEO=1` | **88%** |
+| `DOLBUNDLER_NULL_VIDEO=1` + `DOLBUNDLER_NULL_AUDIO=1` | **94%** (mean 86%) |
+
+**Rendering costs about 15% and audio about 6%**, both on the emulation thread,
+and **with both gone the interpreter alone only just reaches full speed.** That
+is the shape of this problem: there is no single thing to fix. Olliewood needs
+several percent from several places.
+
+The ~9% in Dolphin's own interpreter has a specific cause the shutdown counters
+name: `native_exc=164564` guest exceptions over 24e9 cycles, and
+`fallback=3542290` interpreted instructions -- about 21 per exception. Those are
+the OS's exception vectors in low RAM, which the recompiler cannot cover
+statically because the OS copies them there at boot. ~3,200 exceptions a second,
+each running its handler one instruction at a time through `Read_Opcode` ->
+MMU translate -> `GetOpInfo` -> HLE check.
+
+## Four things that did not work, all measured on the device
+
+| lead | median | verdict |
+|---|---|---|
+| GPU on its own thread (`CPUThread`) | 57-62% | **-15%**, the opposite of the desktop's +19% |
+| ...plus `QOS_CLASS_USER_INTERACTIVE` on both threads | 57% | unchanged, so it is not thread placement |
+| VSync off | 66% | nothing |
+| specialised shaders instead of ubershaders (`ShaderCompilationMode = 0`) | 70% | nothing |
+| DSP on its own thread (`DSPThread = True`) | 72% | nothing |
+
+**Dual core is the one that matters, because the desktop was so confident.**
+With a real graphics backend the Mac gains 19% in this scene and 58% in the
+attract demo, reproducibly, in wall clock. The phone loses 15%, reproducibly,
+and giving both threads user-interactive QoS does not move it -- which rules
+out the obvious explanation (the GPU thread parked on an efficiency core while
+the CPU thread waits on it). The remaining explanation is that two threads busy
+at once on a phone do not run at the clock one thread gets, so the emulator
+pays sync overhead for parallelism the silicon declines to give it. This is now
+the second independent measurement saying dual core loses on iOS; the first is
+at the top of this file, and it was right.
+
+**The rule this establishes: for anything that touches threads or the video
+backend, the desktop does not predict the phone, and can invert.** The
+interpreter's own numbers do transfer -- the same opcode mix runs on both.
+
+## So what would actually fix Olliewood
+
+In descending size, with what is known about each:
+
+1. **Make the game render 30fps instead of 60.** Half the emulator's
+   per-second cost in this level is that the level asks for 60 where the Disney
+   levels ask for 30. This is a guest-side decision and would need a patch;
+   `DolBundler/patches` is where one would go. Worth more than everything else
+   on this list combined, at the cost of a frame rate the game itself chooses.
+2. **The exception vectors, ~9%.** Cover the OS's handlers so they stop being
+   interpreted one instruction at a time -- the chassis already has the
+   verification machinery that would let a low-RAM copy be recognised as a
+   known DOL range.
+3. **Rendering, ~15%.** It cannot be moved to another thread on this hardware,
+   so it has to get cheaper. Not investigated further here.
+4. **The interpreter's floating point.** FPRF elision (3.3% of the scene) and
+   homing the FP register file, both priced above and neither built.

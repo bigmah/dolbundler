@@ -272,21 +272,20 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     if (blind[0] == '1')
       config.graphics.backend = "Null";
 
-  // The emulated GPU gets its own thread. Dolphin ships this on by default
-  // only on Android, for the reason that applies here too: on one thread the
-  // texture decoder, the vertex loader and the Metal command buffers all run
-  // in time the interpreter could have been running. Measured on the desktop
-  // against a real graphics backend, on the two Disney skate scenes that are
-  // benched: +18% in Olliewood and +58% in the attract-demo gameplay.
+  // The emulated GPU stays on the emulation thread. Giving it its own is worth
+  // +19% on the desktop against a real graphics backend, and **-15% on the
+  // phone**: measured in Olliewood on an iPhone 15 Pro Max, interleaved,
+  // single core holds a median 72-77% and dual core 60-62%. That agrees with
+  // the reading this project took in 2026-08-21 and disagrees with every
+  // desktop measurement, so the desktop does not predict a phone here.
   //
-  // DOLBUNDLER_SINGLE_CORE=1 puts it back, which is how the two are compared
-  // on a device -- and that comparison is still owed: an earlier reading, on
-  // the native AOT build and by a method later shown to be unreliable, had
-  // this worth nothing on a phone. ios/PERFORMANCE.md has both numbers.
-  config.cpu_thread = true;
-  if (const char* single = getenv("DOLBUNDLER_SINGLE_CORE"))
-    if (single[0] == '1')
-      config.cpu_thread = false;
+  // DOLBUNDLER_DUAL_CORE=1 turns it on, because the *why* is still open --
+  // most likely the GPU thread landing on an efficiency core while the
+  // emulation thread waits on it.
+  config.cpu_thread = false;
+  if (const char* dual = getenv("DOLBUNDLER_DUAL_CORE"))
+    if (dual[0] == '1')
+      config.cpu_thread = true;
 
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
