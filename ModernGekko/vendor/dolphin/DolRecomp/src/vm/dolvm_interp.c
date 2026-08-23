@@ -816,7 +816,10 @@ static void dolvm_count_leave(u32 pc) {
 #define DOLVM_PROFILE_BLOCK_SITES 65536u
 static u32 g_dolvm_block_pc[DOLVM_PROFILE_BLOCK_SITES];
 static u64 g_dolvm_block_count[DOLVM_PROFILE_BLOCK_SITES];
+static u64 g_dolvm_block_total;
+static u64 g_dolvm_block_dropped;
 static void dolvm_count_block(u32 pc) {
+    g_dolvm_block_total++;
     u32 slot = ((pc >> 2) * 2654435761u) & (DOLVM_PROFILE_BLOCK_SITES - 1u);
     for (u32 probe = 0; probe < DOLVM_PROFILE_BLOCK_SITES; probe++) {
         u32 i = (slot + probe) & (DOLVM_PROFILE_BLOCK_SITES - 1u);
@@ -826,6 +829,7 @@ static void dolvm_count_block(u32 pc) {
             return;
         }
     }
+    g_dolvm_block_dropped++;
 }
 #define DOLVM_COUNT_BLOCK(pc) dolvm_count_block(pc)
 
@@ -2054,6 +2058,11 @@ dispatch:
             goto leave;
         }
         ctx->downcount -= (s64)(u32)(payload >> 32);
+        // The loop header this edge lands on. Counting only at CHARGE misses
+        // every loop whose header charge was folded into its own back edge --
+        // which is every hot loop the emitter could fold, so the block
+        // histogram used to be blind to exactly the ones worth finding.
+        DOLVM_COUNT_BLOCK((u32)payload);
         ip = code + inst->imm;
         NEXT();
     }
@@ -2205,7 +2214,9 @@ void dolvm_profile_report(FILE* out) {
                 (unsigned long long)g_dolvm_mmio_wcount[best]);
         g_dolvm_mmio_wcount[best] = 0;
     }
-    fprintf(out, "dolvm hottest guest blocks:\n");
+    fprintf(out, "dolvm hottest guest blocks (%llu block entries, %llu dropped):\n",
+            (unsigned long long)g_dolvm_block_total,
+            (unsigned long long)g_dolvm_block_dropped);
     for (u32 round = 0; round < 24u; round++) {
         u32 best = DOLVM_PROFILE_BLOCK_SITES;
         for (u32 i = 0; i < DOLVM_PROFILE_BLOCK_SITES; i++)
