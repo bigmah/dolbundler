@@ -902,7 +902,21 @@ device. The desktop runner is left alone so that every figure recorded in this
 file stays comparable -- but it gains the same amount, and `[Core] CPUThread =
 True` in `Dolphin.ini` turns it on there.
 
-**Two things to check on a device before believing the number.** Dual core
+Not at 3x internal resolution either -- the desktop config renders at 3x and
+the phone at 1x, which looked like the obvious confound and is not: at 1x the
+same A/B reads 1.463x against 1.229x, **+19%**.
+
+**The simulator cannot arbitrate this one.** Running the iOS app there against
+the same state, dual core and single core both settle at ~185% speed, and so
+does `DOLBUNDLER_NULL_VIDEO=1` -- three configurations, one number. The reason
+is in the log: `perf: 0.0 fps` in every sample. The simulator is not presenting
+frames, so there is no video work on the thread to move off it, and every
+question about that work reads zero there. (`CPUThread = True` does land in the
+config, so the setting itself takes.) This is a second, different reason for
+the rule at the top of this file that the simulator cannot answer a timing
+question.
+
+**Two more things to check on a device before believing the number.** Dual core
 spends more total CPU (two threads busy), so a phone may give some of it back
 as thermal throttling over a long session; and the balance between CPU and
 video work is different on a mobile GPU, so the split could be larger or
