@@ -34,7 +34,13 @@ extern "C" {
 
 #define DOLVM_MAGIC "DOLVM\0\0"
 #define DOLVM_MAGIC_SIZE 8u
-#define DOLVM_VERSION 2u
+// Bumped when the *emitter* changes in a way that makes an older module worse
+// rather than wrong -- a new fused form, a better layout. The ABI version says
+// an interpreter cannot run a module; this says it can, but should not have to.
+// The iOS library rebuilds a module whose version does not match, which is the
+// only thing that gets an emitter improvement onto a device: the disc is
+// recompiled there, and nothing else in the header would have changed.
+#define DOLVM_VERSION 3u
 
 // Bumped whenever the meaning of an existing opcode changes. The loader
 // refuses a module it was not built to run rather than misinterpreting it.

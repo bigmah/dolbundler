@@ -42,9 +42,13 @@ static DolVMGate s_gate;
 static const u32 s_no_pending;
 static const s32 s_no_budget;
 
+extern int g_dolvm_poll_skip_enabled;
+
 int dolvm_bridge_open(const char* path, DolVMBridgeInfo* info, char* error,
                       size_t error_size)
 {
+    if (getenv("DOLVM_NO_POLL_SKIP"))
+        g_dolvm_poll_skip_enabled = 0;
     dolvm_bridge_close();
     if (!dolvm_module_load_file(&s_module, path, error, error_size))
         return 0;

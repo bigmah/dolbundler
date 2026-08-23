@@ -336,6 +336,14 @@ add_executable(test_dolvm_diff tests/test_dolvm_diff.c ${DOLVM_DIFF_SOURCE})
 target_link_libraries(test_dolvm_diff PRIVATE dr_vm_backend dr_vm dr_ir dr_cpu)
 add_test(NAME dolvm_diff COMMAND test_dolvm_diff)
 add_test(NAME dolvm_diff_plain COMMAND test_dolvm_diff --no-home-state)
+# Same comparison with the register file poisoned, which turns a read of a
+# register the bytecode never wrote from luck into a failure.
+add_test(NAME dolvm_diff_poison COMMAND test_dolvm_diff)
+set_tests_properties(dolvm_diff_poison PROPERTIES
+    ENVIRONMENT "DOLVM_POISON_REGS=1;DOLVM_POISON_BYTE=0xA0")
+add_test(NAME dolvm_diff_poison_zero COMMAND test_dolvm_diff)
+set_tests_properties(dolvm_diff_poison_zero PROPERTIES
+    ENVIRONMENT "DOLVM_POISON_REGS=1;DOLVM_POISON_BYTE=0x00")
 
 add_executable(test_dolvm_switch
     tests/test_dolvm.c

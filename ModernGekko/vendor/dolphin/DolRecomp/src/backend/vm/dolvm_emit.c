@@ -442,8 +442,33 @@ static bool assign_result(FunctionEmitter* fn, DolIRValue value,
 // A source register the result does not take is released as usual. The
 // operands are marked retired so the normal retirement pass leaves the
 // registers alone -- they have an owner now.
+// Emitter-side off switches, for bisecting a miscompile. A wrong picture from a
+// module can only be attributed by rebuilding the module with one transform
+// removed, and rebuilding the recompiler for each attempt is far slower than
+// rebuilding the bytecode, so the switches live here rather than in git history.
+static int dolvm_opt_off(const char* name) {
+    // Read once per name: this is asked per instruction, and getenv is a linear
+    // scan of the environment.
+    static const char* names[8];
+    static int values[8];
+    static u32 count = 0;
+    for (u32 i = 0; i < count; i++)
+        if (names[i] == name)
+            return values[i];
+    const char* v = getenv(name);
+    const int on = v && *v && *v != '0';
+    if (count < 8u) {
+        names[count] = name;
+        values[count] = on;
+        count++;
+    }
+    return on;
+}
+
 static bool try_coalesce_lanes(FunctionEmitter* fn, const DolIRInstruction* inst,
                                u32 index) {
+    if (dolvm_opt_off("DOLVM_NO_LANE_COALESCE"))
+        return false;
     if (!inst->result || fn->home_dest[index] != DOLVM_NO_REG ||
         fn->home_read[index] == 1u)
         return false;
@@ -1301,6 +1326,8 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
         case DOLIR_OP_ASHR: fused = DOLVM_OP_ASHR32I_AND; break;
         default: continue;
         }
+        if (dolvm_opt_off("DOLVM_NO_SHIFT_FUSION"))
+            continue;
         fn->shift_fused[i] = fused;
         fn->shift_amount[i] = (u8)amount;
         fn->folded[shift_index] = 1;
@@ -1897,14 +1924,21 @@ static bool lower_instruction(FunctionEmitter* fn, const DolIRBlock* block,
             return emit_raw(builder, DOLVM_OP_EXACT_PAIRED, 0, 0, 0, 0) &&
                    emit_payload(builder, inst->immediate);
         case DOLIR_HELPER_PSQ_LOAD:
-        case DOLIR_HELPER_PSQ_STORE:
+        case DOLIR_HELPER_PSQ_STORE: {
+            // The call yields a success flag, and the update forms select on it
+            // to decide whether the address write-back happens, so the register
+            // holding it has to be named here even when it is absent.
+            u8 flag = (inst->result && fn->reg[inst->result] != DOLVM_NO_REG)
+                          ? fn->reg[inst->result]
+                          : DOLVM_NO_REG;
             return emit_raw(builder,
                             inst->aux == DOLIR_HELPER_PSQ_LOAD
                                 ? DOLVM_OP_PSQ_LOAD
                                 : DOLVM_OP_PSQ_STORE,
-                            dst, fn->reg[inst->operands[0]], 0,
+                            flag, fn->reg[inst->operands[0]], 0,
                             inst->guest_pc) &&
                    emit_payload(builder, inst->immediate);
+        }
         case DOLIR_HELPER_STORE_CONDITIONAL:
             return emit_raw(builder, DOLVM_OP_STWCX, 0,
                             fn->reg[inst->operands[0]],
@@ -2163,6 +2197,13 @@ static bool recipe_live_at(FunctionEmitter* fn, DolIRValue value, u32 at) {
 // are all no-ops needs no stub at all.
 static bool recipe_needs_code(FunctionEmitter* fn, const DolVMRecipe* recipe,
                               u32 at) {
+    // Off switch for the liveness filter below. Replaying every recipe the
+    // optimizer proposed is wasteful but never loses a value, so if a picture
+    // comes right with this set, the filter is dropping something that was
+    // still live at the entry.
+    if (dolvm_opt_off("DOLVM_ALL_RECIPES") && recipe->value &&
+        fn->reg[recipe->value] != DOLVM_NO_REG)
+        return true;
     if (!recipe_live_at(fn, recipe->value, at))
         return false;
     if (recipe->kind != DOLVM_RECIPE_STATE)

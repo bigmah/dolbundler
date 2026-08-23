@@ -76,7 +76,7 @@ void StaticRecompCore::Run()
   // so handing the guest a pointer to it takes every access out of the hook
   // path. MMU_Tables.cpp's WriteToHardware ends in exactly this store, past a
   // page split, an address translation, a gather-pipe test and an MMIO test.
-  m_guest.l1cache = memory.GetL1Cache();
+  m_guest.l1cache = getenv("MODERNGEKKO_NO_L1") ? nullptr : memory.GetL1Cache();
   m_guest.l1cache_size = memory.GetL1CacheSize();
   InitLookupTable(m_guest.ram_size, m_guest.exram_size);
   const bool lockstep_enabled = m_lockstep_verifier->IsEnabled();

@@ -610,3 +610,151 @@ Where the time actually goes now, on the phone-equivalent path: `load32` 9.6%,
 `store32` 5.0%, `add32i` 5.0%, `trunc` 4.9% -- guest memory access and plain
 integer work, spread flat, with no single item worth attacking. The interpreter
 is at its structural floor for this design.
+
+# The data-section win is also a miscompile (2026-08-22)
+
+The largest speed win of the pass and the graphics corruption reported on the
+phone are the same change, and they are the same 147 instructions.
+
+## What the change was
+
+`emit_dol_split` used to hand the recompiler only the DOL's *text* sections. A
+GameCube DOL has 7 text and 11 data sections, and linkers do not sort code and
+data neatly between them: this game's `data[0]` (0x800032E0..0x80003AA0, 1984
+bytes) sits *between* text[0] and text[1] and is mostly code. The change adds
+any data section fully bracketed by text sections, so that code compiles instead
+of falling back to the interpreter.
+
+On the desktop that reads as a **10% loss** and on the phone as an **84% win**:
+
+| configuration | desktop (fallback JIT) | phone-equivalent (no JIT) |
+|---|---|---|
+| data[0] covered | 2.45x | **2.41x** |
+| data[0] not covered | **2.71x** | 1.38x |
+
+The desktop links `JitArm64`, so anything the module does not cover is compiled
+by the JIT anyway and covering it badly only adds dispatches. iOS is
+`ENABLE_GENERIC=ON` with no JIT at all, so the same code falls to the plain
+interpreter. **A change to module coverage cannot be evaluated on the desktop
+without `MODERNGEKKO_NO_FALLBACK_JIT=1`** -- it inverts the sign of the answer.
+
+## What is in there, and why it is worth 84%
+
+Five functions, all paired-single: `ps_madds0/1`, `ps_muls0/1`, `psq_l`,
+`psq_lu`, `psq_stu`, `ps_div`. This is the SDK's paired-single matrix library
+(`PSMTX*`), and the fourth function -- **0x80003704..0x80003950, 147
+instructions** -- is on its own worth the entire win. Forcing just that one
+function back to the interpreter costs everything:
+
+| | phone-equivalent |
+|---|---|
+| all native | 2.41x |
+| function 4 interpreted | 1.39x |
+| all of data[0] interpreted | 1.38x |
+
+The first 8 words of "function 4" are not code at all: 0x3F000000 and
+0x3F800000, four of each -- a constant pool of 0.5f and 1.0f that the decoder
+renders as `lis r24, 0`. The real entry is 0x80003724.
+
+## The bug
+
+With that function compiled, the game's main menu draws its 3D background as a
+handful of flat untextured polygons. Everything else -- the menu panel, gameplay,
+the attract demos, the intro FMV -- renders correctly, which is why a gameplay
+savestate was not enough to catch it and the desktop looked fine for hours.
+
+Established so far, all reproducible on the desktop:
+
+- Forcing 0x80003704..0x80003950 to the interpreter fixes the picture.
+- No sub-range of it does. Partial ranges leave the rest of the function in the
+  module, and the module is re-entered mid-function, so a partial fallback
+  isolates nothing.
+- Not lane coalescing, not shift/AND fusion, not superblock formation, not CR
+  fusion, not the entry-recipe liveness filter (`DOLVM_ALL_RECIPES`) -- each was
+  gated in the emitter and rebuilt, and the corruption survives all of them.
+- Not the locked cache, not the polled-wait skip: both have runtime switches and
+  neither changes it.
+
+What did find it was bisecting by *opcode*: `DOLVM_FALLBACK_OPS=<names>` sends
+named opcodes down the path an unlowered opcode takes, which is the reference
+interpreter. Four psq opcodes -> correct. The two update forms -> correct.
+`psq_lu` alone -> correct.
+
+## The bug: a flag nobody wrote
+
+`psq_lu` and `psq_stu` write the effective address back to rA only if the access
+succeeded, and `lower_psq` expresses that as a select:
+
+    if (update)
+        set_gpr(b, i->rA, select_value(b, DOLIR_TYPE_I32, success,
+                                       address, gpr(b, i->rA)));
+
+`success` is the result of the helper call. The bytecode interpreter's
+`PSQ_LOAD`/`PSQ_STORE` handler never wrote it. It leaves the dispatch on
+failure -- `if (!ok) goto leave;` -- and on success it fell through to `NEXT()`
+without producing the value, so the select read a register the stream had never
+written: whatever the last block left in that slot of the register file.
+
+`DOLVM_OP_SELECT` tests its condition for non-zero, so roughly half the time the
+leftover was truthy and the pointer advanced correctly. The other half it did
+not, and a paired-single pointer walk that sometimes fails to advance turns a
+matrix into rubbish. That is the flat-polygon menu.
+
+The fix is one guarded store in the interpreter: control only reaches the end of
+the handler on success, so the flag is 1 -- the point is that it has to be
+*written*. `0xFF` is the emitter's "no register", now passed explicitly when
+nothing consumes the flag. It costs nothing measurable: 2.35x/2.39x against
+2.38x/2.32x for the broken build, interleaved.
+
+## Why 46 passing tests did not catch it
+
+`test_dolvm_diff` runs every opcode the decoder knows through both backends and
+compares field by field, and `psq_lu` is in its table with a real update
+encoding (rA=4, simm=8). It passed anyway, because the register file is stack
+memory and whatever was in that slot happened to be non-zero -- the select took
+the correct arm by luck, every run.
+
+So the suite now poisons the register file: `g_dolvm_poison_registers` fills it
+at each dispatch, and `DOLVM_POISON_BYTE` chooses the pattern. Both polarities
+are needed and both are run (`dolvm_diff_poison`, `dolvm_diff_poison_zero`): a
+condition is tested for non-zero, so an all-zero fill makes an unwritten flag
+read false while a non-zero fill makes it read true, and a bug that survives one
+is caught by the other. With the fix reverted, the zero-fill run reports 94
+mismatches. **Any read-before-write in generated bytecode is now a test
+failure rather than a coin toss.**
+
+An audit of the same shape found no second instance: only two helper calls
+return `DOLIR_TYPE_I1`, and `FP_AVAILABLE`'s result is discarded by the builder.
+
+The `DOLVM_NO_*` switches used to get here are still in the tree
+(`dolvm_emit.c`, `dolvm_opt.c`, `pipeline.c`, `dolir_builder.c`); each reads its
+environment once rather than per instruction.
+
+## Tooling this needed, which is worth keeping
+
+- **`STATICRECOMP_LOCKSTEP` now works on the bytecode backend.** It looked up
+  `ppc_set_mem_write_journal` with `GetSymbolAddress` and a `.dvm` is not a
+  shared library, so lockstep was available only on the backend least likely to
+  need it. It now falls back to the linked-in symbol.
+- **`MODERNGEKKO_SAVE_STATE_AFTER=<seconds>:<path>`** writes a savestate on a
+  wall clock, for scenes no bench window names.
+- **`MODERNGEKKO_EMULATION_SPEED=<x>`** pins the frame limiter, so two builds
+  are at the same guest instant when a screenshot is taken.
+
+## Two traps this cost real time to learn
+
+**Lockstep on a loop header compares different iterations.** The check runs the
+interpreter until it reaches the module's exit PC; when that PC is a loop header
+the module reached it by the back-edge and the interpreter reaches it by falling
+through the prologue. The harness compensates by matching *charge*, and DolVM's
+charge model is not the interpreter's, so a one-iteration offset -- `ctr:N=0x2a,
+I=0x2b`, every pointer and FPR different -- is expected noise, not a finding.
+Function 4's dispatch ends at its loop header every single call.
+
+**Do not judge a picture by a screenshot at a fixed time.** The attract loop
+moves, and the emulator window takes ~10s to appear after a state load, so an
+early shutter photographs the desktop behind it and scores as a *pass*. The
+working method is: sweep the whole attract loop, identify menu frames by
+template-matching the menu panel (which is drawn correctly either way), and
+judge only the background. `menutest.sh` + `menucheck.py` do this in ~4 minutes
+and separate cleanly -- 320967 colours when correct, 17921 when not.

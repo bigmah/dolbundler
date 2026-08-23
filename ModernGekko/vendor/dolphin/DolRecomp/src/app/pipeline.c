@@ -1226,7 +1226,13 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
     // data exactly as it does inside a text section, and a region whose bytes
     // do not match guest RAM at run time is closed by the chassis's own
     // verification -- which is the behaviour these addresses have today.
+    // Off switch for bisecting: covering these sections is the largest speed win
+    // on this game, and also the largest change in which guest code the module
+    // -- rather than the interpreter -- ends up executing.
+    const bool skip_data_sections = getenv("DOLVM_NO_DATA_SECTIONS") != NULL;
     for (u32 i = 0; i < DOL_NUM_DATA; i++) {
+        if (skip_data_sections)
+            continue;
         if (dol->header.data_sizes[i] == 0)
             continue;
         u32 start = dol->header.data_addresses[i];

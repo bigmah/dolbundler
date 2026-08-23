@@ -308,6 +308,24 @@ static struct {
 } g_dolvm_poll_sites[DOLVM_POLL_SITES];
 static u32 g_dolvm_poll_next;
 
+// Runtime off switch for the whole polled-wait mechanism. The skip trades
+// timing fidelity for speed, and the failure mode if it is too aggressive is
+// the guest running ahead of the emulated GPU -- full speed, wrong picture --
+// which only shows up on a host slow enough for the GPU to be the thing being
+// outrun. Being able to turn it off in one run is the difference between
+// knowing and guessing.
+int g_dolvm_poll_skip_enabled = 1;
+
+// See dolvm_dispatch: fills the local register file with an even poison so a
+// read-before-write is deterministic rather than lucky. Off by default.
+int g_dolvm_poison_registers = 0;
+
+// The byte the poison fills with. Both polarities matter: a condition is tested
+// for non-zero, so an all-zero fill makes an unwritten flag read false and a
+// non-zero fill makes it read true. A bug that survives one is caught by the
+// other, which is why the suite runs both.
+int g_dolvm_poison_byte = 0xA0;
+
 static void dolvm_poll_remember(u32 pc, u32 address, u64 value) {
     for (u32 i = 0; i < DOLVM_POLL_SITES; i++)
         if (g_dolvm_poll_sites[i].live && g_dolvm_poll_sites[i].pc == pc &&
@@ -442,7 +460,10 @@ static DOLVM_NOINLINE bool dolvm_guest_load_slow(CPUState* ctx,
         mem->poll_pc = pc;
         mem->poll_address = address;
         mem->poll_value = *out;
-        mem->poll_run = dolvm_poll_known(pc, address, *out) ? DOLVM_POLL_SPIN : 1u;
+        mem->poll_run = (g_dolvm_poll_skip_enabled &&
+                         dolvm_poll_known(pc, address, *out))
+                            ? DOLVM_POLL_SPIN
+                            : 1u;
     }
     mem->poll_fresh = 1;
     return ctx->exception == 0;
@@ -872,6 +893,15 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
     // contiguous run of it, and an unaligned base costs an address computation
     // per store.
     _Alignas(16) DolVMReg regs[DOLVM_MAX_REGISTERS];
+    // Diagnostic mode: a local register is stack memory, so a bytecode stream
+    // that reads one before writing it usually gets a plausible leftover and
+    // behaves -- until the day it does not. Poisoning with an even pattern
+    // makes such a read deterministic and wrong: a select on an unwritten
+    // condition takes the false arm every time. This is how the missing
+    // psq_lu success flag would have been caught by the differential test
+    // instead of by a corrupted menu on a phone.
+    if (g_dolvm_poison_registers)
+        memset(regs, g_dolvm_poison_byte, sizeof(regs));
     const bool homed = (module->flags & DOLVM_FLAG_HOMED_STATE) != 0;
     dolvm_xer_in(ctx, regs);
     if (homed)
@@ -949,7 +979,7 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
 // time. The run is cleared so a loop that spins across several slices pays the
 // threshold again in each, which is what bounds how wrong this can be.
 #define DOLVM_POLLING()                                                       \
-    (mem.poll_fresh                                                           \
+    (g_dolvm_poll_skip_enabled && mem.poll_fresh                              \
          ? (mem.poll_fresh = 0,                                               \
             mem.poll_run >= DOLVM_POLL_SPIN ? (mem.poll_run = 0, 1) : 0)      \
          : 0)
@@ -1631,6 +1661,16 @@ dispatch:
         }
         if (!ok)
             goto leave;
+        // Produce the success flag the IR asked for. psq_lu and psq_stu write
+        // the effective address back to rA only `if` the access succeeded, and
+        // the builder expresses that as a select on this value -- so leaving it
+        // unwritten makes the write-back depend on whatever the register last
+        // held, and a pointer walk that sometimes does not advance turns a
+        // matrix into rubbish. Control only reaches here on success, so the
+        // answer is 1; the point is that it has to be *written*. 0xFF is the
+        // emitter's "no register", used when nothing consumes the flag.
+        if (inst->a != 0xFFu)
+            regs[inst->a].u = 1u;
         NEXT();
     }
 

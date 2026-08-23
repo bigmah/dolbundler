@@ -177,9 +177,25 @@ void StartRunTimer(std::atomic<bool>* running)
   if (wanted <= 0)
     return;
 
-  std::thread([running, wanted] {
+  // Optionally take a screenshot part way through. There is no way to capture a
+  // device's screen from a Mac the way `simctl io screenshot` captures the
+  // simulator's, and the simulator renders this class of game black regardless
+  // -- so without this, a rendering bug on a phone can only be described, not
+  // seen. Dolphin writes into its own screenshots directory, which is inside
+  // the app's Documents and therefore reachable with `devicectl copy from`.
+  const char* shot_at = getenv("DOLBUNDLER_SCREENSHOT_AFTER");
+  const int shot_seconds = shot_at ? atoi(shot_at) : 0;
+
+  std::thread([running, wanted, shot_seconds] {
     for (int i = 0; i < wanted && running->load(); ++i)
+    {
       std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (shot_seconds > 0 && i + 1 == shot_seconds && running->load())
+      {
+        run_log("screenshot requested at %ds", shot_seconds);
+        Core::SaveScreenShot();
+      }
+    }
     if (running->load())
     {
       run_log("run timer expired after %ds, stopping", wanted);

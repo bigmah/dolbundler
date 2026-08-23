@@ -318,6 +318,11 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->platform->SetTitle(impl->title);
 
   Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::StaticRecomp);
+  // Two builds of the same scene only line up if the guest clock does. With the
+  // limiter off, a faster build is somewhere else in an attract loop by the time
+  // a screenshot lands, and the two pictures are not of the same thing.
+  if (const char* speed = std::getenv("MODERNGEKKO_EMULATION_SPEED"))
+    Config::SetBase(Config::MAIN_EMULATION_SPEED, (float)std::atof(speed));
   if (!impl->config.graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
   else if (impl->config.headless)
@@ -470,6 +475,33 @@ RuntimeRunResult Runtime::Run() {
           }
         });
   }
+  // Wall-clock sibling of the above, for scenes that no bench window names:
+  // "boot, wait, and write a state" is how a menu or an attract-mode scene
+  // becomes reloadable. Chasing a miscompile means running the same scene
+  // dozens of times, and a two-minute boot per attempt is the difference
+  // between bisecting a function and giving up on it.
+  // MODERNGEKKO_SAVE_STATE_AFTER=<seconds>:<path>.
+  std::jthread timed_state_thread;
+  if (const char* timed = std::getenv("MODERNGEKKO_SAVE_STATE_AFTER")) {
+    const std::string spec(timed);
+    const size_t colon = spec.find(':');
+    if (colon != std::string::npos) {
+      const int delay = std::atoi(spec.substr(0, colon).c_str());
+      std::string path = spec.substr(colon + 1);
+      if (delay > 0 && !path.empty()) {
+        timed_state_thread = std::jthread(
+            [delay, path = std::move(path)](std::stop_token stop) {
+              for (int i = 0; i < delay * 10 && !stop.stop_requested(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+              if (stop.stop_requested())
+                return;
+              State::SaveAs(Core::System::GetInstance(), path);
+              std::fprintf(stderr, "[state] savestate written to %s\n",
+                           path.c_str());
+            });
+      }
+    }
+  }
   std::jthread title_thread;
   if (!m_impl->config.headless && m_impl->config.show_fps_in_title) {
     title_thread = std::jthread([](std::stop_token stop_token) {
@@ -482,6 +514,7 @@ RuntimeRunResult Runtime::Run() {
   }
   m_impl->platform->MainLoop();
   bench_state_thread.request_stop();
+  timed_state_thread.request_stop();
   title_thread.request_stop();
   if (title_thread.joinable())
     title_thread.join();
