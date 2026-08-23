@@ -5,10 +5,24 @@
 //
 // There is no chunking pressure here of the kind the C backend has. Chunks
 // exist so a C compiler is not handed a million-line function; the bytecode
-// emitter has no such limit, and larger regions are strictly better for the
-// interpreter, because an indirect branch that lands inside the region it
-// started in is resolved without a chassis round trip. The remaining reason to
-// chunk at all is optimizer working set, so regions are large but bounded.
+// emitter has no such limit, and for the interpreter alone larger regions are
+// better, because a call that stays inside its own region is lowered to a jump
+// while one that leaves is lowered to a gated CALL -- a dispatch the jump does
+// not pay.
+//
+// What decides the size is not that, though. A region is also the unit the
+// chassis verifies guest RAM against: `dolir_build_chunk` never merges blocks
+// across one, so a region is the smallest span that can be taken away from the
+// module when the guest rewrites an instruction. Games do rewrite one -- the
+// SDK's exception setup patches its own handler template during boot -- and at
+// 65536 instructions that single changed word sent a quarter of a megabyte of
+// hot code to the chassis's interpreter. On a host with a fallback JIT that is
+// invisible; on iOS, where there is none, Super Mario Strikers ran at 0.17x
+// against 1.05x with the hole cut to 16 KB.
+//
+// 4096 instructions is where those two pull even: the blast radius is 64 times
+// smaller, and the extra gated calls cost 0.6-2.3% in the heavy scenes of the
+// titles that never lose a region at all.
 
 #include "backend/vm/dolvm_emit.h"
 #include "backend/vm/dolvm_pipeline.h"
@@ -19,7 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DOLVM_DEFAULT_CHUNK_INSTRUCTIONS 65536u
+#define DOLVM_DEFAULT_CHUNK_INSTRUCTIONS 4096u
 
 static u32 chunk_instructions(void) {
     const char* configured = getenv("DOLRECOMP_VM_CHUNK");
