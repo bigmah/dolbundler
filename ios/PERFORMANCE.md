@@ -1062,3 +1062,109 @@ In descending size, with what is known about each:
    so it has to get cheaper. Not investigated further here.
 4. **The interpreter's floating point.** FPRF elision (3.3% of the scene) and
    homing the FP register file, both priced above and neither built.
+
+# The coverage a single rewritten instruction costs
+
+Measured 2026-08-23 against Super Mario Strikers (G4QE01), which arrived with
+the complaint "super slow on iPhone". It was: **9-14% speed** on an iPhone 15
+Pro Max. It is now **~70%**, and none of that came from the interpreter.
+
+## What was wrong
+
+Two lines into any run of this title:
+
+```
+[staticrecomp] SMC: chunk [0x802456C0,0x802856C0) hash mismatch
+```
+
+A chunk is the unit the chassis verifies guest RAM against, and it was 65536
+guest instructions -- 256 KB. One word inside it did not match the DOL the
+module was built from:
+
+```
+80260560:  60000000  nop            <- in main.dol
+80260560:  7c9043a6  mtspr SPRG0,r4 <- in RAM, once the game has booted
+```
+
+That is the SDK's `OSExceptionInit` patching its own handler template, which
+every Nintendo title does. The chassis is right to stop trusting the chunk. But
+"the chunk" was a quarter of a megabyte of the game's hottest code, and with no
+fallback JIT -- which is every iOS build -- all of it went to Dolphin's plain
+interpreter. `MODERNGEKKO_FALLBACK_TRACE` named the sites: 3.8 million
+interpreted runs at 0x80257CC0, 1.9 million at 0x80248164, and so on down.
+
+**A desktop run cannot see this.** The Mac links JitArm64 and compiles whatever
+the module stops covering, so the same title reads 1.4x there and 0.17x with
+`MODERNGEKKO_NO_FALLBACK_JIT=1`.
+
+## The fix, and what it cost
+
+`DOLVM_DEFAULT_CHUNK_INSTRUCTIONS` 65536 -> 4096, so the blast radius of a
+patched word is 16 KB instead of 256 KB. Nothing else changed.
+
+Throughput over a fixed gameplay window, no fallback JIT, M4 Pro:
+
+| scene | before | after |
+|---|---|---|
+| **Mario Strikers, kickoff** | **0.169x** | **1.046x** |
+| Disney skate, Olliewood | 1.499x | 1.489x |
+| Melee, heavy | 1.207x | 1.185x |
+| Star Fox Assault, heavy | 1.293x | 1.263x |
+
+So it is 6.2x on the title that loses a region and **0.6-2.3%** on the titles
+that do not. The cost is real and it is the gate: a call inside its own region
+lowers to a jump, one that leaves lowers to a `CALL` whose gate check is a
+dispatch the jump does not pay. Mario Party 4's *boot* exaggerates it to 6%;
+its heavy scenes do not, and boot is not what anyone plays.
+
+Of the eight titles on this machine, **only this one loses a region at all.**
+The rest report `smc_failed=0`.
+
+## Two things this made possible, and one it did not
+
+The shutdown line now carries `smc_lost=<bytes>`, and the first failure of each
+chunk prints how much guest code it took away and the range the guest last
+invalidated -- which is the patched address, and was otherwise a day's work to
+find.
+
+The block histogram under `MODERNGEKKO_DOLVM_PROFILE` used to count only at
+`CHARGE`, so every loop whose header charge the emitter folded into its own
+back edge was invisible -- which is every hot loop worth finding. It counts at
+`jmp.guard` now. That is how the next two leads were found, and both were dead:
+
+**Idle-skipping the SDK's `PPCHalt`** (`sync; nop; li r3,0; nop; b`) is not
+safe. The emitter would not mark it idle because its `nop` reads and writes r0,
+which the rule reads as a carried value; making the rule see through the
+identity, or lowering `ori rX,rX,0` to nothing, both get the loop recognised.
+Either way the title then **freezes mid-match**: the guest starts reading
+through null pointers within six guest seconds, and the emulator fast-forwards
+the corpse at 14000% speed. It reproduces from a savestate in the simulator
+with `DOLBUNDLER_NULL_VIDEO=1` in about a minute. And it buys nothing anyway --
+1.0249x without against 0.9996x with, on a scene where the game is not idle.
+The 2x it appeared to be worth was measured on a savestate whose game had
+already died.
+
+**Aligning region boundaries to function entries** -- so no straight-line run
+or loop crosses one, leaving the gated calls as the only cost -- is worth
+nothing measurable (MP4 3.8045x aligned against 3.8002x not) and it moves which
+code lands in the un-covered hole. On this title that was enough to produce the
+same freeze. Not kept.
+
+## Where the remaining 30% is, on the phone
+
+`DOLBUNDLER_NULL_VIDEO` / `DOLBUNDLER_NULL_AUDIO` against the same savestate,
+iPhone 15 Pro Max, kickoff scene:
+
+| arm | speed |
+|---|---|
+| as shipped | 62% |
+| no audio | 68% |
+| no rendering | 75% |
+
+Rendering ~21%, audio ~10%. The interpreter is the rest, and the sampler says
+it is at its floor for this title: `exact.float` ~12% of host time,
+`fp.available` 5.9% (19% of all opcodes, and folding it away was measured at
+exactly zero -- see above), the cycle charge ~11%, guest loads and stores ~12%.
+This title calls or returns every seven guest cycles and its hottest guest
+block is a squared-distance between two 3D points, run 37.9 million times in
+six guest seconds. There is no single fix left here either.
