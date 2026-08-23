@@ -475,7 +475,8 @@ FPRes ni_div(CPUState* cpu, f64 a, f64 b) {
     return result;
 }
 
-FPRes ni_madd_msub(CPUState* cpu, f64 a, f64 c, f64 b, bool sub, bool single) {
+static inline __attribute__((always_inline))
+FPRes ni_madd_msub_impl(CPUState* cpu, f64 a, f64 c, f64 b, bool sub, bool single) {
     FPRes result = {0.0, 0};
 
     if (!single) {
@@ -523,6 +524,10 @@ FPRes ni_madd_msub(CPUState* cpu, f64 a, f64 c, f64 b, bool sub, bool single) {
     return result;
 }
 
+FPRes ni_madd_msub(CPUState* cpu, f64 a, f64 c, f64 b, bool sub, bool single) {
+    return ni_madd_msub_impl(cpu, a, c, b, sub, single);
+}
+
 bool fp_invalid_gated(const CPUState* cpu, const FPRes* res) {
     return (cpu->fpscr & FPSCR_VE_BIT) != 0 && (res->exception & FPSCR_VX_ANY_MASK) != 0;
 }
@@ -538,19 +543,54 @@ void fp_write_double(CPUState* cpu, u8 d, f64 value) {
     set_fprf(cpu, classify_f64(value));
 }
 
-void ppc_fadds(CPUState* cpu, u8 d, u8 a, u8 b) {
+#define PS_EXP_MASK  0x7FF0000000000000ull
+#define PS_FRAC_MASK 0x000FFFFFFFFFFFFFull
+
+static inline u64 ps_round_c_bits(u64 bits) {
+    return (bits & 0xFFFFFFFFF8000000ull) + (bits & 0x0000000008000000ull);
+}
+
+// The one C operand force_25bit_c does not handle with the mask-and-add above.
+static inline u64 ps_c_unusual(u64 bits) {
+    return (u64)(((bits & PS_EXP_MASK) == 0) & ((bits & PS_FRAC_MASK) != 0));
+}
+
+static inline u64 ps_non_finite(u64 bits) {
+    return (u64)((bits & PS_EXP_MASK) == PS_EXP_MASK);
+}
+
+// Ties only arise out of the fused multiply-add forms.
+static inline u64 ps_r_unusual(u64 bits) {
+    return (u64)(((bits & 0x1FFFFFFFull) == 0x10000000ull) |
+                 ((bits & PS_EXP_MASK) == PS_EXP_MASK));
+}
+
+// Disney skate -- like most Gekko titles -- runs with FPSCR[NI] set, so the
+// fast path has to implement flush-to-zero rather than decline it: a version
+// that gated on NI did not run once in a twelve-billion-cycle scene. The host
+// is already in the matching rounding mode, so all that is left is
+// force_single's rule that anything below the smallest normal single becomes
+// a signed zero.
+static inline f32 ps_single(u32 ni, f64 value) {
+    u64 bits = f64_bits(value);
+    if (ni && (bits & 0x7FFFFFFFFFFFFFFFull) < 0x3810000000000000ull)
+        return f32_value((u32)((bits & 0x8000000000000000ull) >> 32));
+    return (f32)value;
+}
+
+void ppc_fadds_exact(CPUState* cpu, u8 d, u8 a, u8 b) {
     FPRes sum = ni_add(cpu, cpu->fpr[a], cpu->fpr[b]);
     if (!fp_invalid_gated(cpu, &sum))
         fp_write_single(cpu, d, force_single(cpu, sum.value));
 }
 
-void ppc_fsubs(CPUState* cpu, u8 d, u8 a, u8 b) {
+void ppc_fsubs_exact(CPUState* cpu, u8 d, u8 a, u8 b) {
     FPRes diff = ni_sub(cpu, cpu->fpr[a], cpu->fpr[b]);
     if (!fp_invalid_gated(cpu, &diff))
         fp_write_single(cpu, d, force_single(cpu, diff.value));
 }
 
-void ppc_fmuls(CPUState* cpu, u8 d, u8 a, u8 c) {
+void ppc_fmuls_exact(CPUState* cpu, u8 d, u8 a, u8 c) {
     f64 c_value = force_25bit_c(cpu->fpr[c]);
     FPRes product = ni_mul(cpu, cpu->fpr[a], c_value);
     if (!fp_invalid_gated(cpu, &product)) {
@@ -567,19 +607,19 @@ void ppc_fdivs(CPUState* cpu, u8 d, u8 a, u8 b) {
         fp_write_single(cpu, d, force_single(cpu, quotient.value));
 }
 
-void ppc_fadd(CPUState* cpu, u8 d, u8 a, u8 b) {
+void ppc_fadd_exact(CPUState* cpu, u8 d, u8 a, u8 b) {
     FPRes sum = ni_add(cpu, cpu->fpr[a], cpu->fpr[b]);
     if (!fp_invalid_gated(cpu, &sum))
         fp_write_double(cpu, d, force_double(cpu, sum.value));
 }
 
-void ppc_fsub(CPUState* cpu, u8 d, u8 a, u8 b) {
+void ppc_fsub_exact(CPUState* cpu, u8 d, u8 a, u8 b) {
     FPRes diff = ni_sub(cpu, cpu->fpr[a], cpu->fpr[b]);
     if (!fp_invalid_gated(cpu, &diff))
         fp_write_double(cpu, d, force_double(cpu, diff.value));
 }
 
-void ppc_fmul(CPUState* cpu, u8 d, u8 a, u8 c) {
+void ppc_fmul_exact(CPUState* cpu, u8 d, u8 a, u8 c) {
     FPRes product = ni_mul(cpu, cpu->fpr[a], cpu->fpr[c]);
     if (!fp_invalid_gated(cpu, &product)) {
         fp_write_double(cpu, d, force_double(cpu, product.value));
@@ -595,9 +635,9 @@ void ppc_fdiv(CPUState* cpu, u8 d, u8 a, u8 b) {
         fp_write_double(cpu, d, force_double(cpu, quotient.value));
 }
 
-void ppc_fmadd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
+void ppc_fmadd_op_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
                   bool single, bool subtract, bool negative) {
-    FPRes product = ni_madd_msub(cpu, cpu->fpr[a], cpu->fpr[c], cpu->fpr[b],
+    FPRes product = ni_madd_msub_impl(cpu, cpu->fpr[a], cpu->fpr[c], cpu->fpr[b],
                                  subtract, single);
     if (fp_invalid_gated(cpu, &product))
         return;
@@ -618,6 +658,103 @@ void ppc_fmadd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
         cpu->fpr[d] = result;
         set_fprf(cpu, classify_f64(result));
     }
+}
+
+// The scalar float ops take the same shape as the paired ones: compute, then
+// test the result's exponent field for the only cases the exact code handles
+// differently. fp_invalid_gated cannot fire on a finite result, so the whole
+// tail collapses to a write.
+void ppc_fadds(CPUState* cpu, u8 d, u8 a, u8 b) {
+    const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+    f64 r = cpu->fpr[a] + cpu->fpr[b];
+    if (!ps_non_finite(f64_bits(r))) {
+        fp_write_single(cpu, d, ps_single(ni, r));
+        return;
+    }
+    ppc_fadds_exact(cpu, d, a, b);
+}
+
+void ppc_fsubs(CPUState* cpu, u8 d, u8 a, u8 b) {
+    const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+    f64 r = cpu->fpr[a] - cpu->fpr[b];
+    if (!ps_non_finite(f64_bits(r))) {
+        fp_write_single(cpu, d, ps_single(ni, r));
+        return;
+    }
+    ppc_fsubs_exact(cpu, d, a, b);
+}
+
+void ppc_fmuls(CPUState* cpu, u8 d, u8 a, u8 c) {
+    const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+    u64 cb = f64_bits(cpu->fpr[c]);
+    f64 r = cpu->fpr[a] * f64_value(ps_round_c_bits(cb));
+    if (!(ps_c_unusual(cb) | ps_non_finite(f64_bits(r)))) {
+        fp_write_single(cpu, d, ps_single(ni, r));
+        cpu->fpscr &= ~(FPSCR_FI_BIT | FPSCR_FR_BIT);
+        return;
+    }
+    ppc_fmuls_exact(cpu, d, a, c);
+}
+
+void ppc_fadd(CPUState* cpu, u8 d, u8 a, u8 b) {
+    f64 r = cpu->fpr[a] + cpu->fpr[b];
+    if (!ps_non_finite(f64_bits(r))) {
+        fp_write_double(cpu, d, r);
+        return;
+    }
+    ppc_fadd_exact(cpu, d, a, b);
+}
+
+void ppc_fsub(CPUState* cpu, u8 d, u8 a, u8 b) {
+    f64 r = cpu->fpr[a] - cpu->fpr[b];
+    if (!ps_non_finite(f64_bits(r))) {
+        fp_write_double(cpu, d, r);
+        return;
+    }
+    ppc_fsub_exact(cpu, d, a, b);
+}
+
+void ppc_fmul(CPUState* cpu, u8 d, u8 a, u8 c) {
+    f64 r = cpu->fpr[a] * cpu->fpr[c];
+    if (!ps_non_finite(f64_bits(r))) {
+        fp_write_double(cpu, d, r);
+        cpu->fpscr &= ~(FPSCR_FI_BIT | FPSCR_FR_BIT);
+        return;
+    }
+    ppc_fmul_exact(cpu, d, a, c);
+}
+
+void ppc_fmadd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool single,
+                  bool subtract, bool negative) {
+    const f64 av = cpu->fpr[a];
+    const f64 bv = cpu->fpr[b];
+    const f64 sb = subtract ? -bv : bv;
+    if (single) {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        u64 cb = f64_bits(cpu->fpr[c]);
+        f64 r = fma(av, f64_value(ps_round_c_bits(cb)), sb);
+        if (!(ps_c_unusual(cb) | ps_r_unusual(f64_bits(r)))) {
+            f32 tmp = ps_single(ni, r);
+            f32 result = negative ? -tmp : tmp;
+            cpu->fpr[d] = (f64)result;
+            cpu->ps1[d] = (f64)result;
+            if (!subtract && !negative) {
+                cpu->fpscr = (cpu->fpscr & ~(FPSCR_FI_BIT | FPSCR_FR_BIT)) |
+                             ((r != (f64)tmp) ? FPSCR_FI_BIT : 0u);
+            }
+            set_fprf(cpu, classify_f32(result));
+            return;
+        }
+    } else {
+        f64 r = fma(av, cpu->fpr[c], sb);
+        if (!ps_non_finite(f64_bits(r))) {
+            f64 result = negative ? -r : r;
+            cpu->fpr[d] = result;
+            set_fprf(cpu, classify_f64(result));
+            return;
+        }
+    }
+    ppc_fmadd_op_exact(cpu, d, a, c, b, single, subtract, negative);
 }
 
 void ppc_frsp(CPUState* cpu, u8 d, u8 b) {
@@ -735,21 +872,21 @@ void ps_write_both(CPUState* cpu, u8 d, f32 ps0, f32 ps1) {
     cpu->ps1[d] = (f64)ps1;
 }
 
-void ppc_ps_add_op(CPUState* cpu, u8 d, u8 a, u8 b) {
+void ppc_ps_add_op_exact(CPUState* cpu, u8 d, u8 a, u8 b) {
     f32 ps0 = force_single(cpu, ni_add(cpu, cpu->fpr[a], cpu->fpr[b]).value);
     f32 ps1 = force_single(cpu, ni_add(cpu, cpu->ps1[a], cpu->ps1[b]).value);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_sub_op(CPUState* cpu, u8 d, u8 a, u8 b) {
+void ppc_ps_sub_op_exact(CPUState* cpu, u8 d, u8 a, u8 b) {
     f32 ps0 = force_single(cpu, ni_sub(cpu, cpu->fpr[a], cpu->fpr[b]).value);
     f32 ps1 = force_single(cpu, ni_sub(cpu, cpu->ps1[a], cpu->ps1[b]).value);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_mul_op(CPUState* cpu, u8 d, u8 a, u8 c) {
+void ppc_ps_mul_op_exact(CPUState* cpu, u8 d, u8 a, u8 c) {
     f64 c0 = force_25bit_c(cpu->fpr[c]);
     f64 c1 = force_25bit_c(cpu->ps1[c]);
     f32 ps0 = force_single(cpu, ni_mul(cpu, cpu->fpr[a], c0).value);
@@ -765,51 +902,51 @@ void ppc_ps_div_op(CPUState* cpu, u8 d, u8 a, u8 b) {
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_madd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
+void ppc_ps_madd_op_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
                     bool subtract, bool negative) {
     f32 tmp0 = force_single(
-        cpu, ni_madd_msub(cpu, cpu->fpr[a], cpu->fpr[c], cpu->fpr[b], subtract, true).value);
+        cpu, ni_madd_msub_impl(cpu, cpu->fpr[a], cpu->fpr[c], cpu->fpr[b], subtract, true).value);
     f32 tmp1 = force_single(
-        cpu, ni_madd_msub(cpu, cpu->ps1[a], cpu->ps1[c], cpu->ps1[b], subtract, true).value);
+        cpu, ni_madd_msub_impl(cpu, cpu->ps1[a], cpu->ps1[c], cpu->ps1[b], subtract, true).value);
     f32 ps0 = (negative && !isnan(tmp0)) ? -tmp0 : tmp0;
     f32 ps1 = (negative && !isnan(tmp1)) ? -tmp1 : tmp1;
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_madds0(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+void ppc_ps_madds0_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
     f32 ps0 = force_single(
-        cpu, ni_madd_msub(cpu, cpu->fpr[a], cpu->fpr[c], cpu->fpr[b], false, true).value);
+        cpu, ni_madd_msub_impl(cpu, cpu->fpr[a], cpu->fpr[c], cpu->fpr[b], false, true).value);
     f32 ps1 = force_single(
-        cpu, ni_madd_msub(cpu, cpu->ps1[a], cpu->fpr[c], cpu->ps1[b], false, true).value);
+        cpu, ni_madd_msub_impl(cpu, cpu->ps1[a], cpu->fpr[c], cpu->ps1[b], false, true).value);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_madds1(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+void ppc_ps_madds1_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
     f32 ps0 = force_single(
-        cpu, ni_madd_msub(cpu, cpu->fpr[a], cpu->ps1[c], cpu->fpr[b], false, true).value);
+        cpu, ni_madd_msub_impl(cpu, cpu->fpr[a], cpu->ps1[c], cpu->fpr[b], false, true).value);
     f32 ps1 = force_single(
-        cpu, ni_madd_msub(cpu, cpu->ps1[a], cpu->ps1[c], cpu->ps1[b], false, true).value);
+        cpu, ni_madd_msub_impl(cpu, cpu->ps1[a], cpu->ps1[c], cpu->ps1[b], false, true).value);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_sum0(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+void ppc_ps_sum0_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
     f32 ps0 = force_single(cpu, ni_add(cpu, cpu->fpr[a], cpu->ps1[b]).value);
     f32 ps1 = force_single(cpu, cpu->ps1[c]);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_sum1(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+void ppc_ps_sum1_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
     f32 ps0 = force_single(cpu, cpu->fpr[c]);
     f32 ps1 = force_single(cpu, ni_add(cpu, cpu->fpr[a], cpu->ps1[b]).value);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps1));
 }
 
-void ppc_ps_muls0(CPUState* cpu, u8 d, u8 a, u8 c) {
+void ppc_ps_muls0_exact(CPUState* cpu, u8 d, u8 a, u8 c) {
     f64 c0 = force_25bit_c(cpu->fpr[c]);
     f32 ps0 = force_single(cpu, ni_mul(cpu, cpu->fpr[a], c0).value);
     f32 ps1 = force_single(cpu, ni_mul(cpu, cpu->ps1[a], c0).value);
@@ -817,12 +954,180 @@ void ppc_ps_muls0(CPUState* cpu, u8 d, u8 a, u8 c) {
     set_fprf(cpu, classify_f32(ps0));
 }
 
-void ppc_ps_muls1(CPUState* cpu, u8 d, u8 a, u8 c) {
+void ppc_ps_muls1_exact(CPUState* cpu, u8 d, u8 a, u8 c) {
     f64 c1 = force_25bit_c(cpu->ps1[c]);
     f32 ps0 = force_single(cpu, ni_mul(cpu, cpu->fpr[a], c1).value);
     f32 ps1 = force_single(cpu, ni_mul(cpu, cpu->ps1[a], c1).value);
     ps_write_both(cpu, d, ps0, ps1);
     set_fprf(cpu, classify_f32(ps0));
+}
+
+// --- the paired-single fast path ---------------------------------------------
+//
+// Every paired-single arithmetic op spends nearly all of its time proving that
+// nothing unusual happened. Three things are unusual: a denormal C operand,
+// which force_25bit_c normalises by hand; a product that lands exactly on a
+// round-to-even tie, which ni_madd_msub corrects; and a result that leaves the
+// finite range, which is where all the NaN and infinity bookkeeping lives. An
+// infinite operand always produces a non-finite result, so that last test
+// covers the operands too.
+//
+// All three are properties of bit patterns, so both lanes can be computed
+// straight through and the three tested together afterwards -- one branch for
+// the pair instead of a dozen, and nothing between the two lanes to stop the
+// compiler pairing them. Neither the register file nor FPSCR is touched before
+// the test, so a lane that does hit one of the three is handed to the exact
+// code with the state it would have had.
+static inline void ps_fast_write(CPUState* cpu, u8 d, f32 ps0, f32 ps1) {
+    cpu->fpr[d] = (f64)ps0;
+    cpu->ps1[d] = (f64)ps1;
+    set_fprf(cpu, classify_f32(ps0));
+}
+
+void ppc_ps_add_op(CPUState* cpu, u8 d, u8 a, u8 b) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        f64 r0 = cpu->fpr[a] + cpu->fpr[b];
+        f64 r1 = cpu->ps1[a] + cpu->ps1[b];
+        if (!(ps_non_finite(f64_bits(r0)) | ps_non_finite(f64_bits(r1)))) {
+            ps_fast_write(cpu, d, ps_single(ni, r0), ps_single(ni, r1));
+            return;
+        }
+    }
+    ppc_ps_add_op_exact(cpu, d, a, b);
+}
+
+void ppc_ps_sub_op(CPUState* cpu, u8 d, u8 a, u8 b) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        f64 r0 = cpu->fpr[a] - cpu->fpr[b];
+        f64 r1 = cpu->ps1[a] - cpu->ps1[b];
+        if (!(ps_non_finite(f64_bits(r0)) | ps_non_finite(f64_bits(r1)))) {
+            ps_fast_write(cpu, d, ps_single(ni, r0), ps_single(ni, r1));
+            return;
+        }
+    }
+    ppc_ps_sub_op_exact(cpu, d, a, b);
+}
+
+void ppc_ps_mul_op(CPUState* cpu, u8 d, u8 a, u8 c) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        u64 cb0 = f64_bits(cpu->fpr[c]);
+        u64 cb1 = f64_bits(cpu->ps1[c]);
+        f64 r0 = cpu->fpr[a] * f64_value(ps_round_c_bits(cb0));
+        f64 r1 = cpu->ps1[a] * f64_value(ps_round_c_bits(cb1));
+        if (!(ps_c_unusual(cb0) | ps_c_unusual(cb1) |
+              ps_non_finite(f64_bits(r0)) | ps_non_finite(f64_bits(r1)))) {
+            ps_fast_write(cpu, d, ps_single(ni, r0), ps_single(ni, r1));
+            return;
+        }
+    }
+    ppc_ps_mul_op_exact(cpu, d, a, c);
+}
+
+void ppc_ps_muls0(CPUState* cpu, u8 d, u8 a, u8 c) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        u64 cb = f64_bits(cpu->fpr[c]);
+        f64 rc = f64_value(ps_round_c_bits(cb));
+        f64 r0 = cpu->fpr[a] * rc;
+        f64 r1 = cpu->ps1[a] * rc;
+        if (!(ps_c_unusual(cb) | ps_non_finite(f64_bits(r0)) |
+              ps_non_finite(f64_bits(r1)))) {
+            ps_fast_write(cpu, d, ps_single(ni, r0), ps_single(ni, r1));
+            return;
+        }
+    }
+    ppc_ps_muls0_exact(cpu, d, a, c);
+}
+
+void ppc_ps_muls1(CPUState* cpu, u8 d, u8 a, u8 c) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        u64 cb = f64_bits(cpu->ps1[c]);
+        f64 rc = f64_value(ps_round_c_bits(cb));
+        f64 r0 = cpu->fpr[a] * rc;
+        f64 r1 = cpu->ps1[a] * rc;
+        if (!(ps_c_unusual(cb) | ps_non_finite(f64_bits(r0)) |
+              ps_non_finite(f64_bits(r1)))) {
+            ps_fast_write(cpu, d, ps_single(ni, r0), ps_single(ni, r1));
+            return;
+        }
+    }
+    ppc_ps_muls1_exact(cpu, d, a, c);
+}
+
+// The multiply-add forms differ only in which lane of C each lane multiplies
+// by, so they share one body.
+static inline bool ps_madd_fast(CPUState* cpu, u8 d, f64 a0, f64 a1, f64 c0,
+                                f64 c1, f64 b0, f64 b1, bool subtract,
+                                bool negative) {
+    const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+    u64 cb0 = f64_bits(c0);
+    u64 cb1 = f64_bits(c1);
+    f64 r0 = fma(a0, f64_value(ps_round_c_bits(cb0)), subtract ? -b0 : b0);
+    f64 r1 = fma(a1, f64_value(ps_round_c_bits(cb1)), subtract ? -b1 : b1);
+    u64 rb0 = f64_bits(r0);
+    u64 rb1 = f64_bits(r1);
+    if (ps_c_unusual(cb0) | ps_c_unusual(cb1) | ps_r_unusual(rb0) |
+        ps_r_unusual(rb1))
+        return false;
+    f32 t0 = ps_single(ni, r0);
+    f32 t1 = ps_single(ni, r1);
+    ps_fast_write(cpu, d, negative ? -t0 : t0, negative ? -t1 : t1);
+    return true;
+}
+
+void ppc_ps_madd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool subtract,
+                    bool negative) {
+    if (ps_madd_fast(cpu, d, cpu->fpr[a], cpu->ps1[a], cpu->fpr[c], cpu->ps1[c],
+                     cpu->fpr[b], cpu->ps1[b], subtract, negative))
+        return;
+    ppc_ps_madd_op_exact(cpu, d, a, c, b, subtract, negative);
+}
+
+void ppc_ps_madds0(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+    if (ps_madd_fast(cpu, d, cpu->fpr[a], cpu->ps1[a], cpu->fpr[c], cpu->fpr[c],
+                     cpu->fpr[b], cpu->ps1[b], false, false))
+        return;
+    ppc_ps_madds0_exact(cpu, d, a, c, b);
+}
+
+void ppc_ps_madds1(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+    if (ps_madd_fast(cpu, d, cpu->fpr[a], cpu->ps1[a], cpu->ps1[c], cpu->ps1[c],
+                     cpu->fpr[b], cpu->ps1[b], false, false))
+        return;
+    ppc_ps_madds1_exact(cpu, d, a, c, b);
+}
+
+void ppc_ps_sum0(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        f64 r0 = cpu->fpr[a] + cpu->ps1[b];
+        if (!ps_non_finite(f64_bits(r0))) {
+            ps_fast_write(cpu, d, ps_single(ni, r0), ps_single(ni, cpu->ps1[c]));
+            return;
+        }
+    }
+    ppc_ps_sum0_exact(cpu, d, a, c, b);
+}
+
+void ppc_ps_sum1(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
+    {
+        const u32 ni = cpu->fpscr & FPSCR_NI_BIT;
+        f64 r1 = cpu->fpr[a] + cpu->ps1[b];
+        if (!ps_non_finite(f64_bits(r1))) {
+            f32 ps0 = ps_single(ni, cpu->fpr[c]);
+            f32 ps1 = ps_single(ni, r1);
+            cpu->fpr[d] = (f64)ps0;
+            cpu->ps1[d] = (f64)ps1;
+            // ps_sum1 reports the lane it computed, not lane 0.
+            set_fprf(cpu, classify_f32(ps1));
+            return;
+        }
+    }
+    ppc_ps_sum1_exact(cpu, d, a, c, b);
 }
 
 void ppc_ps_res_op(CPUState* cpu, u8 d, u8 b) {

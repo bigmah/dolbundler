@@ -758,3 +758,189 @@ working method is: sweep the whole attract loop, identify menu frames by
 template-matching the menu panel (which is drawn correctly either way), and
 judge only the background. `menutest.sh` + `menucheck.py` do this in ~4 minutes
 and separate cleanly -- 320967 colours when correct, 17921 when not.
+
+---
+
+# Olliewood, the level that is still slow (2026-08-23)
+
+The report was "Disney skate plays a lot better, but Olliewood still slows
+down on my phone." Olliewood is the kid skater's hub -- `hub.prg`, the
+Hollywood street with the fountain -- and it is not a Disney world, so nothing
+before this had ever measured it. Every figure in this file above was taken on
+the attract-demo gameplay scene, which turns out to be one of the *lighter*
+things this game does.
+
+## Getting to it, and what it costs
+
+Reaching Olliewood by hand is: exit the demo with START, `D_LEFT` three times
+to a kid skater (Mallie Ann or Ryan -- the Disney characters go to Disney
+levels), A, A on PLAY GAME. Driving that needs Dolphin's named-pipe controller;
+see [[driving-a-game-without-hands]]. The state is
+`scratchpad/olliewood_plaza.sav`, standing in the plaza by the fountain, which
+is representative rather than worst-case.
+
+Measured back to back on the phone-equivalent path
+(`MODERNGEKKO_NO_FALLBACK_JIT=1`, Null graphics, M4 Pro):
+
+| scene | throughput |
+|---|---|
+| attract-demo gameplay (everything above was tuned on this) | 2.46x |
+| **Olliewood plaza** | **1.32x** |
+
+**Olliewood is 1.85x heavier than the scene the whole project was tuned on.**
+That is the entire complaint, quantified: a phone that holds full speed in the
+Disney levels is at a bit over half speed here.
+
+## Why: three times the floating point, and 60fps instead of 30
+
+Same window, same length, `MODERNGEKKO_DOLVM_PROFILE=ON`:
+
+| | attract demo | Olliewood |
+|---|---|---|
+| bytecode ops | 7.09G | 10.06G (+42%) |
+| `fp.available` (= guest FP instructions) | 591M | **1843M (3.1x)** |
+| `exact.paired` | 230M | **644M (2.8x)** |
+| `store.statef` | 224M | **768M (3.4x)** |
+| `load32` | 734M | 806M (+10%) |
+
+The integer work barely moves. What moves is floating point, and there are two
+reasons. Olliewood is a large open street with far more geometry and more
+pedestrians, and -- visible in the window title -- **it renders at 60fps where
+the Disney levels render at 30**, so its per-second guest cost is roughly
+doubled before the level's own size is counted.
+
+Nothing in the *guest* is wasted the way `GXGetGPStatus` was: no block runs
+more than 4.5M times in a 12-billion-cycle window, and the only wait loop
+leaving the dispatch loop is the one already skipped. This level is simply
+doing more work.
+
+## What was done, and what each was worth
+
+### The paired-single and float fast paths: +1%
+
+`sample` put 7.8% of the whole scene in `ni_madd_msub` and another 4% in the
+paired helpers. Each `ps_madd` ran two scalar lanes through an out-of-line call
+that spends nearly all its time proving nothing unusual happened.
+
+Three things are unusual: a denormal C operand (which `force_25bit_c`
+normalises by hand), a result landing exactly on a round-to-even tie, and a
+result leaving the finite range -- and an infinite *operand* always makes a
+non-finite *result*, so the last test covers the operands too. All three are
+properties of the bit patterns, so both lanes can be computed straight through
+and all three tested together afterwards. Clang turns that into one `ccmp`
+chain with a single branch. `ni_madd_msub` is now inlined and has disappeared
+from the profile.
+
+The same shape covers `fadds`/`fsubs`/`fmuls`/`fadd`/`fsub`/`fmul`/`fmadd`.
+
+**One thing nearly made all of it worthless.** The first version declined the
+fast path when FPSCR[NI] -- flush-to-zero -- was set, because `force_single`
+implements the flush and the fast path did not. Counters said the fast path ran
+**zero** times in a twelve-billion-cycle scene: Gekko titles run with NI set,
+always. The fast path has to *implement* flush-to-zero, which is four
+instructions, not decline it.
+
+Measured back to back, both arms with a freshly regenerated PGO profile:
+
+| scene | HEAD | with the fast paths |
+|---|---|---|
+| Olliewood | 1.307x | **1.321x** |
+| attract demo | 2.458x | **2.476x** |
+
+**+1.1% and +0.7%.** Against a ceiling of +12.7%, measured by stripping the
+same helpers down to plain arithmetic with no exactness at all. So nearly all
+of that ceiling is in work that cannot be removed -- the 25-bit rounding, the
+double/single conversions, the register writes, FPRF -- and not in the
+bookkeeping that was removed. Consistent with everything else in this file:
+**cheap, well-predicted work is free on this core.**
+
+Correctness: `moderngekko_paired_single_test` runs 48 million comparisons of
+each fast path against the exact code it replaces -- every rounding mode, NI
+both ways, VE set, operands drawn from denormals, ties, overflows, signalling
+NaNs -- and requires the destination pair *and* every FPSCR bit to match. A
+one-bit mutation of the 25-bit rounding constant produces 12,952 failures, so
+the test bites. Both benched scenes also execute a bit-identical op count
+(7,091,894,557 and 10,060,222,569), so the guest takes exactly the same path.
+
+### Giving the GPU its own thread: +18% here, +58% on the attract demo
+
+The much bigger one, and it is not in the interpreter at all.
+
+**This file already says "dual core was worth nothing -- do not spend time
+there again."** That reading was taken on 2026-08-21, on the *native AOT*
+build, on a device, by aligning autoplay logs by wall time -- the method this
+same file goes on to say "produced two confidently wrong readings during this
+work". It is also a different CPU path, from before the wait-loop skip, the
+locked cache and the data-section coverage, and there is no record of the
+device having been checked to confirm the setting actually took. So it is
+contradicted below rather than ignored, and **the contradiction is not settled
+until it is measured on a phone again** -- which is the first item in the list
+after this.
+
+Dolphin's `CPUThread` -- run the emulated GPU on its own thread -- defaults to
+off everywhere except Android, where upstream turns it on with the comment
+"because the performance boost is really needed". iOS was running single-core,
+which means every texture decode, vertex load, FIFO command and Metal command
+buffer was built in time the interpreter was not running.
+
+Measured with a real graphics backend (Metal), same savestates, same 6e9-cycle
+window, wall clock not just cpu time:
+
+| scene | single core | dual core | |
+|---|---|---|---|
+| Olliewood plaza | 1.227x | **1.444x** | +17.7% |
+| attract-demo gameplay | 2.480x | **3.926x** | +58% |
+
+Reproducible across alternating runs (1.4553 / 1.2272 / 1.4334 / 1.2275), and
+the guest cycle count is identical, so the game is not taking a different path.
+Disney skate boots, renders and plays correctly with it on -- attract demo,
+menu with text, and Olliewood all check out -- and Melee boots too.
+
+It is on for iOS (`config.cpu_thread = true` in `dolbundler_run.mm`);
+`DOLBUNDLER_SINGLE_CORE=1` puts it back, which is how the two get compared on a
+device. The desktop runner is left alone so that every figure recorded in this
+file stays comparable -- but it gains the same amount, and `[Core] CPUThread =
+True` in `Dolphin.ini` turns it on there.
+
+**Two things to check on a device before believing the number.** Dual core
+spends more total CPU (two threads busy), so a phone may give some of it back
+as thermal throttling over a long session; and the balance between CPU and
+video work is different on a mobile GPU, so the split could be larger or
+smaller than the Mac's.
+
+## What is left, in order of size
+
+1. **Measure Olliewood on the device.** Single core versus dual core --
+   `DOLBUNDLER_SINGLE_CORE=1` is the other arm -- and a
+   `MODERNGEKKO_DOLVM_SAMPLE=ON` profile of the level. Everything above is a
+   Mac's opinion of a phone's problem, and on dual core the Mac and the older
+   device reading disagree outright.
+2. **`DSPThread` is False on the device** and True on the desktop, so audio DSP
+   work is on the emulation thread there. Same family as the item above and
+   untested.
+3. **FPRF.** Every FP result classifies its value and writes the FPRF field of
+   FPSCR, and nothing in a game ever reads it. Making `set_fprf` a no-op is
+   worth **3.3%** of this scene. Doing it properly means either Dolphin's
+   `wantsFPRF` analysis (a backward scan per block, plumbed through every
+   helper) or a lazy FPRF that materialises when FPSCR is read -- and the
+   readers include the chassis handoff, so a missed one is silent. Priced, not
+   built.
+4. **Homing the FP register file.** GPRs live in the VM register file; `fpr[]`
+   and `ps1[]` are still read and written in CPUState, and this scene does
+   1.0G `store.statef`/`load.statef`. Homing the GPRs was worth 7-13%. The
+   obstacle is that the exact helpers take `CPUState*` and index it directly,
+   so they would all need to take values instead.
+5. **The gather pipe.** 26.5M guest writes to 0xCC008000 in this window, each
+   one a homes flush plus a chassis round trip: about 2% together
+   (`dolvm_guest_store_slow` 1.37%, `HookExternalWrite` 0.27%,
+   `FlushGuestCharge` 0.30%). A pointer to the gather-pipe buffer with a call
+   only when it fills would take most of that, the way `CPUState::l1cache`
+   did for the locked cache.
+
+## And one thing the player can choose
+
+Olliewood renders at 60fps; the Disney levels render at 30. Half the emulator's
+per-second cost in this level is that difference. Nothing here forces the game
+to 30 -- the frame rate is the guest's own decision, made in guest code -- but
+if a patch were ever wanted, halving it would be worth more than every
+interpreter optimisation in this file put together.

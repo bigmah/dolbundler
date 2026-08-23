@@ -318,6 +318,8 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->platform->SetTitle(impl->title);
 
   Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::StaticRecomp);
+  if (impl->config.cpu_thread)
+    Config::SetBase(Config::MAIN_CPU_THREAD, *impl->config.cpu_thread);
   // Two builds of the same scene only line up if the guest clock does. With the
   // limiter off, a faster build is somewhere else in an attract loop by the time
   // a screenshot lands, and the two pictures are not of the same thing.

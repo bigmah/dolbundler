@@ -824,6 +824,22 @@ if(BUILD_TESTING)
     target_compile_features(moderngekko_frontend_config_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.frontend_config COMMAND moderngekko_frontend_config_test)
 
+    # The paired-single fast path is only allowed to exist if it is
+    # bit-identical to the exact code it falls back to, and only a differential
+    # test can say that. It links the interpreter's float sources directly
+    # rather than the whole runtime: what is under test is one file.
+    add_executable(moderngekko_paired_single_test
+        vendor/dolphin/GXRuntime/tests/paired_single_tests.c
+        vendor/dolphin/GXRuntime/src/core/cpu_interpreter_float.c
+        vendor/dolphin/GXRuntime/src/core/cpu_interpreter_table.c
+        vendor/dolphin/GXRuntime/src/core/cpu_exception.c
+        vendor/dolphin/GXRuntime/src/core/cpu.c)
+    target_include_directories(moderngekko_paired_single_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/src")
+    add_test(NAME moderngekko.paired_single
+             COMMAND moderngekko_paired_single_test)
+
     # Header-only, so the test needs no companion translation unit.
     add_executable(moderngekko_launcher_savestates_test
         tests/launcher_savestates_test.cpp)

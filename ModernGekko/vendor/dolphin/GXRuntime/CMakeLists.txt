@@ -137,4 +137,10 @@ if(BUILD_TESTING)
     )
     target_link_libraries(gxruntime_tests PRIVATE GXRuntime::runtime)
     add_test(NAME gxruntime_tests COMMAND gxruntime_tests)
+
+    add_executable(gxruntime_paired_single_tests
+        tests/paired_single_tests.c
+    )
+    target_link_libraries(gxruntime_paired_single_tests PRIVATE GXRuntime::runtime)
+    add_test(NAME gxruntime_paired_single COMMAND gxruntime_paired_single_tests)
 endif()
