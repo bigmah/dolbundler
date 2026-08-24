@@ -61,6 +61,29 @@ int main(int argc, char** argv) {
             "// finite so data-driven loops cannot spin forever.\n"
             "#define DOLRECOMP_C_LOOP_CYCLE_BUDGET 65536\n\n");
     emit_header_for_cpu(out, DOLRECOMP_CPU_GEKKO);
+    // A call that leaves one pattern may land at the head of another -- the
+    // scheduler clusters call the context savers dozens of times a slice --
+    // and a leave-and-redispatch per crossing eats the native win. Resolve
+    // at run time against the sites the interpreter has actually planted and
+    // executed for the running title; never bind at build time, because
+    // pattern addresses from different titles overlap.
+    fprintf(out,
+            "\nextern void (*dolvm_hle_cross_call(CPUState* ctx, u32 target))"
+            "(CPUState*);\n"
+            "extern void dolvm_hle_cross_ret(void);\n"
+            "#define DOLRECOMP_OUTCALL(tgt, ret, lbl)                      \\\n"
+            "    do {                                                      \\\n"
+            "        ctx->pc = (tgt);                                      \\\n"
+            "        void (*fn__)(CPUState*) = dolvm_hle_cross_call(ctx, (tgt)); \\\n"
+            "        if (fn__) {                                           \\\n"
+            "            fn__(ctx);                                        \\\n"
+            "            dolvm_hle_cross_ret();                            \\\n"
+            "            if (ctx->pc == (ret) && !ctx->exception)          \\\n"
+            "                goto lbl;                                     \\\n"
+            "        }                                                     \\\n"
+            "        return;                                               \\\n"
+            "    } while (0)\n\n");
+    emit_set_hle_outcalls(true);
     for (u32 i = 0; i < NATIVE_COUNT; i++) {
         const NativePattern* pattern = &k_native[i];
         static PPCInst instructions[16384];

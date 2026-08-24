@@ -442,6 +442,15 @@ typedef enum {
     // Metroid Prime 2's THP decoder, Retro's own compile of it -- the intro
     // and menu movies play through this at 0.58x interpreted on an M4 Pro.
     DOLVM_HLE_THP_DECODE_G2ME = 18,
+    // The scheduler's polling cycle, which is what remains of MP2's movie
+    // scene once the decoder is native: context savers, the thread-queue
+    // walker, two leaves, and the engine's own idle poll. Their calls into
+    // one another resolve native-to-native through the site map.
+    DOLVM_HLE_OS_CONTEXT_G2ME = 19,
+    DOLVM_HLE_OS_THREAD_G2ME = 20,
+    DOLVM_HLE_OS_LEAF_A_G2ME = 21,
+    DOLVM_HLE_OS_LEAF_B_G2ME = 22,
+    DOLVM_HLE_IDLE_POLL_G2ME = 23,
     DOLVM_HLE_COUNT
 } DolVMHleId;
 

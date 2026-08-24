@@ -754,6 +754,65 @@ static inline bool dolvm_pending(const DolVMGate* gate, const CPUState* ctx) {
     return (pending & mask) != 0;
 }
 
+// Cross-pattern native calls. A generated stand-in that calls out of its own
+// pattern may be calling straight into another one -- the site map knows,
+// because the interpreter registers every native site the moment it executes
+// one. Registration rather than build-time binding is the safety: pattern
+// addresses from different titles overlap, and only the running title's
+// sites ever enter this table. The gate check mirrors what a dispatch to the
+// callee would have asked; without a published gate the chassis is checking
+// things per dispatch this path cannot see, so it declines. The depth cap
+// bounds guest recursion through patterns to a C stack the host tolerates.
+#define DOLVM_HLE_SITE_MAX 64u
+static struct {
+    u32 pc;
+    void (*func)(CPUState*);
+} g_dolvm_hle_sites[DOLVM_HLE_SITE_MAX];
+static u32 g_dolvm_hle_site_count;
+static u32 g_dolvm_hle_cross_depth;
+static const DolVMModule* g_dolvm_active_module;
+
+void dolvm_hle_sites_reset(void) {
+    g_dolvm_hle_site_count = 0;
+    g_dolvm_hle_cross_depth = 0;
+    g_dolvm_active_module = NULL;
+}
+
+static void dolvm_hle_register_site(u32 pc, void (*func)(CPUState*)) {
+    for (u32 i = 0; i < g_dolvm_hle_site_count; i++)
+        if (g_dolvm_hle_sites[i].pc == pc)
+            return;
+    if (g_dolvm_hle_site_count < DOLVM_HLE_SITE_MAX) {
+        g_dolvm_hle_sites[g_dolvm_hle_site_count].pc = pc;
+        g_dolvm_hle_sites[g_dolvm_hle_site_count].func = func;
+        g_dolvm_hle_site_count++;
+    }
+}
+
+void (*dolvm_hle_cross_call(CPUState* ctx, u32 target))(CPUState*) {
+    (void)ctx;
+    const DolVMModule* module = g_dolvm_active_module;
+    if (!module || !module->gate || g_dolvm_hle_cross_depth >= 8u)
+        return NULL;
+    void (*func)(CPUState*) = NULL;
+    for (u32 i = 0; i < g_dolvm_hle_site_count; i++) {
+        if (g_dolvm_hle_sites[i].pc == target) {
+            func = g_dolvm_hle_sites[i].func;
+            break;
+        }
+    }
+    if (!func)
+        return NULL;
+    if (!dolvm_resolve_indirect(module, module->gate, DOLVM_NO_ENTRY, target))
+        return NULL;
+    ++g_dolvm_hle_cross_depth;
+    return func;
+}
+
+void dolvm_hle_cross_ret(void) {
+    --g_dolvm_hle_cross_depth;
+}
+
 // Opt-in dynamic opcode histogram. Static counts over a module are a poor guide
 // to where interpretation time goes -- entry stubs alone outnumber the code
 // they lead into -- so speed work needs the executed mix, not the emitted one.
@@ -975,6 +1034,7 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
     // schedule an event and shorten it, and an event the guest is polling for
     // has to land when it was scheduled, not at the end of the slice.
     static const s32 fixed_budget = DOLVM_LOOP_CYCLE_BUDGET;
+    g_dolvm_active_module = module;
     const DolVMGate* gate = module->gate;
     const s32* budget = gate ? gate->budget : &fixed_budget;
     u32 step_budget = DOLVM_LOOP_STEP_BUDGET;
@@ -1950,6 +2010,7 @@ dispatch:
             void (*native)(struct CPUState*) = g_dolvm_hle_native[inst->a];
             if (!native)
                 NEXT();
+            dolvm_hle_register_site(hle_pc, native);
             // The block's CHARGE in front of this op already took the entry
             // cost, and the native code charges its whole path itself.
             ctx->downcount += (s64)paid;

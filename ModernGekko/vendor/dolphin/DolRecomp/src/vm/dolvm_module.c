@@ -9,6 +9,7 @@
 // nothing reaches it that did not pass through this file.
 
 #include "vm/dolvm.h"
+#include "vm/dolvm_interp.h"
 #include "vm/dolvm_state.h"
 #include "cpu/cpu.h"
 
@@ -444,6 +445,7 @@ static void build_lookup(DolVMModule* module) {
 
 bool dolvm_module_open(DolVMModule* module, const void* image, size_t size,
                        char* error, size_t error_size) {
+    dolvm_hle_sites_reset();
     memset(module, 0, sizeof(*module));
     if (!image || size < sizeof(DolVMHeader))
         return fail(error, error_size, "dolvm: image is too small");
@@ -558,6 +560,7 @@ bool dolvm_module_load_file(DolVMModule* module, const char* path, char* error,
 }
 
 void dolvm_module_close(DolVMModule* module) {
+    dolvm_hle_sites_reset();
     if (!module)
         return;
     free(module->lookup);
