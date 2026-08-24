@@ -280,6 +280,10 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   if (!s_external_ui_common) {
     UICommon::SetUserDirectory(impl->config.user_directory.string());
     UICommon::Init();
+    // Dolphin's frontends make the user tree; without this there is no
+    // Cache/ directory, every shader-cache open fails silently, and every
+    // launch of every game recompiles every pipeline from scratch.
+    UICommon::CreateDirectories();
     impl->ui_initialized = true;
   }
   Config::SetBase(Config::MAIN_FULLSCREEN, impl->config.fullscreen);
