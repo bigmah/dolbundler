@@ -1338,3 +1338,39 @@ One lead parked for the thermal work: Luigi's boot spends 36% of its ops
 busy-waiting a RAM flag through a 7-instruction getter (0x80006B84) --
 harmless to wall clock at speed, but this class of spin is host heat, and
 heat is the 88->75->71% decline across identical device runs.
+
+## Metroid Prime 2, brought up and half-tamed (2026-08-24)
+
+The one title on the phone this project had never benched turns out to be
+the worst: 0.64x boot and **0.5763x in its intro movie on the M4 Pro** --
+slideshow arithmetic on an A17 -- and it is FMV, the exact class the goal
+said would be 10x behind. Two proven patterns later:
+
+- **The Metrowerks soft 64-bit divide** (`__div2i`+`__div2u`, 135 words).
+  Retro's boot polls a timeout through a time conversion that calls it
+  three million times a second -- 43% of every interpreted opcode. Boot:
+  0.637x -> **1.0007x**.
+- **Retro's own THP decoder** (2974 words: one big decode function with the
+  component decoders inlined, plus three helpers; return-landing entries
+  after the two calls that leave the cluster). Movie scene: 0.535x ->
+  **0.890x**. Nothing in it is shared with Melee's SDK decoder -- the
+  variant had to be harvested from MP2's own DOL, which is the honest
+  answer to "position-independent patterns": there was nothing to relocate.
+
+Both patterns pass the differential test; the game boots, renders its
+Health-and-Safety and Retro logo screens clean, and DOLVM_VERSION is 5 so a
+phone re-lowers its module and picks the sites up.
+
+**What remains in that scene, measured:** Retro's thread-yield polling
+cluster -- ~40% of ops, 350K scheduler passes a second even during a movie
+(save context at 0x8036F7D0, walk the thread queue at 0x80375664's
+function, poll the timeout at 0x802C16B4). The context cluster is 116
+self-contained words and would pattern cleanly; the thread walker calls
+into it six times, and cross-pattern calls each cost two dispatch round
+trips today, which eats most of the win. The mechanism that unlocks it is
+letting one generated native call another directly (the site map already
+knows every covered pc); until then MP2 sits at ~0.9x desktop. The
+idle-skip route is closed by the m_idle_pc check living at dispatch
+boundaries the spin never crosses -- and the interpreter-side recognizer
+would need to see through calls, which is the analysis the Strikers freeze
+warned about.
