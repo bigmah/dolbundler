@@ -1374,3 +1374,30 @@ idle-skip route is closed by the m_idle_pc check living at dispatch
 boundaries the spin never crosses -- and the interpreter-side recognizer
 would need to see through calls, which is the analysis the Strikers freeze
 warned about.
+
+## The vector stand-ins on the phone, honestly (2026-08-24)
+
+Interleaved 60-second Olliewood arms on the 15 Pro Max, same build:
+V=0 median 100% (mean 85.8, first run, cold), V=1 median 76% (mean 73.9),
+V=0 median 66% (mean 72.6). fallback goes 3,750,145 -> **0** -> 3,359,060,
+vector_hle 0 -> 225,923 -> 0: the mechanism does exactly what it claims on
+the device. But the sequence is dominated by the thermal staircase this
+file already knows (88->75->71), and the V=1 arm lands inside it -- the
+throughput effect is single-digit and not separable from heat in a
+three-run sequence.
+
+The correction that explains it: the old "~9% Dolphin's own interpreter"
+bucket included `NI_madd_msub`, `ps_madds0/1` and `ClassifyFloat` -- cpu.c
+FP helpers the in-module interpreter calls on every paired-single op,
+which Instruments grouped by module, not by path. Those were never
+exception-vector costs. The stubs' real share was the SingleStepInner/
+GetOpInfo/TryReplaceFunction slice of that bucket -- a few percent -- and
+that is what the stand-ins remove, along with the per-exception cold-path
+cache pollution that cannot be measured in an average at all. Keep them:
+op-count-identical, fallback=0, and the cost model of every future device
+profile just got simpler. But the next percentage points on this phone are
+in heat and pacing, not in the vectors.
+
+The peak column agrees: the hot third arm shows a 54ms worst frame against
+35-36ms on the first two -- thermal decline arrives as hitches before it
+arrives in the average.
