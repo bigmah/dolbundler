@@ -45035,6 +45035,1481 @@ label_8035CCC0:
     ctx->pc = 0x8035CCC4u;
 }
 
+void func_8034571C(CPUState* ctx) {
+    switch (ctx->pc) {
+    case 0x8034571Cu: goto label_8034571C;
+    case 0x80345720u: goto label_80345720;
+    case 0x80345724u: goto label_80345724;
+    case 0x80345728u: goto label_80345728;
+    case 0x8034572Cu: goto label_8034572C;
+    case 0x80345730u: goto label_80345730;
+    case 0x80345734u: goto label_80345734;
+    case 0x80345738u: goto label_80345738;
+    case 0x8034573Cu: goto label_8034573C;
+    case 0x80345740u: goto label_80345740;
+    case 0x80345744u: goto label_80345744;
+    case 0x80345748u: goto label_80345748;
+    case 0x8034574Cu: goto label_8034574C;
+    case 0x80345750u: goto label_80345750;
+    case 0x80345754u: goto label_80345754;
+    case 0x80345758u: goto label_80345758;
+    case 0x8034575Cu: goto label_8034575C;
+    case 0x80345760u: goto label_80345760;
+    case 0x80345764u: goto label_80345764;
+    case 0x80345768u: goto label_80345768;
+    case 0x8034576Cu: goto label_8034576C;
+    case 0x80345770u: goto label_80345770;
+    case 0x80345774u: goto label_80345774;
+    case 0x80345778u: goto label_80345778;
+    case 0x8034577Cu: goto label_8034577C;
+    case 0x80345780u: goto label_80345780;
+    case 0x80345784u: goto label_80345784;
+    case 0x80345788u: goto label_80345788;
+    case 0x8034578Cu: goto label_8034578C;
+    case 0x80345790u: goto label_80345790;
+    case 0x80345794u: goto label_80345794;
+    case 0x80345798u: goto label_80345798;
+    case 0x8034579Cu: goto label_8034579C;
+    case 0x803457A0u: goto label_803457A0;
+    case 0x803457A4u: goto label_803457A4;
+    case 0x803457A8u: goto label_803457A8;
+    case 0x803457ACu: goto label_803457AC;
+    case 0x803457B0u: goto label_803457B0;
+    case 0x803457B4u: goto label_803457B4;
+    case 0x803457B8u: goto label_803457B8;
+    case 0x803457BCu: goto label_803457BC;
+    case 0x803457C0u: goto label_803457C0;
+    case 0x803457C4u: goto label_803457C4;
+    case 0x803457C8u: goto label_803457C8;
+    case 0x803457CCu: goto label_803457CC;
+    case 0x803457D0u: goto label_803457D0;
+    case 0x803457D4u: goto label_803457D4;
+    case 0x803457D8u: goto label_803457D8;
+    case 0x803457DCu: goto label_803457DC;
+    case 0x803457E0u: goto label_803457E0;
+    case 0x803457E4u: goto label_803457E4;
+    case 0x803457E8u: goto label_803457E8;
+    case 0x803457ECu: goto label_803457EC;
+    case 0x803457F0u: goto label_803457F0;
+    case 0x803457F4u: goto label_803457F4;
+    case 0x803457F8u: goto label_803457F8;
+    case 0x803457FCu: goto label_803457FC;
+    case 0x80345800u: goto label_80345800;
+    case 0x80345804u: goto label_80345804;
+    case 0x80345808u: goto label_80345808;
+    case 0x8034580Cu: goto label_8034580C;
+    case 0x80345810u: goto label_80345810;
+    case 0x80345814u: goto label_80345814;
+    case 0x80345818u: goto label_80345818;
+    case 0x8034581Cu: goto label_8034581C;
+    case 0x80345820u: goto label_80345820;
+    case 0x80345824u: goto label_80345824;
+    case 0x80345828u: goto label_80345828;
+    case 0x8034582Cu: goto label_8034582C;
+    case 0x80345830u: goto label_80345830;
+    case 0x80345834u: goto label_80345834;
+    case 0x80345838u: goto label_80345838;
+    case 0x8034583Cu: goto label_8034583C;
+    case 0x80345840u: goto label_80345840;
+    case 0x80345844u: goto label_80345844;
+    case 0x80345848u: goto label_80345848;
+    case 0x8034584Cu: goto label_8034584C;
+    case 0x80345850u: goto label_80345850;
+    case 0x80345854u: goto label_80345854;
+    case 0x80345858u: goto label_80345858;
+    case 0x8034585Cu: goto label_8034585C;
+    case 0x80345860u: goto label_80345860;
+    case 0x80345864u: goto label_80345864;
+    case 0x80345868u: goto label_80345868;
+    case 0x8034586Cu: goto label_8034586C;
+    case 0x80345870u: goto label_80345870;
+    case 0x80345874u: goto label_80345874;
+    case 0x80345878u: goto label_80345878;
+    case 0x8034587Cu: goto label_8034587C;
+    case 0x80345880u: goto label_80345880;
+    case 0x80345884u: goto label_80345884;
+    case 0x80345888u: goto label_80345888;
+    case 0x8034588Cu: goto label_8034588C;
+    case 0x80345890u: goto label_80345890;
+    case 0x80345894u: goto label_80345894;
+    case 0x80345898u: goto label_80345898;
+    case 0x8034589Cu: goto label_8034589C;
+    case 0x803458A0u: goto label_803458A0;
+    case 0x803458A4u: goto label_803458A4;
+    case 0x803458A8u: goto label_803458A8;
+    case 0x803458ACu: goto label_803458AC;
+    case 0x803458B0u: goto label_803458B0;
+    case 0x803458B4u: goto label_803458B4;
+    case 0x803458B8u: goto label_803458B8;
+    case 0x803458BCu: goto label_803458BC;
+    case 0x803458C0u: goto label_803458C0;
+    case 0x803458C4u: goto label_803458C4;
+    case 0x803458C8u: goto label_803458C8;
+    case 0x803458CCu: goto label_803458CC;
+    case 0x803458D0u: goto label_803458D0;
+    case 0x803458D4u: goto label_803458D4;
+    case 0x803458D8u: goto label_803458D8;
+    case 0x803458DCu: goto label_803458DC;
+    case 0x803458E0u: goto label_803458E0;
+    case 0x803458E4u: goto label_803458E4;
+    case 0x803458E8u: goto label_803458E8;
+    case 0x803458ECu: goto label_803458EC;
+    case 0x803458F0u: goto label_803458F0;
+    case 0x803458F4u: goto label_803458F4;
+    case 0x803458F8u: goto label_803458F8;
+    case 0x803458FCu: goto label_803458FC;
+    case 0x80345900u: goto label_80345900;
+    case 0x80345904u: goto label_80345904;
+    case 0x80345908u: goto label_80345908;
+    case 0x8034590Cu: goto label_8034590C;
+    case 0x80345910u: goto label_80345910;
+    case 0x80345914u: goto label_80345914;
+    case 0x80345918u: goto label_80345918;
+    case 0x8034591Cu: goto label_8034591C;
+    case 0x80345920u: goto label_80345920;
+    case 0x80345924u: goto label_80345924;
+    case 0x80345928u: goto label_80345928;
+    case 0x8034592Cu: goto label_8034592C;
+    case 0x80345930u: goto label_80345930;
+    case 0x80345934u: goto label_80345934;
+    default: return;
+    }
+label_8034571C:
+    ctx->pc = 0x8034571Cu;
+    ctx->downcount -= 3;
+    // 8034571C: stwu     r1, -16(r1)
+    {
+        u32 ea = ctx->gpr[1] + (u32)(s32)(-16);
+        mem_write32(ctx, ea, (u32)ctx->gpr[1]);
+        ctx->gpr[1] = ea;
+    }
+
+label_80345720:
+    ctx->pc = 0x80345720u;
+    // 80345720: rlwinm. r9, r3, 0, 0, 0
+    {
+        ctx->gpr[9] = dolrecomp_rotl32(ctx->gpr[3], 0u) & 0x80000000u;
+        u32 cr_bits = 0;
+        s32 cr_value = (s32)ctx->gpr[9];
+        if (cr_value < 0)  cr_bits |= 0x8u;
+        if (cr_value > 0)  cr_bits |= 0x4u;
+        if (cr_value == 0) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);
+    }
+
+label_80345724:
+    ctx->pc = 0x80345724u;
+    // 80345724: bc    12, 2, 0x80345730
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_80345730;
+        }
+    }
+
+label_80345728:
+    ctx->pc = 0x80345728u;
+    ctx->downcount -= 2;
+    // 80345728: subfic  r4, r4, 0
+    {
+        u64 res = (u64)(u32)(s32)(0) + (u64)(~ctx->gpr[4]) + 1u;
+        ctx->gpr[4] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_8034572C:
+    ctx->pc = 0x8034572Cu;
+    // 8034572C: subfze  r3, r3
+    {
+        u32 a = ~ctx->gpr[3];
+        u64 wide = (u64)a + ((ctx->xer >> 29) & 1u);
+        u32 res = (u32)wide;
+        ctx->gpr[3] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345730:
+    ctx->pc = 0x80345730u;
+    ctx->downcount -= 3;
+    // 80345730: stw     r9, 8(r1)
+    {
+        u32 ea = ctx->gpr[1] + (u32)(s32)(8);
+        mem_write32(ctx, ea, (u32)ctx->gpr[9]);
+    }
+
+label_80345734:
+    ctx->pc = 0x80345734u;
+    // 80345734: rlwinm. r10, r5, 0, 0, 0
+    {
+        ctx->gpr[10] = dolrecomp_rotl32(ctx->gpr[5], 0u) & 0x80000000u;
+        u32 cr_bits = 0;
+        s32 cr_value = (s32)ctx->gpr[10];
+        if (cr_value < 0)  cr_bits |= 0x8u;
+        if (cr_value > 0)  cr_bits |= 0x4u;
+        if (cr_value == 0) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);
+    }
+
+label_80345738:
+    ctx->pc = 0x80345738u;
+    // 80345738: bc    12, 2, 0x80345744
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_80345744;
+        }
+    }
+
+label_8034573C:
+    ctx->pc = 0x8034573Cu;
+    ctx->downcount -= 2;
+    // 8034573C: subfic  r6, r6, 0
+    {
+        u64 res = (u64)(u32)(s32)(0) + (u64)(~ctx->gpr[6]) + 1u;
+        ctx->gpr[6] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345740:
+    ctx->pc = 0x80345740u;
+    // 80345740: subfze  r5, r5
+    {
+        u32 a = ~ctx->gpr[5];
+        u64 wide = (u64)a + ((ctx->xer >> 29) & 1u);
+        u32 res = (u32)wide;
+        ctx->gpr[5] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345744:
+    ctx->pc = 0x80345744u;
+    ctx->downcount -= 5;
+    // 80345744: stw     r10, 12(r1)
+    {
+        u32 ea = ctx->gpr[1] + (u32)(s32)(12);
+        mem_write32(ctx, ea, (u32)ctx->gpr[10]);
+    }
+
+label_80345748:
+    ctx->pc = 0x80345748u;
+    // 80345748: cmpwi   r3, 0
+    {
+        s32 val_a = (s32)(ctx->gpr[3]);
+        s32 val_b = (s32)(0);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_8034574C:
+    ctx->pc = 0x8034574Cu;
+    // 8034574C: cntlzw r0, r3
+    {
+        u32 v = ctx->gpr[3];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[0] = n;
+    }
+
+label_80345750:
+    ctx->pc = 0x80345750u;
+    // 80345750: cntlzw r9, r4
+    {
+        u32 v = ctx->gpr[4];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[9] = n;
+    }
+
+label_80345754:
+    ctx->pc = 0x80345754u;
+    // 80345754: bc    4, 2, 0x8034575C
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == false);
+        if (ctr_ok && cr_ok) {
+            goto label_8034575C;
+        }
+    }
+
+label_80345758:
+    ctx->pc = 0x80345758u;
+    ctx->downcount -= 1;
+    // 80345758: addi    r0, r9, 32
+    ctx->gpr[0] = ctx->gpr[9] + (u32)(s32)(32);
+
+label_8034575C:
+    ctx->pc = 0x8034575Cu;
+    ctx->downcount -= 4;
+    // 8034575C: cmpwi   r5, 0
+    {
+        s32 val_a = (s32)(ctx->gpr[5]);
+        s32 val_b = (s32)(0);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_80345760:
+    ctx->pc = 0x80345760u;
+    // 80345760: cntlzw r9, r5
+    {
+        u32 v = ctx->gpr[5];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[9] = n;
+    }
+
+label_80345764:
+    ctx->pc = 0x80345764u;
+    // 80345764: cntlzw r10, r6
+    {
+        u32 v = ctx->gpr[6];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[10] = n;
+    }
+
+label_80345768:
+    ctx->pc = 0x80345768u;
+    // 80345768: bc    4, 2, 0x80345770
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == false);
+        if (ctr_ok && cr_ok) {
+            goto label_80345770;
+        }
+    }
+
+label_8034576C:
+    ctx->pc = 0x8034576Cu;
+    ctx->downcount -= 1;
+    // 8034576C: addi    r9, r10, 32
+    ctx->gpr[9] = ctx->gpr[10] + (u32)(s32)(32);
+
+label_80345770:
+    ctx->pc = 0x80345770u;
+    ctx->downcount -= 3;
+    // 80345770: cmpw    r0, r9
+    {
+        s32 val_a = (s32)(ctx->gpr[0]);
+        s32 val_b = (s32)(ctx->gpr[9]);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_80345774:
+    ctx->pc = 0x80345774u;
+    // 80345774: subfic  r10, r0, 64
+    {
+        u64 res = (u64)(u32)(s32)(64) + (u64)(~ctx->gpr[0]) + 1u;
+        ctx->gpr[10] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345778:
+    ctx->pc = 0x80345778u;
+    // 80345778: bc    12, 1, 0x80345844
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x40000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_80345844;
+        }
+    }
+
+label_8034577C:
+    ctx->pc = 0x8034577Cu;
+    ctx->downcount -= 9;
+    // 8034577C: addi    r9, r9, 1
+    ctx->gpr[9] = ctx->gpr[9] + (u32)(s32)(1);
+
+label_80345780:
+    ctx->pc = 0x80345780u;
+    // 80345780: subfic  r9, r9, 64
+    {
+        u64 res = (u64)(u32)(s32)(64) + (u64)(~ctx->gpr[9]) + 1u;
+        ctx->gpr[9] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345784:
+    ctx->pc = 0x80345784u;
+    // 80345784: add   r0, r0, r9
+    {
+        u32 a = ctx->gpr[0];
+        u32 b = ctx->gpr[9];
+        u32 res = a + b;
+        ctx->gpr[0] = res;
+    }
+
+label_80345788:
+    ctx->pc = 0x80345788u;
+    // 80345788: subf   r9, r9, r10
+    {
+        u32 a = ~ctx->gpr[9];
+        u32 b = ctx->gpr[10];
+        u32 res = a + b + 1u;
+        ctx->gpr[9] = res;
+    }
+
+label_8034578C:
+    ctx->pc = 0x8034578Cu;
+    // 8034578C: mtctr    r9
+    ctx->ctr = ctx->gpr[9];
+
+label_80345790:
+    ctx->pc = 0x80345790u;
+    // 80345790: cmpwi   r9, 32
+    {
+        s32 val_a = (s32)(ctx->gpr[9]);
+        s32 val_b = (s32)(32);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_80345794:
+    ctx->pc = 0x80345794u;
+    // 80345794: addi    r7, r9, -32
+    ctx->gpr[7] = ctx->gpr[9] + (u32)(s32)(-32);
+
+label_80345798:
+    ctx->pc = 0x80345798u;
+    // 80345798: bc    12, 0, 0x803457A8
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x80000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_803457A8;
+        }
+    }
+
+label_8034579C:
+    ctx->pc = 0x8034579Cu;
+    ctx->downcount -= 3;
+    // 8034579C: srw   r8, r3, r7
+    {
+        u32 sh = ctx->gpr[7] & 0x3Fu;
+        ctx->gpr[8] = sh > 31 ? 0u : (ctx->gpr[3] >> sh);
+    }
+
+label_803457A0:
+    ctx->pc = 0x803457A0u;
+    // 803457A0: li      r7, 0
+    ctx->gpr[7] = (u32)(s32)(0);
+
+label_803457A4:
+    ctx->pc = 0x803457A4u;
+    // 803457A4: b       0x803457BC
+    {
+            goto label_803457BC;
+    }
+
+label_803457A8:
+    ctx->pc = 0x803457A8u;
+    ctx->downcount -= 5;
+    // 803457A8: srw   r8, r4, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[8] = sh > 31 ? 0u : (ctx->gpr[4] >> sh);
+    }
+
+label_803457AC:
+    ctx->pc = 0x803457ACu;
+    // 803457AC: subfic  r7, r9, 32
+    {
+        u64 res = (u64)(u32)(s32)(32) + (u64)(~ctx->gpr[9]) + 1u;
+        ctx->gpr[7] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803457B0:
+    ctx->pc = 0x803457B0u;
+    // 803457B0: slw   r7, r3, r7
+    {
+        u32 sh = ctx->gpr[7] & 0x3Fu;
+        ctx->gpr[7] = sh > 31 ? 0u : (ctx->gpr[3] << sh);
+    }
+
+label_803457B4:
+    ctx->pc = 0x803457B4u;
+    // 803457B4: or   r8, r8, r7
+    {
+        ctx->gpr[8] = ctx->gpr[8] | ctx->gpr[7];
+    }
+
+label_803457B8:
+    ctx->pc = 0x803457B8u;
+    // 803457B8: srw   r7, r3, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[7] = sh > 31 ? 0u : (ctx->gpr[3] >> sh);
+    }
+
+label_803457BC:
+    ctx->pc = 0x803457BCu;
+    ctx->downcount -= 3;
+    // 803457BC: cmpwi   r0, 32
+    {
+        s32 val_a = (s32)(ctx->gpr[0]);
+        s32 val_b = (s32)(32);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_803457C0:
+    ctx->pc = 0x803457C0u;
+    // 803457C0: addic   r9, r0, -32
+    {
+        u64 a = ctx->gpr[0];
+        u64 b = (u32)(s32)(-32);
+        u64 res = a + b;
+        ctx->gpr[9] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803457C4:
+    ctx->pc = 0x803457C4u;
+    // 803457C4: bc    12, 0, 0x803457D4
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x80000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_803457D4;
+        }
+    }
+
+label_803457C8:
+    ctx->pc = 0x803457C8u;
+    ctx->downcount -= 3;
+    // 803457C8: slw   r3, r4, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[3] = sh > 31 ? 0u : (ctx->gpr[4] << sh);
+    }
+
+label_803457CC:
+    ctx->pc = 0x803457CCu;
+    // 803457CC: li      r4, 0
+    ctx->gpr[4] = (u32)(s32)(0);
+
+label_803457D0:
+    ctx->pc = 0x803457D0u;
+    // 803457D0: b       0x803457E8
+    {
+            goto label_803457E8;
+    }
+
+label_803457D4:
+    ctx->pc = 0x803457D4u;
+    ctx->downcount -= 5;
+    // 803457D4: slw   r3, r3, r0
+    {
+        u32 sh = ctx->gpr[0] & 0x3Fu;
+        ctx->gpr[3] = sh > 31 ? 0u : (ctx->gpr[3] << sh);
+    }
+
+label_803457D8:
+    ctx->pc = 0x803457D8u;
+    // 803457D8: subfic  r9, r0, 32
+    {
+        u64 res = (u64)(u32)(s32)(32) + (u64)(~ctx->gpr[0]) + 1u;
+        ctx->gpr[9] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803457DC:
+    ctx->pc = 0x803457DCu;
+    // 803457DC: srw   r9, r4, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[9] = sh > 31 ? 0u : (ctx->gpr[4] >> sh);
+    }
+
+label_803457E0:
+    ctx->pc = 0x803457E0u;
+    // 803457E0: or   r3, r3, r9
+    {
+        ctx->gpr[3] = ctx->gpr[3] | ctx->gpr[9];
+    }
+
+label_803457E4:
+    ctx->pc = 0x803457E4u;
+    // 803457E4: slw   r4, r4, r0
+    {
+        u32 sh = ctx->gpr[0] & 0x3Fu;
+        ctx->gpr[4] = sh > 31 ? 0u : (ctx->gpr[4] << sh);
+    }
+
+label_803457E8:
+    ctx->pc = 0x803457E8u;
+    ctx->downcount -= 2;
+    // 803457E8: li      r10, -1
+    ctx->gpr[10] = (u32)(s32)(-1);
+
+label_803457EC:
+    ctx->pc = 0x803457ECu;
+    // 803457EC: addic   r7, r7, 0
+    {
+        u64 a = ctx->gpr[7];
+        u64 b = (u32)(s32)(0);
+        u64 res = a + b;
+        ctx->gpr[7] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803457F0:
+    ctx->downcount -= 7;
+    // 803457F0: adde   r4, r4, r4
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[4];
+        u32 b = ctx->gpr[4];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[4] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_803457F4:
+    // 803457F4: adde   r3, r3, r3
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[3];
+        u32 b = ctx->gpr[3];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[3] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_803457F8:
+    // 803457F8: adde   r8, r8, r8
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[8];
+        u32 b = ctx->gpr[8];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[8] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_803457FC:
+    // 803457FC: adde   r7, r7, r7
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[7];
+        u32 b = ctx->gpr[7];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[7] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345800:
+    // 80345800: subfc   r0, r6, r8
+    {
+        u32 a = ~ctx->gpr[6];
+        u32 b = ctx->gpr[8];
+        u64 wide = (u64)b + (u64)a + 1u;
+        u32 res = (u32)wide;
+        ctx->gpr[0] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345804:
+    // 80345804: subfe.   r9, r5, r7
+    {
+        u32 a = ~ctx->gpr[5];
+        u32 b = ctx->gpr[7];
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[9] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+        u32 cr_bits = 0;
+        s32 cr_value = (s32)ctx->gpr[9];
+        if (cr_value < 0)  cr_bits |= 0x8u;
+        if (cr_value > 0)  cr_bits |= 0x4u;
+        if (cr_value == 0) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);
+    }
+
+label_80345808:
+    // 80345808: bc    12, 0, 0x80345818
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x80000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_80345818;
+        }
+    }
+
+label_8034580C:
+    ctx->downcount -= 3;
+    // 8034580C: or   r8, r0, r0
+    {
+        ctx->gpr[8] = ctx->gpr[0] | ctx->gpr[0];
+    }
+
+label_80345810:
+    // 80345810: or   r7, r9, r9
+    {
+        ctx->gpr[7] = ctx->gpr[9] | ctx->gpr[9];
+    }
+
+label_80345814:
+    // 80345814: addic   r0, r10, 1
+    {
+        u64 a = ctx->gpr[10];
+        u64 b = (u32)(s32)(1);
+        u64 res = a + b;
+        ctx->gpr[0] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345818:
+    ctx->downcount -= 1;
+    // 80345818: bc    16, 0, 0x803457F0
+    {
+        ctx->ctr--;
+        bool ctr_ok = (((ctx->ctr != 0) ? 1u : 0u) ^ 0u) != 0;
+        bool cr_ok = true;
+        if (ctr_ok && cr_ok) {
+            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {
+                ctx->pc = 0x803457F0u;
+                return;
+            }
+            goto label_803457F0;
+        }
+    }
+
+label_8034581C:
+    ctx->pc = 0x8034581Cu;
+    ctx->downcount -= 6;
+    // 8034581C: adde   r4, r4, r4
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[4];
+        u32 b = ctx->gpr[4];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[4] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345820:
+    ctx->pc = 0x80345820u;
+    // 80345820: adde   r3, r3, r3
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[3];
+        u32 b = ctx->gpr[3];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[3] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345824:
+    ctx->pc = 0x80345824u;
+    // 80345824: lwz     r9, 8(r1)
+    {
+        u32 ea = ctx->gpr[1] + (u32)(s32)(8);
+        ctx->gpr[9] = mem_read32(ctx, ea);
+    }
+
+label_80345828:
+    ctx->pc = 0x80345828u;
+    // 80345828: lwz     r10, 12(r1)
+    {
+        u32 ea = ctx->gpr[1] + (u32)(s32)(12);
+        ctx->gpr[10] = mem_read32(ctx, ea);
+    }
+
+label_8034582C:
+    ctx->pc = 0x8034582Cu;
+    // 8034582C: xor.   r7, r9, r10
+    {
+        ctx->gpr[7] = ctx->gpr[9] ^ ctx->gpr[10];
+        u32 cr_bits = 0;
+        s32 cr_value = (s32)ctx->gpr[7];
+        if (cr_value < 0)  cr_bits |= 0x8u;
+        if (cr_value > 0)  cr_bits |= 0x4u;
+        if (cr_value == 0) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);
+    }
+
+label_80345830:
+    ctx->pc = 0x80345830u;
+    // 80345830: bc    12, 2, 0x8034584C
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_8034584C;
+        }
+    }
+
+label_80345834:
+    ctx->pc = 0x80345834u;
+    ctx->downcount -= 4;
+    // 80345834: cmpwi   r9, 0
+    {
+        s32 val_a = (s32)(ctx->gpr[9]);
+        s32 val_b = (s32)(0);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_80345838:
+    ctx->pc = 0x80345838u;
+    // 80345838: subfic  r4, r4, 0
+    {
+        u64 res = (u64)(u32)(s32)(0) + (u64)(~ctx->gpr[4]) + 1u;
+        ctx->gpr[4] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_8034583C:
+    ctx->pc = 0x8034583Cu;
+    // 8034583C: subfze  r3, r3
+    {
+        u32 a = ~ctx->gpr[3];
+        u64 wide = (u64)a + ((ctx->xer >> 29) & 1u);
+        u32 res = (u32)wide;
+        ctx->gpr[3] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345840:
+    ctx->pc = 0x80345840u;
+    // 80345840: b       0x8034584C
+    {
+            goto label_8034584C;
+    }
+
+label_80345844:
+    ctx->pc = 0x80345844u;
+    ctx->downcount -= 2;
+    // 80345844: li      r4, 0
+    ctx->gpr[4] = (u32)(s32)(0);
+
+label_80345848:
+    ctx->pc = 0x80345848u;
+    // 80345848: li      r3, 0
+    ctx->gpr[3] = (u32)(s32)(0);
+
+label_8034584C:
+    ctx->pc = 0x8034584Cu;
+    ctx->downcount -= 2;
+    // 8034584C: addi    r1, r1, 16
+    ctx->gpr[1] = ctx->gpr[1] + (u32)(s32)(16);
+
+label_80345850:
+    ctx->pc = 0x80345850u;
+    // 80345850: blr
+    {
+        u32 target = ctx->lr & ~3u;
+        bool ctr_ok = true;
+        bool cr_ok = true;
+        if (ctr_ok && cr_ok) {
+            ctx->pc = target;
+            return;
+        }
+    }
+
+label_80345854:
+    ctx->pc = 0x80345854u;
+    ctx->downcount -= 4;
+    // 80345854: cmpwi   r3, 0
+    {
+        s32 val_a = (s32)(ctx->gpr[3]);
+        s32 val_b = (s32)(0);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_80345858:
+    ctx->pc = 0x80345858u;
+    // 80345858: cntlzw r0, r3
+    {
+        u32 v = ctx->gpr[3];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[0] = n;
+    }
+
+label_8034585C:
+    ctx->pc = 0x8034585Cu;
+    // 8034585C: cntlzw r9, r4
+    {
+        u32 v = ctx->gpr[4];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[9] = n;
+    }
+
+label_80345860:
+    ctx->pc = 0x80345860u;
+    // 80345860: bc    4, 2, 0x80345868
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == false);
+        if (ctr_ok && cr_ok) {
+            goto label_80345868;
+        }
+    }
+
+label_80345864:
+    ctx->pc = 0x80345864u;
+    ctx->downcount -= 1;
+    // 80345864: addi    r0, r9, 32
+    ctx->gpr[0] = ctx->gpr[9] + (u32)(s32)(32);
+
+label_80345868:
+    ctx->pc = 0x80345868u;
+    ctx->downcount -= 4;
+    // 80345868: cmpwi   r5, 0
+    {
+        s32 val_a = (s32)(ctx->gpr[5]);
+        s32 val_b = (s32)(0);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_8034586C:
+    ctx->pc = 0x8034586Cu;
+    // 8034586C: cntlzw r9, r5
+    {
+        u32 v = ctx->gpr[5];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[9] = n;
+    }
+
+label_80345870:
+    ctx->pc = 0x80345870u;
+    // 80345870: cntlzw r10, r6
+    {
+        u32 v = ctx->gpr[6];
+        u32 n = 0;
+        while (n < 32 && ((v & (0x80000000u >> n)) == 0)) n++;
+        ctx->gpr[10] = n;
+    }
+
+label_80345874:
+    ctx->pc = 0x80345874u;
+    // 80345874: bc    4, 2, 0x8034587C
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x20000000u) != 0) == false);
+        if (ctr_ok && cr_ok) {
+            goto label_8034587C;
+        }
+    }
+
+label_80345878:
+    ctx->pc = 0x80345878u;
+    ctx->downcount -= 1;
+    // 80345878: addi    r9, r10, 32
+    ctx->gpr[9] = ctx->gpr[10] + (u32)(s32)(32);
+
+label_8034587C:
+    ctx->pc = 0x8034587Cu;
+    ctx->downcount -= 3;
+    // 8034587C: cmpw    r0, r9
+    {
+        s32 val_a = (s32)(ctx->gpr[0]);
+        s32 val_b = (s32)(ctx->gpr[9]);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_80345880:
+    ctx->pc = 0x80345880u;
+    // 80345880: subfic  r10, r0, 64
+    {
+        u64 res = (u64)(u32)(s32)(64) + (u64)(~ctx->gpr[0]) + 1u;
+        ctx->gpr[10] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345884:
+    ctx->pc = 0x80345884u;
+    // 80345884: bclr  12, 1
+    {
+        u32 target = ctx->lr & ~3u;
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x40000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            ctx->pc = target;
+            return;
+        }
+    }
+
+label_80345888:
+    ctx->pc = 0x80345888u;
+    ctx->downcount -= 9;
+    // 80345888: addi    r9, r9, 1
+    ctx->gpr[9] = ctx->gpr[9] + (u32)(s32)(1);
+
+label_8034588C:
+    ctx->pc = 0x8034588Cu;
+    // 8034588C: subfic  r9, r9, 64
+    {
+        u64 res = (u64)(u32)(s32)(64) + (u64)(~ctx->gpr[9]) + 1u;
+        ctx->gpr[9] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345890:
+    ctx->pc = 0x80345890u;
+    // 80345890: add   r0, r0, r9
+    {
+        u32 a = ctx->gpr[0];
+        u32 b = ctx->gpr[9];
+        u32 res = a + b;
+        ctx->gpr[0] = res;
+    }
+
+label_80345894:
+    ctx->pc = 0x80345894u;
+    // 80345894: subf   r9, r9, r10
+    {
+        u32 a = ~ctx->gpr[9];
+        u32 b = ctx->gpr[10];
+        u32 res = a + b + 1u;
+        ctx->gpr[9] = res;
+    }
+
+label_80345898:
+    ctx->pc = 0x80345898u;
+    // 80345898: mtctr    r9
+    ctx->ctr = ctx->gpr[9];
+
+label_8034589C:
+    ctx->pc = 0x8034589Cu;
+    // 8034589C: cmpwi   r9, 32
+    {
+        s32 val_a = (s32)(ctx->gpr[9]);
+        s32 val_b = (s32)(32);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_803458A0:
+    ctx->pc = 0x803458A0u;
+    // 803458A0: addi    r7, r9, -32
+    ctx->gpr[7] = ctx->gpr[9] + (u32)(s32)(-32);
+
+label_803458A4:
+    ctx->pc = 0x803458A4u;
+    // 803458A4: bc    12, 0, 0x803458B4
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x80000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_803458B4;
+        }
+    }
+
+label_803458A8:
+    ctx->pc = 0x803458A8u;
+    ctx->downcount -= 3;
+    // 803458A8: srw   r8, r3, r7
+    {
+        u32 sh = ctx->gpr[7] & 0x3Fu;
+        ctx->gpr[8] = sh > 31 ? 0u : (ctx->gpr[3] >> sh);
+    }
+
+label_803458AC:
+    ctx->pc = 0x803458ACu;
+    // 803458AC: li      r7, 0
+    ctx->gpr[7] = (u32)(s32)(0);
+
+label_803458B0:
+    ctx->pc = 0x803458B0u;
+    // 803458B0: b       0x803458C8
+    {
+            goto label_803458C8;
+    }
+
+label_803458B4:
+    ctx->pc = 0x803458B4u;
+    ctx->downcount -= 5;
+    // 803458B4: srw   r8, r4, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[8] = sh > 31 ? 0u : (ctx->gpr[4] >> sh);
+    }
+
+label_803458B8:
+    ctx->pc = 0x803458B8u;
+    // 803458B8: subfic  r7, r9, 32
+    {
+        u64 res = (u64)(u32)(s32)(32) + (u64)(~ctx->gpr[9]) + 1u;
+        ctx->gpr[7] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803458BC:
+    ctx->pc = 0x803458BCu;
+    // 803458BC: slw   r7, r3, r7
+    {
+        u32 sh = ctx->gpr[7] & 0x3Fu;
+        ctx->gpr[7] = sh > 31 ? 0u : (ctx->gpr[3] << sh);
+    }
+
+label_803458C0:
+    ctx->pc = 0x803458C0u;
+    // 803458C0: or   r8, r8, r7
+    {
+        ctx->gpr[8] = ctx->gpr[8] | ctx->gpr[7];
+    }
+
+label_803458C4:
+    ctx->pc = 0x803458C4u;
+    // 803458C4: srw   r7, r3, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[7] = sh > 31 ? 0u : (ctx->gpr[3] >> sh);
+    }
+
+label_803458C8:
+    ctx->pc = 0x803458C8u;
+    ctx->downcount -= 3;
+    // 803458C8: cmpwi   r0, 32
+    {
+        s32 val_a = (s32)(ctx->gpr[0]);
+        s32 val_b = (s32)(32);
+        u32 cr_bits = 0;
+        if (val_a < val_b)  cr_bits |= 0x8u;
+        if (val_a > val_b)  cr_bits |= 0x4u;
+        if (val_a == val_b) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_bits << 28);
+    }
+
+label_803458CC:
+    ctx->pc = 0x803458CCu;
+    // 803458CC: addic   r9, r0, -32
+    {
+        u64 a = ctx->gpr[0];
+        u64 b = (u32)(s32)(-32);
+        u64 res = a + b;
+        ctx->gpr[9] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803458D0:
+    ctx->pc = 0x803458D0u;
+    // 803458D0: bc    12, 0, 0x803458E0
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x80000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_803458E0;
+        }
+    }
+
+label_803458D4:
+    ctx->pc = 0x803458D4u;
+    ctx->downcount -= 3;
+    // 803458D4: slw   r3, r4, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[3] = sh > 31 ? 0u : (ctx->gpr[4] << sh);
+    }
+
+label_803458D8:
+    ctx->pc = 0x803458D8u;
+    // 803458D8: li      r4, 0
+    ctx->gpr[4] = (u32)(s32)(0);
+
+label_803458DC:
+    ctx->pc = 0x803458DCu;
+    // 803458DC: b       0x803458F4
+    {
+            goto label_803458F4;
+    }
+
+label_803458E0:
+    ctx->pc = 0x803458E0u;
+    ctx->downcount -= 5;
+    // 803458E0: slw   r3, r3, r0
+    {
+        u32 sh = ctx->gpr[0] & 0x3Fu;
+        ctx->gpr[3] = sh > 31 ? 0u : (ctx->gpr[3] << sh);
+    }
+
+label_803458E4:
+    ctx->pc = 0x803458E4u;
+    // 803458E4: subfic  r9, r0, 32
+    {
+        u64 res = (u64)(u32)(s32)(32) + (u64)(~ctx->gpr[0]) + 1u;
+        ctx->gpr[9] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803458E8:
+    ctx->pc = 0x803458E8u;
+    // 803458E8: srw   r9, r4, r9
+    {
+        u32 sh = ctx->gpr[9] & 0x3Fu;
+        ctx->gpr[9] = sh > 31 ? 0u : (ctx->gpr[4] >> sh);
+    }
+
+label_803458EC:
+    ctx->pc = 0x803458ECu;
+    // 803458EC: or   r3, r3, r9
+    {
+        ctx->gpr[3] = ctx->gpr[3] | ctx->gpr[9];
+    }
+
+label_803458F0:
+    ctx->pc = 0x803458F0u;
+    // 803458F0: slw   r4, r4, r0
+    {
+        u32 sh = ctx->gpr[0] & 0x3Fu;
+        ctx->gpr[4] = sh > 31 ? 0u : (ctx->gpr[4] << sh);
+    }
+
+label_803458F4:
+    ctx->pc = 0x803458F4u;
+    ctx->downcount -= 2;
+    // 803458F4: li      r10, -1
+    ctx->gpr[10] = (u32)(s32)(-1);
+
+label_803458F8:
+    ctx->pc = 0x803458F8u;
+    // 803458F8: addic   r7, r7, 0
+    {
+        u64 a = ctx->gpr[7];
+        u64 b = (u32)(s32)(0);
+        u64 res = a + b;
+        ctx->gpr[7] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_803458FC:
+    ctx->downcount -= 7;
+    // 803458FC: adde   r4, r4, r4
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[4];
+        u32 b = ctx->gpr[4];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[4] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345900:
+    // 80345900: adde   r3, r3, r3
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[3];
+        u32 b = ctx->gpr[3];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[3] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345904:
+    // 80345904: adde   r8, r8, r8
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[8];
+        u32 b = ctx->gpr[8];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[8] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345908:
+    // 80345908: adde   r7, r7, r7
+    {
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u32 a = ctx->gpr[7];
+        u32 b = ctx->gpr[7];
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[7] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_8034590C:
+    // 8034590C: subfc   r0, r6, r8
+    {
+        u32 a = ~ctx->gpr[6];
+        u32 b = ctx->gpr[8];
+        u64 wide = (u64)b + (u64)a + 1u;
+        u32 res = (u32)wide;
+        ctx->gpr[0] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+    }
+
+label_80345910:
+    // 80345910: subfe.   r9, r5, r7
+    {
+        u32 a = ~ctx->gpr[5];
+        u32 b = ctx->gpr[7];
+        u32 carry = (ctx->xer >> 29) & 1u;
+        u64 wide = (u64)a + (u64)b + carry;
+        u32 res = (u32)wide;
+        ctx->gpr[9] = res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);
+        u32 cr_bits = 0;
+        s32 cr_value = (s32)ctx->gpr[9];
+        if (cr_value < 0)  cr_bits |= 0x8u;
+        if (cr_value > 0)  cr_bits |= 0x4u;
+        if (cr_value == 0) cr_bits |= 0x2u;
+        cr_bits |= (ctx->xer >> 31) & 1u;
+        ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr_bits << 28);
+    }
+
+label_80345914:
+    // 80345914: bc    12, 0, 0x80345924
+    {
+        bool ctr_ok = true;
+        bool cr_ok = (((ctx->cr & 0x80000000u) != 0) == true);
+        if (ctr_ok && cr_ok) {
+            goto label_80345924;
+        }
+    }
+
+label_80345918:
+    ctx->downcount -= 3;
+    // 80345918: or   r8, r0, r0
+    {
+        ctx->gpr[8] = ctx->gpr[0] | ctx->gpr[0];
+    }
+
+label_8034591C:
+    // 8034591C: or   r7, r9, r9
+    {
+        ctx->gpr[7] = ctx->gpr[9] | ctx->gpr[9];
+    }
+
+label_80345920:
+    // 80345920: addic   r0, r10, 1
+    {
+        u64 a = ctx->gpr[10];
+        u64 b = (u32)(s32)(1);
+        u64 res = a + b;
+        ctx->gpr[0] = (u32)res;
+        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(res >> 32) & 1u) << 29);
+    }
+
+label_80345924:
+    ctx->downcount -= 1;
+    // 80345924: bc    16, 0, 0x803458FC
+    {
+        ctx->ctr--;
+        bool ctr_ok = (((ctx->ctr != 0) ? 1u : 0u) ^ 0u) != 0;
+        bool cr_ok = true;
+        if (ctr_ok && cr_ok) {
+            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {
+                ctx->pc = 0x803458FCu;
+                return;
+            }
+            goto label_803458FC;
+        }
+    }
+
+label_80345928:
+    ctx->pc = 0x80345928u;
+    ctx->downcount -= 3;
+    // 80345928: or   r4, r8, r8
+    {
+        ctx->gpr[4] = ctx->gpr[8] | ctx->gpr[8];
+    }
+
+label_8034592C:
+    ctx->pc = 0x8034592Cu;
+    // 8034592C: or   r3, r7, r7
+    {
+        ctx->gpr[3] = ctx->gpr[7] | ctx->gpr[7];
+    }
+
+label_80345930:
+    ctx->pc = 0x80345930u;
+    // 80345930: blr
+    {
+        u32 target = ctx->lr & ~3u;
+        bool ctr_ok = true;
+        bool cr_ok = true;
+        if (ctr_ok && cr_ok) {
+            ctx->pc = target;
+            return;
+        }
+    }
+
+label_80345934:
+    ctx->pc = 0x80345934u;
+    ctx->downcount -= 1;
+    // 80345934: blr
+    {
+        u32 target = ctx->lr & ~3u;
+        bool ctr_ok = true;
+        bool cr_ok = true;
+        if (ctr_ok && cr_ok) {
+            ctx->pc = target;
+            return;
+        }
+    }
+
+    ctx->pc = 0x80345938u;
+}
+
 #endif
 
 #include "vm/dolvm.h"
@@ -45046,4 +46521,5 @@ void (*const g_dolvm_hle_native[DOLVM_HLE_COUNT])(
     CPUState*) = {
     [DOLVM_HLE_THP_DECODE_GALE] = func_80331470,
     [DOLVM_HLE_AX_REVERB_GALE] = func_8035C910,
+    [DOLVM_HLE_DIV64_G2ME] = func_8034571C,
 };

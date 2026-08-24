@@ -435,6 +435,10 @@ typedef enum {
     // exact-float helpers runs at the interpreter's speed, because the
     // interpreter's cost there was never the interpreting. The numbers stay
     // reserved.
+    // Metroid Prime 2's Metrowerks soft 64-bit divide (__div2i + __div2u as
+    // one cluster). Retro's boot converts time through it three million
+    // times a second -- 43% of every interpreted opcode.
+    DOLVM_HLE_DIV64_G2ME = 17,
     DOLVM_HLE_COUNT
 } DolVMHleId;
 
