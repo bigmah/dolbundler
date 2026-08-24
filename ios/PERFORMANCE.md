@@ -1246,3 +1246,95 @@ deliberately.
 title's decoder): extract the words, add a DOLVM_HLE_NATIVE_PATTERN with its
 entries to dolvm_hle_native_patterns.inc, rerun dolvm_hle_gen, commit both.
 The differential test picks it up automatically via the pattern table.
+
+# The butteriness pass (2026-08-24)
+
+Four changes, each sim-validated, batched into one device build. The theme:
+what a player feels is launches, hitches and heat, not the average speed
+column.
+
+## The fast-float ceiling is gone -- do not build the accuracy toggle
+
+The plan said: measure the exactness-deletion ceiling on Olliewood, and if it
+prices over 15%, ship a Dolphin-style accuracy toggle. Measured: stripping
+the exact helpers to plain arithmetic (25-bit rounding, FPRF, FI/FR, the
+fmadd tie-correction, NI flushes all deleted) is worth **zero** -- on
+Olliewood, on Star Fox's skinning scene, on a Melee boot. Bit-identical op
+counts both arms, PGO regenerated symmetrically. The 12.7% ceiling this file
+reported earlier was real when taken and has since been absorbed: both the
+interpreter and the native backend reach FP through the same cpu.c helper
+calls, so what remains is the call, the CPUState round trip and the
+conversions -- not the exactness math, which is cheap, well-predicted
+checking. Dolphin's toggle pays because its JIT folds fast float into single
+host instructions; under an interpreter's dispatch there is nothing left to
+reclaim. The toggle would trade correctness for nothing.
+
+Same session's measurement trap, recorded: the committed dolvm.profdata is
+~4-5% better on Olliewood than a fresh pgo2-style regen from boot windows.
+Retrain on heavy-scene savestates before committing a regenerated profile.
+
+## The exception vectors run whole now
+
+`StaticRecompCore_Vectors.cpp`: the low-RAM stubs every SDK title copies to
+its exception vectors are proved word-for-word against the SDK template --
+across four titles spanning both SDK generations only the vector number
+(checked against the address) and the debugger jump target (opcodes checked,
+immediate used only as data) vary -- and a verified vector executes as
+straight C against PowerPCState, charged from the same GetOpInfo tables the
+interpreter would have consulted, per branch path. The system-call vector's
+7-word HID0 fast path is its own pattern. Anything unproved, or any entry
+with translation or user mode still on, single-steps exactly as before; an
+icache invalidation over low RAM or a ClearCache (savestate loads pass
+through it) drops the verification.
+
+Validation: Olliewood, Melee, Star Fox and Mario Party over 6-12e9-cycle
+windows execute bit-identical op counts with `DOLVM_VECTOR_HLE=0/1`; a
+45-second simulator run reports `fallback=0 vector_hle=218231` where the
+old path interpreted ~3.5M instructions per 24e9 cycles on the device at
+~1.5us each (`Read_Opcode` -> MMU translate -> `GetOpInfo` -> HLE check,
+all cold on an A17). The ~9% this file measured on the phone is the number
+the device run after this build should return.
+
+## Launch: the runtime hashed the whole disc, and the shader cache went nowhere
+
+Two launch findings, both invisible on a fast Mac:
+
+- `InspectGame` Sha256'd every byte of the extracted game's `files/`
+  directory before `Runtime::Create` could proceed, and nothing in the
+  runtime reads the result (it exists for release pinning and netplay).
+  That was ~4s of simulator launch and the phone's ~25s `Runtime::Create`.
+  The hash is now opt-in; the runtime and the dev runner skip it.
+- Dolphin's frontends call `UICommon::CreateDirectories()`; this runtime
+  never did. With no `Cache/` directory every disk shader cache and the
+  per-game pipeline-UID cache failed to open **silently, on every
+  platform** -- so every launch of every game recompiled every pipeline
+  from scratch, which on a phone is the classic first-minutes stutter,
+  every session. Fifteen seconds of Olliewood now leaves a 64KB
+  `GEXE52.uidcache`; the next launch precompiles those pipelines at boot,
+  where `WaitForShadersBeforeStarting` already waits.
+
+## The perf line now names the hitch
+
+A 2-second fps average hides a 30ms frame completely. `PerformanceTracker`
+keeps the largest single frame/vblank interval since it was last asked
+(atomic take-and-rearm), and the app's perf line prints it:
+`perf: 55.6 fps 94% speed peak 21/21ms`. On the simulator, healthy
+stretches of Olliewood peak at 15-17ms and slow spells at 28-33ms --
+double-length frames, exactly what a player calls a stutter. This is the
+instrument the pacing and thermal work measures itself against.
+
+## The FMV question is closed for this library
+
+Melee's THP pattern appears in no other installed DOL even at 60%
+word-similarity, and windowed boot profiles (62 guest-seconds each) show no
+installed title with a slow movie scene: SpongeBob's intro-movie stretch
+bottoms at 1.84x desktop cpu, Luigi's Mansion and Strikers dip below 1x only
+in their first two boot seconds, Star Fox never leaves 6.8x. Melee was the
+outlier and is fixed. Position-independent pattern codegen has no measured
+payoff target here; harvest a per-build variant when a title with a slow
+movie scene actually arrives.
+
+One lead parked for the thermal work: Luigi's boot spends 36% of its ops
+busy-waiting a RAM flag through a 7-instruction getter (0x80006B84) --
+harmless to wall clock at speed, but this class of spin is host heat, and
+heat is the 88->75->71% decline across identical device runs.
