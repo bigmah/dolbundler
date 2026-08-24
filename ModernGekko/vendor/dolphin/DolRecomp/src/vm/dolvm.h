@@ -40,7 +40,7 @@ extern "C" {
 // The iOS library rebuilds a module whose version does not match, which is the
 // only thing that gets an emitter improvement onto a device: the disc is
 // recompiled there, and nothing else in the header would have changed.
-#define DOLVM_VERSION 4u
+#define DOLVM_VERSION 5u
 
 // Bumped whenever the meaning of an existing opcode changes. The loader
 // refuses a module it was not built to run rather than misinterpreting it.
