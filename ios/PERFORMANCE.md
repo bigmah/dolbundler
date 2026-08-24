@@ -1419,3 +1419,11 @@ leaves.
 
 DOLVM_VERSION is 5; the device app was rebuilt and installed with all of
 it, and a phone-side MP2 run is queued for the next unlock.
+
+**Device confirmation, same morning:** Metroid Prime 2 on the iPhone 15 Pro
+Max boots and runs its intro at **60fps, 100% speed, 17-18ms peaks** --
+locked single-frame pacing through what the M4 Pro interpreted at 0.64x
+before today. Runtime::Create is one second on the phone. The peak column
+names the two rough seconds that remain: a 225ms spike at a load
+transition and a 63-96ms patch entering the movie, both first-session
+pipeline compiles the now-working shader cache absorbs on the next launch.
