@@ -38,6 +38,9 @@ public:
 
   // Getter Functions. May be called from any thread.
   double GetFPS() const;
+  // Worst single frame/vblank interval since last asked. What a hitch is.
+  DT TakeFramePeak() const { return m_fps_counter.TakeDtPeak(); }
+  DT TakeVBlankPeak() const { return m_vps_counter.TakeDtPeak(); }
   double GetVPS() const;
   double GetSpeed() const;
   double GetMaxSpeed() const;

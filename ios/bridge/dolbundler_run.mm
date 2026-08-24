@@ -155,7 +155,10 @@ void StartPerfLog(std::atomic<bool>* running)
       if (!running->load())
         break;
       const auto& metrics = Core::System::GetInstance().GetPerfMetrics();
-      run_log("perf: %.1f fps  %.0f%% speed", metrics.GetFPS(), metrics.GetSpeed() * 100.0);
+      run_log("perf: %.1f fps  %.0f%% speed  peak %.0f/%.0fms",
+              metrics.GetFPS(), metrics.GetSpeed() * 100.0,
+              DT_ms(metrics.TakeFramePeak()).count(),
+              DT_ms(metrics.TakeVBlankPeak()).count());
     }
   }).detach();
 }
