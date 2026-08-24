@@ -35,7 +35,12 @@ struct GameInspectResult
   explicit operator bool() const { return metadata.has_value(); }
 };
 
-GameInspectResult InspectGame(const std::filesystem::path& root);
+// hash_assets covers the files/ directory -- every byte of the extracted
+// disc. Nothing in the runtime reads it (it exists for release pinning and
+// netplay compatibility), and on a phone it is tens of seconds of launch
+// time, so callers that only need the game booted pass false and
+// assets_sha256 stays empty.
+GameInspectResult InspectGame(const std::filesystem::path& root, bool hash_assets = true);
 std::optional<std::string> HashFileSha256(const std::filesystem::path& path);
 std::optional<std::string> HashDirectorySha256(const std::filesystem::path& root);
 }  // namespace moderngekko
