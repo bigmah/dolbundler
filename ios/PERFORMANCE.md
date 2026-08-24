@@ -1401,3 +1401,21 @@ in heat and pacing, not in the vectors.
 The peak column agrees: the hot third arm shows a 54ms worst frame against
 35-36ms on the first two -- thermal decline arrives as hitches before it
 arrives in the average.
+
+## Postscript: the scheduler fell to cross-pattern calls (2026-08-24)
+
+The mechanism the MP2 section above asked for exists now: a stand-in's
+out-of-pattern call resolves at run time against the sites the interpreter
+has registered for the running title (never bound at build time -- titles'
+pattern addresses overlap), checks the same gate a dispatch would, caps
+recursion depth, and falls back to the plain leave when anything declines.
+Five more patterns cover Retro's polling cycle end to end, and the movie
+scene with all seven MP2 patterns reads **0.538x -> 1.0397x cpu**: +93% on
+the day, above real time on the M4 Pro, from the slowest scene this project
+had ever measured. Melee's regenerated decoder holds at 1.95x; the
+differential test passes with every pattern. The tail is an FP audio-mix
+kernel (8.9% of ops, the class where natives buy nothing) and two small
+leaves.
+
+DOLVM_VERSION is 5; the device app was rebuilt and installed with all of
+it, and a phone-side MP2 run is queued for the next unlock.
