@@ -40,14 +40,15 @@ extern "C" {
 // The iOS library rebuilds a module whose version does not match, which is the
 // only thing that gets an emitter improvement onto a device: the disc is
 // recompiled there, and nothing else in the header would have changed.
-#define DOLVM_VERSION 3u
+#define DOLVM_VERSION 4u
 
 // Bumped whenever the meaning of an existing opcode changes. The loader
 // refuses a module it was not built to run rather than misinterpreting it.
 // 4: CALL names the region its target lies in, and INDIRECT always names its
 //    own; both are what a gated chassis checks before the interpreter resolves
 //    the edge in place.
-#define DOLVM_ABI_VERSION 5u
+// 6: HLE stands in for a whole recognised SDK routine at its entry point.
+#define DOLVM_ABI_VERSION 6u
 
 // Register file size. Values are block-local, and the emitter recycles a
 // register as soon as its last use retires, so real blocks land far below this;
@@ -365,8 +366,56 @@ typedef enum {
     DOLVM_OP_LSHR32I_AND,
     DOLVM_OP_ASHR32I_AND,
 
+    // A whole recognised SDK routine, executed natively. Every GameCube title
+    // statically links the same SDK, and its hottest leaves -- the 32-byte
+    // cache-line loops, the paired-single matrix kernels -- are exactly the
+    // dense code an interpreter loses the most on. The recompiler proves a
+    // function is the known routine by comparing every instruction word
+    // against a stored pattern (a checksum only narrows the search), then
+    // plants this at the routine's entry, after the block's charge. A helper
+    // that cannot take the call in front of it -- unexpected mode bits, the
+    // runtime switch off -- falls through to the interpreted body that still
+    // follows, so the op is an optimisation, never a dependency. Mid-routine
+    // entries (an exception resuming inside it) use the ordinary entry map
+    // and never see this op at all.
+    //
+    // a = DolVMHleId, b | c << 8 = the region this op was emitted in (for
+    // resolving the return the way INDIRECT would), imm = the routine's guest
+    // entry pc. Payload word: the cycle charge the entry block already paid,
+    // so the helper can charge its model minus what the CHARGE in front of it
+    // took.
+    DOLVM_OP_HLE,
+
     DOLVM_OP_COUNT
 } DolVMOp;
+
+// Native stand-ins for SDK routines the recompiler can prove are present.
+// The pattern that proves each one lives with the matcher
+// (backend/vm/dolvm_hle_match.c); the execution lives with the interpreter
+// (vm/dolvm_interp.c). Both are keyed by this id, which is baked into
+// modules -- append only.
+// The SDK's cache-range family: (start r3, length r4), one cache-block op per
+// 32 bytes, clobbering r3, r4, r5, CTR and CR0 exactly as the loop does. Two
+// SDK generations compile the alignment differently -- the newer computes
+// blocks as (length + (start & 31) + 31) >> 5, the older tests the alignment
+// with a record-form clrlwi (which is what CR0 ends up holding) and rounds a
+// misaligned start up by a whole extra block -- and three endings exist: the
+// SDK's `sc` fast-sync, a plain blr, and icbi's sync; isync; blr.
+typedef enum {
+    DOLVM_HLE_NONE = 0,
+    DOLVM_HLE_DC_FLUSH_RANGE = 1,           // dcbf,  sc
+    DOLVM_HLE_DC_INVALIDATE_RANGE = 2,      // dcbi,  blr
+    DOLVM_HLE_DC_STORE_RANGE = 3,           // dcbst, sc
+    DOLVM_HLE_DC_FLUSH_RANGE_NO_SYNC = 4,   // dcbf,  blr
+    DOLVM_HLE_DC_STORE_RANGE_NO_SYNC = 5,   // dcbst, blr
+    DOLVM_HLE_IC_INVALIDATE_RANGE = 6,      // icbi,  sync; isync; blr
+    DOLVM_HLE_DC_FLUSH_RANGE_OLD = 7,       // the older alignment math
+    DOLVM_HLE_DC_INVALIDATE_RANGE_OLD = 8,
+    DOLVM_HLE_DC_STORE_RANGE_OLD = 9,
+    DOLVM_HLE_DC_FLUSH_RANGE_NO_SYNC_OLD = 10,
+    DOLVM_HLE_IC_INVALIDATE_RANGE_OLD = 11,
+    DOLVM_HLE_COUNT
+} DolVMHleId;
 
 // Width selectors for TRUNC / SEXT / NOT.
 typedef enum {

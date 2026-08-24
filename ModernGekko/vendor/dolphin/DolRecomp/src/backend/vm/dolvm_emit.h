@@ -15,6 +15,12 @@
 extern "C" {
 #endif
 
+// One proved SDK routine: where it enters, and which native stand-in runs it.
+typedef struct {
+    u32 pc;
+    u8 id;   // DolVMHleId
+} DolVMHleSite;
+
 typedef struct {
     // Lower intra-module linked branches and tail calls to CALL rather than
     // EXIT, naming the target's region so a gated interpreter can follow them
@@ -40,6 +46,13 @@ typedef struct {
     // only thing that knows where the region boundaries ended up.
     bool (*hash_guest_range)(void* user, u32 start, u32 end, u64* out);
     void* hash_user;
+    // SDK routines the matcher proved are present, sorted by pc. The block
+    // whose guest address is a site's pc opens with DOLVM_OP_HLE naming the
+    // site's helper, after its charge, so every way of reaching the routine's
+    // entry -- the map, a resolved call, a branch landing past the charge --
+    // runs the helper first and the interpreted body only if it declines.
+    const DolVMHleSite* hle_sites;
+    u32 hle_count;
 } DolVMEmitOptions;
 
 // Optimizes `module` in place, then lowers it. On success `*image`/`*size`

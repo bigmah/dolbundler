@@ -97,6 +97,10 @@ typedef struct {
     // Lower against the homed registers: guest registers, LR and CTR live in
     // the register file for the length of a dispatch.
     bool homed;
+    // Proved SDK routines, sorted by pc; emit_block opens a block that starts
+    // at one with DOLVM_OP_HLE.
+    const DolVMHleSite* hle_sites;
+    u32 hle_count;
     FILE* diagnostics;
     bool failed;
 } Builder;
@@ -2275,6 +2279,31 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
         !emit_raw(builder, DOLVM_OP_CHARGE, 0, 0, 0, block->cycle_cost))
         return false;
 
+    // A block that opens a proved SDK routine opens with its native stand-in,
+    // placed after the charge so a branch that pays the charge itself and
+    // lands one past it (PATCH_BLOCK_BODY) lands here too. The payload tells
+    // the helper what the charge already took, so its cycle model can charge
+    // the difference.
+    if (builder->hle_count) {
+        u32 lo = 0, hi = builder->hle_count;
+        while (lo < hi) {
+            u32 mid = lo + (hi - lo) / 2u;
+            if (builder->hle_sites[mid].pc < block->guest_address)
+                lo = mid + 1u;
+            else
+                hi = mid;
+        }
+        if (lo < builder->hle_count &&
+            builder->hle_sites[lo].pc == block->guest_address) {
+            if (!emit_raw(builder, DOLVM_OP_HLE, builder->hle_sites[lo].id,
+                          (u8)(fn->region_index & 0xFFu),
+                          (u8)(fn->region_index >> 8),
+                          block->guest_address) ||
+                !emit_payload(builder, block->cycle_cost))
+                return false;
+        }
+    }
+
     for (u32 i = 0; i < count; i++) {
         DolIRInstruction* inst = &block->instructions[i];
         // A block long enough to outrun the byte-sized pc offset carried by
@@ -2652,6 +2681,8 @@ bool dolvm_build_module(DolIRModule* module, const DolVMEmitOptions* options,
     memset(&builder, 0, sizeof(builder));
     builder.direct_calls = options && options->direct_calls;
     builder.homed = options && options->home_state;
+    builder.hle_sites = options ? options->hle_sites : NULL;
+    builder.hle_count = options ? options->hle_count : 0;
     builder.diagnostics = diagnostics;
 
     // Regions are looked up by binary search at runtime, so they go in address

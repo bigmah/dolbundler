@@ -316,6 +316,11 @@ static u32 g_dolvm_poll_next;
 // knowing and guessing.
 int g_dolvm_poll_skip_enabled = 1;
 
+// Runtime off switch for the HLE stand-ins. A module carries them either way;
+// off, every one declines and the interpreted body under it runs, which is the
+// A/B a claim about what a helper is worth has to be measured against.
+int g_dolvm_hle_enabled = 1;
+
 // See dolvm_dispatch: fills the local register file with an even poison so a
 // read-before-write is deterministic rather than lucky. Off by default.
 int g_dolvm_poison_registers = 0;
@@ -816,6 +821,16 @@ static void dolvm_count_leave(u32 pc) {
 #define DOLVM_PROFILE_BLOCK_SITES 65536u
 static u32 g_dolvm_block_pc[DOLVM_PROFILE_BLOCK_SITES];
 static u64 g_dolvm_block_count[DOLVM_PROFILE_BLOCK_SITES];
+// Ops attributed to each counted block: everything executed since the last
+// back edge lands on the block that edge named. While a loop iterates that is
+// exactly its body; the straight line between two loops lands on the loop
+// that just exited, which is noise small enough to read through. This is the
+// column that says where the time goes -- entry counts overweight short
+// blocks by orders of magnitude.
+static u64 g_dolvm_block_ops[DOLVM_PROFILE_BLOCK_SITES];
+static u64 g_dolvm_op_total;
+static u64 g_dolvm_ops_mark;
+static u32 g_dolvm_prev_block_slot = ~0u;
 static u64 g_dolvm_block_total;
 static u64 g_dolvm_block_dropped;
 static void dolvm_count_block(u32 pc) {
@@ -826,6 +841,11 @@ static void dolvm_count_block(u32 pc) {
         if (!g_dolvm_block_count[i] || g_dolvm_block_pc[i] == pc) {
             g_dolvm_block_pc[i] = pc;
             g_dolvm_block_count[i]++;
+            if (g_dolvm_prev_block_slot != ~0u)
+                g_dolvm_block_ops[g_dolvm_prev_block_slot] +=
+                    g_dolvm_op_total - g_dolvm_ops_mark;
+            g_dolvm_ops_mark = g_dolvm_op_total;
+            g_dolvm_prev_block_slot = i;
             return;
         }
     }
@@ -839,6 +859,7 @@ u64 g_dolvm_pair_counts[DOLVM_OP_COUNT][DOLVM_OP_COUNT];
 static u32 g_dolvm_previous_op;
 #define DOLVM_COUNT(op)                                                       \
     do {                                                                      \
+        ++g_dolvm_op_total;                                                   \
         ++g_dolvm_op_counts[(op)];                                            \
         ++g_dolvm_pair_counts[g_dolvm_previous_op][(op)];                     \
         g_dolvm_previous_op = (op);                                           \
@@ -1061,6 +1082,7 @@ int dolvm_dispatch(const DolVMModule* module, CPUState* ctx, u32 address) {
         LABEL(DOLVM_OP_CMP_JMP_IF_CR_GUARD),
         LABEL(DOLVM_OP_ROTL32I_AND), LABEL(DOLVM_OP_SHL32I_AND),
         LABEL(DOLVM_OP_LSHR32I_AND), LABEL(DOLVM_OP_ASHR32I_AND),
+        LABEL(DOLVM_OP_HLE),
     };
 #if defined(DOLVM_PROFILE) || defined(DOLVM_SAMPLE)
     if (!g_dolvm_op_handlers[DOLVM_OP_NOP])
@@ -1876,6 +1898,129 @@ dispatch:
         ppc_memory_fence();
         NEXT();
 
+    // A recognised SDK routine, executed natively. Declining -- the runtime
+    // switch off, a mode a helper does not model -- is always correct: the
+    // interpreted body follows this op, so NEXT() runs the routine the slow
+    // way. Handling means reproducing the routine's entire architectural
+    // effect (result registers, CR, CTR, the charge) and then continuing
+    // where the routine would have: through its final blr, resolved exactly
+    // as INDIRECT resolves one, or through the `sc` it ends in.
+    //
+    // The whole family so far is the SDK's cache-range loops: one cache-block
+    // op per 32 bytes between the registers' start and length, which
+    // interpreted costs a dispatch, a loop back edge and -- for the ops the
+    // chassis services -- a full homes flush and refill per line. Star Fox
+    // Assault retires thirty-two million of those lines in twelve billion
+    // guest cycles; Melee's heaviest scene, its THP video decoder, opens
+    // every frame with them.
+    OP(DOLVM_OP_HLE): {
+        u32 paid = (u32)dolvm_payload(ip);
+        ip++;
+        if (!g_dolvm_hle_enabled)
+            NEXT();
+        // id -> the era's alignment math, the cache op, and the ending.
+        // Kept in step with the matcher's patterns by the differential test.
+        static const struct {
+            u8 cache_op;   // PPC_CACHE_*
+            u8 tail;       // 0 = sc, 1 = blr, 2 = sync; isync; blr
+            u8 old_math;   // the record-form clrlwi generation
+        } k_hle[DOLVM_HLE_COUNT] = {
+            [DOLVM_HLE_DC_FLUSH_RANGE] = {PPC_CACHE_DCBF, 0, 0},
+            [DOLVM_HLE_DC_INVALIDATE_RANGE] = {PPC_CACHE_DCBI, 1, 0},
+            [DOLVM_HLE_DC_STORE_RANGE] = {PPC_CACHE_DCBST, 0, 0},
+            [DOLVM_HLE_DC_FLUSH_RANGE_NO_SYNC] = {PPC_CACHE_DCBF, 1, 0},
+            [DOLVM_HLE_DC_STORE_RANGE_NO_SYNC] = {PPC_CACHE_DCBST, 1, 0},
+            [DOLVM_HLE_IC_INVALIDATE_RANGE] = {PPC_CACHE_ICBI, 2, 0},
+            [DOLVM_HLE_DC_FLUSH_RANGE_OLD] = {PPC_CACHE_DCBF, 0, 1},
+            [DOLVM_HLE_DC_INVALIDATE_RANGE_OLD] = {PPC_CACHE_DCBI, 1, 1},
+            [DOLVM_HLE_DC_STORE_RANGE_OLD] = {PPC_CACHE_DCBST, 0, 1},
+            [DOLVM_HLE_DC_FLUSH_RANGE_NO_SYNC_OLD] = {PPC_CACHE_DCBF, 1, 1},
+            [DOLVM_HLE_IC_INVALIDATE_RANGE_OLD] = {PPC_CACHE_ICBI, 2, 1},
+        };
+        u32 hle_pc = inst->imm;
+        u8 cache_op = k_hle[inst->a].cache_op;
+        u8 tail = k_hle[inst->a].tail;
+        u8 old_math = k_hle[inst->a].old_math;
+        // dcbi is privileged; from user mode the loop's first dcbi would
+        // raise mid-routine, so that rarity declines to the body.
+        if (cache_op == PPC_CACHE_DCBI && (ctx->msr & DOLVM_MSR_PR))
+            NEXT();
+        u32 start = (u32)regs[DOLVM_HOME_GPR(3)].u;
+        u32 length = (u32)regs[DOLVM_HOME_GPR(4)].u;
+        u32 so = dolvm_summary_overflow(regs);
+        u32 charge = 0;
+        if (length) {
+            u32 head = start & 31u;
+            // The newer SDK counts the blocks the range actually touches; the
+            // older adds a whole block whenever the start is misaligned (one
+            // extra instruction, and one more block than needed when the
+            // misalignment and the length share a block).
+            u32 lines = old_math ? ((length + (head ? 32u : 0u)) + 31u) >> 5u
+                                 : (length + head + 31u) >> 5u;
+            // The last CR0 write on this path: the older generation's
+            // record-form clrlwi (its result is the misalignment), the
+            // newer's opening cmplwi (its result is length > 0).
+            u32 cr0 = (old_math ? dolvm_cr_bits(head, 0, true)
+                                : dolvm_cr_bits(length, 0, false)) |
+                      so;
+            ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (cr0 << 28);
+            u32 line_pc = hle_pc + (old_math ? 0x20u : 0x1Cu);
+            DOLVM_HOMES_OUT();
+            // The loop hands the hook r3 as it stands -- unaligned start and
+            // all -- so the helper hands it the same values.
+            u32 ea = start;
+            for (u32 i = 0; i < lines; i++, ea += 32u)
+                ppc_cache_control(ctx, cache_op, ea, line_pc);
+            if (tail == 2)
+                ppc_memory_fence();
+            DOLVM_HOMES_IN();
+            regs[DOLVM_HOME_GPR(3)].u = start + lines * 32u;
+            regs[DOLVM_HOME_GPR(4)].u = lines;
+            regs[DOLVM_HOME_GPR(5)].u = head;
+            regs[DOLVM_HOME_CTR].u = 0;
+            // What the interpreted path would have charged: the prologue less
+            // what the block's own CHARGE already took, two per line for the
+            // loop, and the ending -- `sc` at 2, blr at 1, sync-isync-blr
+            // at 5.
+            u32 model = 8u + (old_math && head ? 1u : 0u) + 2u * lines +
+                        (tail == 0 ? 2u : tail == 1 ? 1u : 5u);
+            charge = model > paid ? model - paid : 0u;
+        } else {
+            // The early return: only the entry block runs, and its charge is
+            // already paid. CR0 holds the opening compare.
+            ctx->cr = (ctx->cr & 0x0FFFFFFFu) |
+                      ((dolvm_cr_bits(length, 0, false) | so) << 28);
+        }
+        ctx->downcount -= (s64)charge;
+        if (length && tail == 0) {
+            // The routine ends in `sc` -- the SDK's fast sync, whose vector
+            // runs `sync; rfi`. Raise it exactly where the guest would, and
+            // leave for the chassis to deliver it.
+            u32 sc_pc = hle_pc + (old_math ? 0x2Cu : 0x28u);
+            ctx->pc = sc_pc;
+            ppc_system_call_exception(ctx, sc_pc);
+            goto leave;
+        }
+        // The routine ends in blr: continue at LR the way INDIRECT does.
+        u32 target = (u32)regs[DOLVM_HOME_LR].u & ~3u;
+        const DolVMEntryPoint* landing = dolvm_resolve_indirect(
+            module, gate, (u32)inst->b | (u32)inst->c << 8, target);
+        if (!landing || DOLVM_OVER_BUDGET() || ++steps >= step_budget ||
+            (gate && dolvm_pending(gate, ctx))) {
+            ctx->pc = target;
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_indirect;
+#endif
+            goto leave;
+        }
+#ifdef DOLVM_PROFILE
+        ++g_dolvm_leave_resolved;
+#endif
+        ip = code + (landing->entry & DOLVM_ENTRY_OFFSET_MASK);
+        pc_base = landing->pc_base;
+        NEXT();
+    }
+
     OP(DOLVM_OP_SET_CR_FIELD): {
         // Exactly the builder's expansion: less-than, greater-than and equal
         // are mutually exclusive, and XER's summary-overflow bit rides along
@@ -2213,6 +2358,30 @@ void dolvm_profile_report(FILE* out) {
         fprintf(out, "  0x%08X  %14llu\n", g_dolvm_mmio_waddr[best],
                 (unsigned long long)g_dolvm_mmio_wcount[best]);
         g_dolvm_mmio_wcount[best] = 0;
+    }
+    fprintf(out, "dolvm hottest guest loops by attributed ops:\n");
+    {
+        u64 attributed = 0;
+        for (u32 i = 0; i < DOLVM_PROFILE_BLOCK_SITES; i++)
+            attributed += g_dolvm_block_ops[i];
+        for (u32 round = 0; round < 32u; round++) {
+            u32 best = DOLVM_PROFILE_BLOCK_SITES;
+            for (u32 i = 0; i < DOLVM_PROFILE_BLOCK_SITES; i++)
+                if (g_dolvm_block_ops[i] &&
+                    (best == DOLVM_PROFILE_BLOCK_SITES ||
+                     g_dolvm_block_ops[i] > g_dolvm_block_ops[best]))
+                    best = i;
+            if (best == DOLVM_PROFILE_BLOCK_SITES)
+                break;
+            fprintf(out, "  0x%08X  %6.2f%%  %14llu ops  %10llu entries\n",
+                    g_dolvm_block_pc[best],
+                    attributed ? 100.0 * (double)g_dolvm_block_ops[best] /
+                                     (double)attributed
+                               : 0.0,
+                    (unsigned long long)g_dolvm_block_ops[best],
+                    (unsigned long long)g_dolvm_block_count[best]);
+            g_dolvm_block_ops[best] = 0;
+        }
     }
     fprintf(out, "dolvm hottest guest blocks (%llu block entries, %llu dropped):\n",
             (unsigned long long)g_dolvm_block_total,

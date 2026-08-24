@@ -24,6 +24,8 @@
 void func_80100000(CPUState* ctx);
 void func_80101000(CPUState* ctx);
 void func_80102000(CPUState* ctx);
+void func_80103000(CPUState* ctx);
+void func_80104000(CPUState* ctx);
 
 typedef void (*NativeKernel)(CPUState*);
 
@@ -66,7 +68,8 @@ int main(int argc, char** argv) {
     DolVMBenchKernel kernels[DOLVM_BENCH_KERNEL_COUNT];
     dolvm_bench_kernels(kernels);
     const NativeKernel native[DOLVM_BENCH_KERNEL_COUNT] = {
-        func_80100000, func_80101000, func_80102000};
+        func_80100000, func_80101000, func_80102000, func_80103000,
+        func_80104000};
 
     DolIRModule ir;
     dolir_module_init(&ir);

@@ -114,6 +114,7 @@ endif()
 add_library(dr_vm_backend STATIC
     src/backend/vm/dolvm_opt.c
     src/backend/vm/dolvm_emit.c
+    src/backend/vm/dolvm_hle_match.c
     src/backend/vm/dolvm_pipeline.c
 )
 target_include_directories(dr_vm_backend PUBLIC ${DOLRECOMP_SRC})

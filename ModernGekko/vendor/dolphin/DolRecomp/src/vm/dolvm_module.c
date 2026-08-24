@@ -43,6 +43,7 @@ static const u8 g_word_counts[DOLVM_OP_COUNT] = {
     [DOLVM_OP_CMP_JMP_IF_CR] = 2,
     [DOLVM_OP_CMP_JMP_IF_CR_CHARGE] = 2,
     [DOLVM_OP_CMP_JMP_IF_CR_GUARD] = 3,
+    [DOLVM_OP_HLE] = 2,
 };
 
 u32 dolvm_op_words(u32 op) {
@@ -193,6 +194,7 @@ static const char* const g_op_names[DOLVM_OP_COUNT] = {
     [DOLVM_OP_SHL32I_AND] = "shl32i.and",
     [DOLVM_OP_LSHR32I_AND] = "lshr32i.and",
     [DOLVM_OP_ASHR32I_AND] = "ashr32i.and",
+    [DOLVM_OP_HLE] = "hle",
 };
 
 const char* dolvm_op_name(u32 op) {
@@ -292,6 +294,14 @@ static bool verify_code(const DolVMModule* module, char* error, size_t size) {
             ((u32)inst->a | (u32)inst->b << 8) >= module->region_count)
             return fail(error, size, "dolvm: call names region %u of %u",
                         (u32)inst->a | (u32)inst->b << 8, module->region_count);
+        if (inst->op == DOLVM_OP_HLE &&
+            (inst->a == DOLVM_HLE_NONE || inst->a >= DOLVM_HLE_COUNT))
+            return fail(error, size, "dolvm: unknown hle helper %u at %u",
+                        inst->a, index);
+        if (inst->op == DOLVM_OP_HLE &&
+            ((u32)inst->b | (u32)inst->c << 8) >= module->region_count)
+            return fail(error, size, "dolvm: hle names region %u of %u",
+                        (u32)inst->b | (u32)inst->c << 8, module->region_count);
         if ((inst->op == DOLVM_OP_JMP_IF_CR ||
              inst->op == DOLVM_OP_JMP_IF_CR_CHARGE ||
              inst->op == DOLVM_OP_JMP_IF_CR_GUARD) && inst->a >= 32u)

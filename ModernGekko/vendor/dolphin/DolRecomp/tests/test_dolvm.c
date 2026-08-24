@@ -38,12 +38,24 @@ static void fallback(CPUState* cpu, u32 raw, u32 cia) {
     cpu->pc = cia + 4u;
 }
 
+#define CACHE_LOG_MAX 4096u
+static u32 cache_log_count;
+static u8 cache_log_op[CACHE_LOG_MAX];
+static u32 cache_log_ea[CACHE_LOG_MAX];
+static u32 cache_log_cia[CACHE_LOG_MAX];
+
 static void cache_control(CPUState* cpu, u8 operation, u32 ea, u32 cia) {
     (void)cpu;
     cache_count++;
     cache_operation = operation;
     cache_address = ea;
     cache_cia = cia;
+    if (cache_log_count < CACHE_LOG_MAX) {
+        cache_log_op[cache_log_count] = operation;
+        cache_log_ea[cache_log_count] = ea;
+        cache_log_cia[cache_log_count] = cia;
+    }
+    cache_log_count++;
 }
 
 static void external_write32(CPUState* cpu, u32 ea, u32 value, u8 rid) {
@@ -920,6 +932,221 @@ static int test_idle_loops(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// The HLE stand-ins against the interpreted bodies they replace
+// ---------------------------------------------------------------------------
+
+extern int g_dolvm_hle_enabled;
+
+#include "backend/vm/dolvm_hle_match.h"
+
+// The SDK's cache-range family, both generations, as the matcher's patterns
+// expect them. Written out here independently so a pattern edit that changes
+// what these words match fails this test instead of silently changing what a
+// shipped module accelerates.
+#define HLE_PROLOGUE_NEW                                                      \
+    0x28040000u, 0x4C810020u, 0x546506FEu, 0x7C842A14u, 0x3884001Fu,          \
+        0x5484D97Eu, 0x7C8903A6u
+#define HLE_PROLOGUE_OLD                                                      \
+    0x28040000u, 0x4C810020u, 0x546506FFu, 0x41820008u, 0x38840020u,          \
+        0x3884001Fu, 0x5484D97Eu, 0x7C8903A6u
+
+typedef struct {
+    const char* name;
+    u8 id;
+    u32 words[16];
+    u32 count;
+} HleCase;
+
+static const HleCase k_hle_cases[] = {
+    {"DCFlushRange", DOLVM_HLE_DC_FLUSH_RANGE,
+     {HLE_PROLOGUE_NEW, 0x7C0018ACu, 0x38630020u, 0x4200FFF8u, 0x44000002u,
+      0x4E800020u}, 12},
+    {"DCInvalidateRange", DOLVM_HLE_DC_INVALIDATE_RANGE,
+     {HLE_PROLOGUE_NEW, 0x7C001BACu, 0x38630020u, 0x4200FFF8u, 0x4E800020u},
+     11},
+    {"DCStoreRangeNoSync", DOLVM_HLE_DC_STORE_RANGE_NO_SYNC,
+     {HLE_PROLOGUE_NEW, 0x7C00186Cu, 0x38630020u, 0x4200FFF8u, 0x4E800020u},
+     11},
+    {"ICInvalidateRange", DOLVM_HLE_IC_INVALIDATE_RANGE,
+     {HLE_PROLOGUE_NEW, 0x7C001FACu, 0x38630020u, 0x4200FFF8u, 0x7C0004ACu,
+      0x4C00012Cu, 0x4E800020u}, 13},
+    {"DCFlushRange(old)", DOLVM_HLE_DC_FLUSH_RANGE_OLD,
+     {HLE_PROLOGUE_OLD, 0x7C0018ACu, 0x38630020u, 0x4200FFF8u, 0x44000002u,
+      0x4E800020u}, 13},
+    {"DCInvalidateRange(old)", DOLVM_HLE_DC_INVALIDATE_RANGE_OLD,
+     {HLE_PROLOGUE_OLD, 0x7C001BACu, 0x38630020u, 0x4200FFF8u, 0x4E800020u},
+     12},
+    {"DCStoreRange(old)", DOLVM_HLE_DC_STORE_RANGE_OLD,
+     {HLE_PROLOGUE_OLD, 0x7C00186Cu, 0x38630020u, 0x4200FFF8u, 0x44000002u,
+      0x4E800020u}, 13},
+    {"ICInvalidateRange(old)", DOLVM_HLE_IC_INVALIDATE_RANGE_OLD,
+     {HLE_PROLOGUE_OLD, 0x7C001FACu, 0x38630020u, 0x4200FFF8u, 0x7C0004ACu,
+      0x4C00012Cu, 0x4E800020u}, 14},
+};
+
+#define HLE_CASES (sizeof(k_hle_cases) / sizeof(k_hle_cases[0]))
+
+typedef struct {
+    CPUState cpu;
+    s64 downcount;
+    u32 log_count;
+    u8 log_op[CACHE_LOG_MAX];
+    u32 log_ea[CACHE_LOG_MAX];
+    u32 log_cia[CACHE_LOG_MAX];
+} HleOutcome;
+
+static void hle_run(const LoadedModule* loaded, u32 address, u32 start,
+                    u32 length, u32 msr, u32 xer, int enabled,
+                    HleOutcome* out) {
+    g_dolvm_hle_enabled = enabled;
+    cpu_init(&out->cpu);
+    out->cpu.cache_control = cache_control;
+    out->cpu.gpr[3] = start;
+    out->cpu.gpr[4] = length;
+    out->cpu.gpr[5] = 0xAAAAAAAAu;
+    out->cpu.ctr = 0x55555555u;
+    out->cpu.cr = 0xDEADBEEFu;
+    out->cpu.msr = msr;
+    out->cpu.xer = xer;
+    out->cpu.downcount = 1 << 30;
+    prepare_call(&out->cpu, address);
+    cache_log_count = 0;
+    dolvm_dispatch(&loaded->module, &out->cpu, address);
+    out->downcount = out->cpu.downcount;
+    out->log_count = cache_log_count;
+    memcpy(out->log_op, cache_log_op, sizeof(cache_log_op));
+    memcpy(out->log_ea, cache_log_ea, sizeof(cache_log_ea));
+    memcpy(out->log_cia, cache_log_cia, sizeof(cache_log_cia));
+    g_dolvm_hle_enabled = 1;
+}
+
+static int hle_compare(const char* name, u32 start, u32 length,
+                       const HleOutcome* interpreted,
+                       const HleOutcome* helper) {
+    int bad = 0;
+    for (u32 r = 0; r < 32; r++)
+        bad |= interpreted->cpu.gpr[r] != helper->cpu.gpr[r];
+    bad |= interpreted->cpu.lr != helper->cpu.lr;
+    bad |= interpreted->cpu.ctr != helper->cpu.ctr;
+    bad |= interpreted->cpu.cr != helper->cpu.cr;
+    bad |= interpreted->cpu.xer != helper->cpu.xer;
+    bad |= interpreted->cpu.pc != helper->cpu.pc;
+    bad |= interpreted->cpu.msr != helper->cpu.msr;
+    bad |= interpreted->cpu.srr0 != helper->cpu.srr0;
+    bad |= interpreted->cpu.srr1 != helper->cpu.srr1;
+    bad |= interpreted->cpu.exception != helper->cpu.exception;
+    bad |= interpreted->downcount != helper->downcount;
+    bad |= interpreted->log_count != helper->log_count;
+    if (!bad && interpreted->log_count <= CACHE_LOG_MAX)
+        for (u32 i = 0; i < interpreted->log_count; i++)
+            bad |= interpreted->log_op[i] != helper->log_op[i] ||
+                   interpreted->log_ea[i] != helper->log_ea[i] ||
+                   interpreted->log_cia[i] != helper->log_cia[i];
+    if (bad) {
+        fprintf(stderr,
+                "hle: %s(0x%08X, 0x%X) diverges:\n"
+                "  interpreted r3=%08X r4=%08X r5=%08X ctr=%08X cr=%08X "
+                "pc=%08X exc=%u down=%lld calls=%u\n"
+                "  helper      r3=%08X r4=%08X r5=%08X ctr=%08X cr=%08X "
+                "pc=%08X exc=%u down=%lld calls=%u\n",
+                name, start, length, interpreted->cpu.gpr[3],
+                interpreted->cpu.gpr[4], interpreted->cpu.gpr[5],
+                interpreted->cpu.ctr, interpreted->cpu.cr,
+                interpreted->cpu.pc, interpreted->cpu.exception,
+                (long long)interpreted->downcount, interpreted->log_count,
+                helper->cpu.gpr[3], helper->cpu.gpr[4], helper->cpu.gpr[5],
+                helper->cpu.ctr, helper->cpu.cr, helper->cpu.pc,
+                helper->cpu.exception, (long long)helper->downcount,
+                helper->log_count);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_hle(void) {
+    static HleOutcome interpreted, helper;
+    for (u32 c = 0; c < HLE_CASES; c++) {
+        const HleCase* hle_case = &k_hle_cases[c];
+        u32 address = 0x80005000u;
+
+        // The matcher must prove exactly this routine from these words.
+        u8 bytes[16 * 4];
+        for (u32 i = 0; i < hle_case->count; i++) {
+            bytes[i * 4 + 0] = (u8)(hle_case->words[i] >> 24);
+            bytes[i * 4 + 1] = (u8)(hle_case->words[i] >> 16);
+            bytes[i * 4 + 2] = (u8)(hle_case->words[i] >> 8);
+            bytes[i * 4 + 3] = (u8)(hle_case->words[i]);
+        }
+        LoadedCodeSection section;
+        memset(&section, 0, sizeof(section));
+        section.data = bytes;
+        section.address = address;
+        section.size = hle_case->count * 4u;
+        DolVMHleSite* sites = NULL;
+        u32 site_count = dolvm_hle_match_sections(&section, 1, &sites);
+        CHECK(site_count == 1);
+        CHECK(sites[0].pc == address);
+        CHECK(sites[0].id == hle_case->id);
+
+        DolIRModule ir;
+        dolir_module_init(&ir);
+        CHECK(add_chunk(&ir, hle_case->words, hle_case->count, address));
+        LoadedModule loaded;
+        DolVMOptStats stats;
+        void* image = NULL;
+        size_t size = 0;
+        DolVMEmitOptions options;
+        memset(&options, 0, sizeof(options));
+        memset(&stats, 0, sizeof(stats));
+        options.home_state = true;
+        options.hle_sites = sites;
+        options.hle_count = site_count;
+        CHECK(dolvm_build_module(&ir, &options, &image, &size, &stats,
+                                 stderr));
+        dolir_module_free(&ir);
+        char error[256] = "";
+        CHECK(dolvm_module_open(&loaded.module, image, size, error,
+                                sizeof(error)));
+        loaded.image = image;
+        free(sites);
+
+        static const struct {
+            u32 start;
+            u32 length;
+        } spans[] = {
+            {0x80100000u, 0u},        {0x80100000u, 0x100u},
+            {0x80100007u, 0x100u},    {0x8010001Fu, 1u},
+            {0x80100010u, 0x20u},     {0x80100001u, 0x1Fu},
+            {0x9FFFFFE0u, 0x40u},
+        };
+        for (u32 v = 0; v < sizeof(spans) / sizeof(spans[0]); v++) {
+            for (u32 so = 0; so < 2; so++) {
+                u32 xer = so ? 0x80000000u : 0u;
+                hle_run(&loaded, address, spans[v].start, spans[v].length,
+                        1u << 13, xer, 0, &interpreted);
+                hle_run(&loaded, address, spans[v].start, spans[v].length,
+                        1u << 13, xer, 1, &helper);
+                if (hle_compare(hle_case->name, spans[v].start,
+                                spans[v].length, &interpreted, &helper))
+                    return 1;
+            }
+        }
+        // dcbi from user mode raises; the helper declines and the body's own
+        // supervisor path must be what runs, identically.
+        hle_run(&loaded, address, 0x80100000u, 0x40u, (1u << 13) | (1u << 14),
+                0, 0, &interpreted);
+        hle_run(&loaded, address, 0x80100000u, 0x40u, (1u << 13) | (1u << 14),
+                0, 1, &helper);
+        if (hle_compare(hle_case->name, 0x80100000u, 0x40u, &interpreted,
+                        &helper))
+            return 1;
+        unload(&loaded);
+    }
+    printf("dolvm: hle stand-ins match their interpreted bodies\n");
+    return 0;
+}
+
 int main(void) {
     if (test_programs())
         return 1;
@@ -932,6 +1159,8 @@ int main(void) {
     if (test_gated_indirect())
         return 1;
     if (test_idle_loops())
+        return 1;
+    if (test_hle())
         return 1;
     printf("dolvm: all checks passed\n");
     return 0;
