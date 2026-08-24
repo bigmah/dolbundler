@@ -1147,6 +1147,182 @@ static int test_hle(void) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// The native stand-ins against the interpreted bodies the C backend replaced
+// ---------------------------------------------------------------------------
+
+// A deterministic generator, so a failing seed is a repeatable bug report.
+static u64 hle_native_rng_state;
+static u32 hle_native_rng(void) {
+    hle_native_rng_state = hle_native_rng_state * 6364136223846793005ull +
+                           1442695040888963407ull;
+    return (u32)(hle_native_rng_state >> 33);
+}
+
+// Run the module from `address` to completion: a dispatch returns whenever a
+// budget runs out or an edge cannot be resolved, and the two arms chunk the
+// run differently -- the interpreter at its fixed budget, the generated code
+// at its own -- so the comparison has to be of the finished state, not of any
+// single dispatch.
+static u32 hle_native_run(const LoadedModule* loaded, CPUState* cpu,
+                          u32 address) {
+    cpu->pc = address;
+    u32 dispatches = 0;
+    while (cpu->pc != 0x81234560u && !cpu->exception &&
+           dispatches < 200000u) {
+        dispatches++;
+        if (!dolvm_dispatch(&loaded->module, cpu, cpu->pc))
+            break;
+    }
+    return dispatches;
+}
+
+static int test_hle_native(void) {
+    u32 word_count = 0;
+    u32 base = 0;
+    const u32* words =
+        dolvm_hle_native_words(DOLVM_HLE_THP_DECODE_GALE, &word_count, &base);
+    CHECK(words && word_count && base);
+    CHECK(g_dolvm_hle_native[DOLVM_HLE_THP_DECODE_GALE] != NULL);
+
+    // The matcher must prove the routine from its own words at its own base.
+    u8* bytes = (u8*)malloc((size_t)word_count * 4u);
+    CHECK(bytes);
+    for (u32 i = 0; i < word_count; i++) {
+        bytes[i * 4 + 0] = (u8)(words[i] >> 24);
+        bytes[i * 4 + 1] = (u8)(words[i] >> 16);
+        bytes[i * 4 + 2] = (u8)(words[i] >> 8);
+        bytes[i * 4 + 3] = (u8)(words[i]);
+    }
+    LoadedCodeSection section;
+    memset(&section, 0, sizeof(section));
+    section.data = bytes;
+    section.address = base;
+    section.size = word_count * 4u;
+    DolVMHleSite* sites = NULL;
+    u32 site_count = dolvm_hle_match_sections(&section, 1, &sites);
+    CHECK(site_count == 7);
+    CHECK(sites[0].pc == base && sites[0].id == DOLVM_HLE_THP_DECODE_GALE);
+
+    DolIRModule ir;
+    dolir_module_init(&ir);
+    CHECK(add_chunk(&ir, words, word_count, base));
+    LoadedModule loaded;
+    DolVMOptStats stats;
+    void* image = NULL;
+    size_t size = 0;
+    DolVMEmitOptions options;
+    memset(&options, 0, sizeof(options));
+    memset(&stats, 0, sizeof(stats));
+    options.home_state = true;
+    options.hle_sites = sites;
+    options.hle_count = site_count;
+    CHECK(dolvm_build_module(&ir, &options, &image, &size, &stats, stderr));
+    dolir_module_free(&ir);
+    char error[256] = "";
+    CHECK(dolvm_module_open(&loaded.module, image, size, error, sizeof(error)));
+    loaded.image = image;
+    free(sites);
+    free(bytes);
+
+    static CPUState interpreted, native;
+    hle_native_rng_state = 0x00D01BADC0FFEEull;
+    for (u32 seed = 0; seed < 160u; seed++) {
+        for (int arm = 0; arm < 2; arm++) {
+            CPUState* cpu = arm ? &native : &interpreted;
+            g_dolvm_hle_enabled = arm;
+            u64 saved = hle_native_rng_state;
+            cpu_init(cpu);
+            // A bit-reader over guest RAM: a stream, a table area whose
+            // entries drive index math, an output block. Random bytes send
+            // it down a different path every seed, and a path that walks off
+            // into unmapped memory must fault identically either way.
+            for (u32 i = 0; i < 0x8000u; i += 4) {
+                u32 r = hle_native_rng();
+                cpu->ram[0x20000u + i] = (u8)(r >> 24);
+                cpu->ram[0x20000u + i + 1] = (u8)(r >> 16);
+                cpu->ram[0x20000u + i + 2] = (u8)(r >> 8);
+                cpu->ram[0x20000u + i + 3] = (u8)r;
+            }
+            // The reader struct: current word pointer, current word, bit
+            // position within it.
+            u32 stream = 0x80020000u + (hle_native_rng() & 0xFFCu);
+            cpu->ram[0x10000] = 0x80;
+            cpu->ram[0x10001] = (u8)(stream >> 16);
+            cpu->ram[0x10002] = (u8)(stream >> 8);
+            cpu->ram[0x10003] = (u8)stream;
+            u32 word = hle_native_rng();
+            cpu->ram[0x10004] = (u8)(word >> 24);
+            cpu->ram[0x10005] = (u8)(word >> 16);
+            cpu->ram[0x10006] = (u8)(word >> 8);
+            cpu->ram[0x10007] = (u8)word;
+            u32 bits = hle_native_rng() % 40u;
+            cpu->ram[0x10008] = 0;
+            cpu->ram[0x10009] = 0;
+            cpu->ram[0x1000A] = 0;
+            cpu->ram[0x1000B] = (u8)bits;
+            // The global the routine reads through r13's small-data area: a
+            // pointer to the table region the stream indexes into.
+            u32 r13 = 0x80050000u;
+            u32 global_at = (r13 - 17824u) - 0x80000000u;
+            cpu->ram[global_at] = 0x80;
+            cpu->ram[global_at + 1] = 0x02;
+            cpu->ram[global_at + 2] = 0x40;
+            cpu->ram[global_at + 3] = 0x00;
+            cpu->gpr[13] = r13;
+            cpu->gpr[3] = 0x80010000u;
+            cpu->gpr[4] = 0x80060000u + (hle_native_rng() & 0x7E0u);
+            for (u32 r = 5; r < 13; r++)
+                cpu->gpr[r] = hle_native_rng();
+            cpu->lr = 0x81234560u;
+            cpu->ctr = hle_native_rng();
+            cpu->cr = hle_native_rng();
+            cpu->xer = hle_native_rng() & 0xE000007Fu;
+            cpu->msr = 1u << 13;
+            cpu->downcount = 0;
+            hle_native_run(&loaded, cpu, base);
+            if (!arm)
+                hle_native_rng_state = saved;
+        }
+        g_dolvm_hle_enabled = 1;
+        int bad = 0;
+        for (u32 r = 0; r < 32; r++)
+            bad |= interpreted.gpr[r] != native.gpr[r];
+        bad |= interpreted.lr != native.lr || interpreted.ctr != native.ctr;
+        bad |= interpreted.cr != native.cr || interpreted.xer != native.xer;
+        bad |= interpreted.pc != native.pc;
+        bad |= interpreted.srr0 != native.srr0;
+        bad |= interpreted.srr1 != native.srr1;
+        bad |= interpreted.exception != native.exception;
+        // The two backends do not charge identically: the interpreter's
+        // merged superblocks pay their whole cost even when a side exit
+        // leaves early, where the generated code charges the path it took.
+        // The C backend is the reference, so the bound only has to keep the
+        // interpreter's known overcharge small, not zero.
+        s64 drift = interpreted.downcount - native.downcount;
+        if (drift < 0)
+            drift = -drift;
+        s64 run = native.downcount < 0 ? -native.downcount : native.downcount;
+        bad |= drift > run / 8 + 64;
+        bad |= memcmp(interpreted.ram, native.ram, interpreted.ram_size) != 0;
+        if (bad) {
+            fprintf(stderr,
+                    "hle native: seed %u diverges: interpreted pc=%08X "
+                    "r3=%08X r5=%08X cr=%08X exc=%u down=%lld / native "
+                    "pc=%08X r3=%08X r5=%08X cr=%08X exc=%u down=%lld\n",
+                    seed, interpreted.pc, interpreted.gpr[3],
+                    interpreted.gpr[5], interpreted.cr, interpreted.exception,
+                    (long long)interpreted.downcount, native.pc,
+                    native.gpr[3], native.gpr[5], native.cr, native.exception,
+                    (long long)native.downcount);
+            return 1;
+        }
+    }
+    unload(&loaded);
+    printf("dolvm: native stand-ins match their interpreted bodies\n");
+    return 0;
+}
+
 int main(void) {
     if (test_programs())
         return 1;
@@ -1161,6 +1337,8 @@ int main(void) {
     if (test_idle_loops())
         return 1;
     if (test_hle())
+        return 1;
+    if (test_hle_native())
         return 1;
     printf("dolvm: all checks passed\n");
     return 0;

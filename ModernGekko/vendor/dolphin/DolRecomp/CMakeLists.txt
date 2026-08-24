@@ -99,6 +99,7 @@ target_link_libraries(dr_ir PUBLIC dr_frontend)
 add_library(dr_vm STATIC
     src/vm/dolvm_module.c
     src/vm/dolvm_interp.c
+    src/vm/dolvm_hle_native.c
 )
 target_include_directories(dr_vm PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_vm PUBLIC dr_cpu)
@@ -208,6 +209,10 @@ target_link_libraries(dolvm_dis PRIVATE dr_vm)
 # The interpreter measured against the C backend on identical guest programs.
 # The native arm is generated at build time by the C emitter and compiled by the
 # host compiler, so both arms really are the same instructions.
+add_executable(dolvm_hle_gen tools/dolvm_hle_gen.c)
+target_include_directories(dolvm_hle_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dolvm_hle_gen PRIVATE dr_backend dr_frontend)
+
 add_executable(dolvm_bench_gen tools/dolvm_bench_gen.c)
 target_include_directories(dolvm_bench_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dolvm_bench_gen PRIVATE dr_backend dr_frontend)
@@ -350,6 +355,7 @@ add_executable(test_dolvm_switch
     tests/test_dolvm.c
     src/vm/dolvm_interp.c
     src/vm/dolvm_module.c
+    src/vm/dolvm_hle_native.c
 )
 target_compile_definitions(test_dolvm_switch PRIVATE DOLVM_FORCE_SWITCH=1)
 target_link_libraries(test_dolvm_switch PRIVATE dr_vm_backend dr_ir dr_cpu)

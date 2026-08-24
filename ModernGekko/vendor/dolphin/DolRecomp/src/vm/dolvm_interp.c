@@ -1938,6 +1938,44 @@ dispatch:
             [DOLVM_HLE_IC_INVALIDATE_RANGE_OLD] = {PPC_CACHE_ICBI, 2, 1},
         };
         u32 hle_pc = inst->imm;
+        if (inst->a >= DOLVM_HLE_NATIVE_FIRST) {
+            // A whole SDK routine the C backend compiled at build time. The
+            // generated function is the reference backend's own output: it
+            // reads and writes CPUState, charges ctx->downcount per block
+            // exactly as this interpreter would, handles its own faults, and
+            // leaves ctx->pc at wherever the guest goes next -- the caller's
+            // return address when it completes, its own interior when its
+            // loop budget ran out first, in which case the entry map resumes
+            // the rest of the invocation interpreted.
+            void (*native)(struct CPUState*) = g_dolvm_hle_native[inst->a];
+            if (!native)
+                NEXT();
+            // The block's CHARGE in front of this op already took the entry
+            // cost, and the native code charges its whole path itself.
+            ctx->downcount += (s64)paid;
+            ctx->pc = hle_pc;
+            DOLVM_HOMES_OUT();
+            native(ctx);
+            DOLVM_HOMES_IN();
+            if (ctx->exception)
+                goto leave;
+            u32 native_target = ctx->pc;
+            const DolVMEntryPoint* native_landing = dolvm_resolve_indirect(
+                module, gate, (u32)inst->b | (u32)inst->c << 8, native_target);
+            if (!native_landing || DOLVM_OVER_BUDGET() ||
+                ++steps >= step_budget || (gate && dolvm_pending(gate, ctx))) {
+#ifdef DOLVM_PROFILE
+                ++g_dolvm_leave_indirect;
+#endif
+                goto leave;
+            }
+#ifdef DOLVM_PROFILE
+            ++g_dolvm_leave_resolved;
+#endif
+            ip = code + (native_landing->entry & DOLVM_ENTRY_OFFSET_MASK);
+            pc_base = native_landing->pc_base;
+            NEXT();
+        }
         u8 cache_op = k_hle[inst->a].cache_op;
         u8 tail = k_hle[inst->a].tail;
         u8 old_math = k_hle[inst->a].old_math;

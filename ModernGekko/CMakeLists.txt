@@ -205,6 +205,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         src/runtime/dolvm/dolvm_bridge.c
         vendor/dolphin/DolRecomp/src/vm/dolvm_module.c
         vendor/dolphin/DolRecomp/src/vm/dolvm_interp.c
+        vendor/dolphin/DolRecomp/src/vm/dolvm_hle_native.c
         vendor/dolphin/GXRuntime/src/core/cpu.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter_table.c

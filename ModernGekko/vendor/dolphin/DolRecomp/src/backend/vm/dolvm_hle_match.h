@@ -28,6 +28,11 @@ u32 dolvm_hle_match_sections(const LoadedCodeSection* sections,
 // The name a site's id stands for, for build-time reporting.
 const char* dolvm_hle_name(u8 id);
 
+// The exact words and pinned link address of a native pattern, for the
+// differential test that runs the generated code against the interpreted
+// body. NULL when the id is not a native pattern.
+const u32* dolvm_hle_native_words(u8 id, u32* count, u32* base);
+
 #ifdef __cplusplus
 }
 #endif
