@@ -546,6 +546,15 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
             dolvm_sample_report();
 #endif
             fflush(stderr);
+            // Scratch: dump guest RAM at bench exit for offline inspection.
+            const char* dump = getenv("DOLVM_DUMP_RAM");
+            if (dump) {
+                FILE* f = fopen(dump, "wb");
+                if (f) {
+                    fwrite(ctx->ram, 1, ctx->ram_size, f);
+                    fclose(f);
+                }
+            }
             _exit(0);
         }
         return rc;
