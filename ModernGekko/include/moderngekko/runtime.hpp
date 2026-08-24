@@ -43,6 +43,7 @@ struct GraphicsSettings
 {
   std::string backend;
   std::optional<int> internal_resolution_scale;
+  std::optional<bool> gpu_texture_decoding;
 };
 
 struct AudioSettings

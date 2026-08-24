@@ -338,6 +338,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   if (impl->config.graphics.internal_resolution_scale)
     Config::SetBase(Config::GFX_EFB_SCALE,
                     *impl->config.graphics.internal_resolution_scale);
+  if (impl->config.graphics.gpu_texture_decoding)
+    Config::SetBase(Config::GFX_ENABLE_GPU_TEXTURE_DECODING,
+                    *impl->config.graphics.gpu_texture_decoding);
   Config::SetBase(Config::GFX_SHADER_CACHE, true);
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
                   ShaderCompilationMode::AsynchronousUberShaders);

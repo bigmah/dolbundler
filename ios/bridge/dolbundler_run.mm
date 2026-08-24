@@ -256,6 +256,10 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   config.user_directory = user_dir;
   config.module = moderngekko::ModuleSource::BytecodePath(module_path);
   config.graphics.backend = "Metal";
+  // Metal implements Dolphin's compute-shader texture decoder. Keep texture
+  // conversion off the emulation thread, where it competes directly with the
+  // bytecode VM in this single-core configuration.
+  config.graphics.gpu_texture_decoding = true;
   // AudioCommon's own default resolves to this on iOS too, but naming it means
   // a silent game is a wrong-backend bug rather than an unnoticed fallback.
   //
