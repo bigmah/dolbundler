@@ -611,6 +611,7 @@ add_library(core
   PowerPC/StaticRecomp/StaticRecompABI.h
   PowerPC/StaticRecomp/StaticRecompCore.cpp
   PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
+  PowerPC/StaticRecomp/StaticRecompCore_Vectors.cpp
   PowerPC/StaticRecomp/StaticRecompCore_Sync.cpp
   PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
   PowerPC/StaticRecomp/StaticRecompCore_Run.cpp

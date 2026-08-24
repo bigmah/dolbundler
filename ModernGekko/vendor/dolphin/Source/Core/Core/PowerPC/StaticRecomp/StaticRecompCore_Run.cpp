@@ -232,6 +232,11 @@ void StaticRecompCore::Run()
             m_host_call_passthrough = true;
           }
         }
+        // A guest exception lands here with pc at a low-RAM vector the module
+        // cannot cover. If the stub there proved out against the SDK template,
+        // run it whole instead of one interpreted step at a time.
+        if (m_module_active && m_vector_stubs_enabled && TryVectorStub(ppc))
+          continue;
         // SingleStepInner delivers synchronous exceptions itself; external
         // interrupts are delivered at slice start, as in Interpreter::Run.
         if (m_module_active && IsForcedFallbackAddress(ppc.pc))

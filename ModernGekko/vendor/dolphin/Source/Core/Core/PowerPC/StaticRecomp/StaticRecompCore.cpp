@@ -148,6 +148,9 @@ void StaticRecompCore::Init()
   g_static_recomp_core = this;
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
+  const char* vector_hle = std::getenv("DOLVM_VECTOR_HLE");
+  m_vector_stubs_enabled = !vector_hle || std::strcmp(vector_hle, "0") != 0;
+  ResetVectorStubs();
   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");
   std::istringstream fallback_ranges(fallback_override ? fallback_override :
                                                          Config::Get(Config::MAIN_STATICRECOMP_FALLBACK_RANGES));
@@ -217,11 +220,12 @@ void StaticRecompCore::Shutdown()
   g_static_recomp_core = nullptr;
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
-               "smc_failed=%u smc_lost=%lluB verifications=%llu reverify_events=%llu "
-               "bursts=%llu cycles=%llu\n",
+               "vector_hle=%llu smc_failed=%u smc_lost=%lluB verifications=%llu "
+               "reverify_events=%llu bursts=%llu cycles=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
-               (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
+               (unsigned long long)m_hook_fallback_instructions,
+               (unsigned long long)m_vector_stub_hits, m_failed_chunks,
                (unsigned long long)m_smc_lost_bytes, (unsigned long long)m_verifications,
                (unsigned long long)m_reverify_events, (unsigned long long)m_bursts,
                (unsigned long long)m_charged_cycles);
@@ -370,6 +374,9 @@ void StaticRecompCore::ClearCache()
 {
   if (m_fallback_jit)
     m_fallback_jit->ClearCache();
+
+  // Savestate loads land here, and a loaded state can hold different vectors.
+  ResetVectorStubs();
 
   if (!m_module)
     return;

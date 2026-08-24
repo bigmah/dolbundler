@@ -126,6 +126,13 @@ private:
   u32 TranslateRelAddress(u32 linked_address);
   void RefreshRelSections();
 
+  // OS exception-vector stand-ins: run a low-RAM stub whose every word proved
+  // out against the SDK template instead of single-stepping it. See
+  // StaticRecompCore_Vectors.cpp for the pattern and the argument.
+  bool TryVectorStub(PowerPC::PowerPCState& ppc);
+  void VerifyVectorStub(u32 slot);
+  void ResetVectorStubs();
+
   static void SetPPCStateFromGuestState(const CPUState& s, PowerPC::PowerPCState& ppc);
 
   // D1 state residency: registers live in m_guest while native code runs;
@@ -230,6 +237,33 @@ private:
   bool m_collect_dispatch_samples = false;
   bool m_has_rel_modules = false;
   u32 m_idle_pc = 0;
+
+  // Vector stand-in state, one slot per 0x100 of low RAM. Verification is
+  // cached until an icache invalidation over low RAM or a ClearCache (which
+  // savestate loads pass through) drops it.
+  enum VectorStubState : u8
+  {
+    VECTOR_STUB_UNKNOWN = 0,
+    VECTOR_STUB_VERIFIED = 1,
+    VECTOR_STUB_MISMATCH = 2,
+  };
+  struct VectorStubCharge
+  {
+    u32 cycles = 0;
+    u32 load_stores = 0;
+  };
+  struct VectorStubSlot
+  {
+    bool syscall = false;
+    u32 debugger_target = 0;
+    VectorStubCharge charge_taken;
+    VectorStubCharge charge_fallthrough;
+  };
+  u8 m_vector_stub_state[0x18] = {};
+  VectorStubSlot m_vector_stub_slots[0x18];
+  bool m_vector_stubs_enabled = true;
+  u64 m_vector_stub_hits = 0;
+  u64 m_vector_stub_verifies = 0;
 };
 
 extern StaticRecompCore* g_static_recomp_core;

@@ -357,6 +357,11 @@ void StaticRecompCore::OnICacheInvalidate(u32 address, u32 length)
     m_fallback_jit->GetBlockCache()->InvalidateICache(address, length, false);
   }
 
+  // The guest invalidating over low RAM is how new vector stubs arrive; the
+  // address may be physical or through the cached mirror.
+  if (length != 0 && (address & 0x3FFFFFFFu) < 0x1800u)
+    ResetVectorStubs();
+
   if (!m_module_active || length == 0)
     return;
   u32 linked_address = address;
