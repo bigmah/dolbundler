@@ -287,6 +287,7 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
              bool subtract, bool negative, f64* output) {
     f64 addend = subtract ? -b : b;
     f64 result;
+    f64 unrounded_result = 0.0;
 
     if (!single) {
         result = fma(a, c, addend);
@@ -304,6 +305,7 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
                 result = f64_value(bits);
             }
         }
+        unrounded_result = result;
         result = (f64)(f32)result;
     }
 
@@ -337,6 +339,13 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
 
     if (negative && !isnan(result))
         result = -result;
+    // Dolphin's scalar fmadds updates FI from the fused value before its
+    // single-precision rounding and always clears FR.  The other fused forms
+    // currently leave both bits alone, matching its interpreter semantics.
+    if (single && !subtract && !negative) {
+        cpu->fpscr = (cpu->fpscr & ~(FPSCR_FI_BIT | FPSCR_FR_BIT)) |
+                     ((unrounded_result != result) ? FPSCR_FI_BIT : 0u);
+    }
     set_fprf(cpu, single ? classify_f32((f32)result) : classify_f64(result));
     *output = result;
     return true;

@@ -159,6 +159,7 @@ private:
   u32 m_ls_repeat_pc = 0;
 
   u32 m_ls_entry = 0;
+  u64 m_ls_charged_cycles_start = 0;
   CPUState m_ls_snapshot{};
 
   struct LockstepJournalState

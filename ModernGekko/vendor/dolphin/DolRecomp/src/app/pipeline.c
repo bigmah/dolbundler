@@ -19,6 +19,7 @@
 #include "ir/dolir_builder.h"
 #include "backend/llvm/llvm_backend.h"
 #include "cpu/cpu.h"
+#include "core/native_state_layout.h"
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,23 +54,31 @@ static u32 c_chunk_instructions(void) {
 }
 
 #ifdef DOLRECOMP_ENABLE_LLVM
-// 128, measured. A chunk is one LLVM function, so this is the block count the
+// 64, measured. A chunk is one LLVM function, so this is the block count the
 // register allocator keeps the whole guest register file live across. Against
 // the previous 1024 default this is +57.9% throughput and -66% .text on Mario
-// Kart; 64 gains a further 1.4% but its range overlaps 128's, so it is not a
-// proven gain. See docs/LLVM-EXPERIMENTS.md E002-E004.
-#define DOLLLVM_DEFAULT_CHUNK_INSTRUCTIONS 128u
+// Kart. The small 1.4% gain there became decisive on GEXE52: with matched PGO,
+// 64 raised iOS Simulator throughput from 71.8% to 105.4-106.9%, while DolVM
+// measured 91.1% on the same saved-state workload.
+#define DOLLLVM_DEFAULT_CHUNK_INSTRUCTIONS 64u
 #define DOLLLVM_DEFAULT_WORKER_BATCH 4u
 // v6 carries the execution budget across generated function calls.
 // Any change that alters generated code must bump this, because
 // llvm_job_hash() omits the pass pipeline, opt level and LLVM version.
-// v7: ps1 preservation fix in dolir_builder (lfd and fmr/fneg/fabs/fnabs/fsel
-// no longer splat into the high paired-single slot). Default codegen changed,
-// so every cached object from v6 is stale.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v7"
+// v9 adds C-ABI extension attributes and the safe chassis gate at every
+// cross-chunk direct edge. v10 excludes LLVM intrinsics from those C-ABI
+// attributes; v9 objects containing ctlz were rejected by the verifier. v11
+// indexes that gate by address-sorted ABI chunk rather than DOL section order.
+// v12 makes native loop guards use the chassis's live timing/exception gate.
+// v13 charges direct cache-control instructions at Dolphin's table costs.
+#define DOLLLVM_CACHE_VERSION "dolllvm-v16"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
+
+#ifndef DOLRECOMP_REVISION
+#define DOLRECOMP_REVISION "unknown"
+#endif
 
 typedef struct {
     const PPCInst* insts;
@@ -96,12 +105,13 @@ typedef struct {
 //     1024   .text 1,012,522,870   speed 0.3288
 //      256   .text   450,227,766   speed 0.4404   +33.9%
 //      128   .text   345,215,974   speed 0.5192   +57.9%
+//       64                           speed 0.5265   +60.1%
 //
-// monotonic, with disjoint confidence ranges at every step, so 128 was the
-// binding constraint rather than the optimum. Smaller chunks do eventually
-// cost -- a call that leaves the chunk returns through the dispatcher instead
-// of branching -- so this is a curve with a minimum, not a free win. Sweep it
-// per title rather than assuming this one's answer.
+// GEXE52 is far more sensitive: 128 -> 64 raised a matched-PGO iOS Simulator
+// run from 71.8% to 105.4-106.9%. Smaller chunks do eventually cost -- a call
+// that leaves the chunk returns through the dispatcher instead of branching --
+// so this is a curve with a minimum, not a free win. Keep the environment
+// override for title-specific sweeps.
 #define DOLLLVM_MIN_CHUNK_INSTRUCTIONS 32u
 
 static u32 llvm_chunk_instructions(void) {
@@ -231,13 +241,66 @@ static u64 hash_bytes(u64 hash, const void* data, size_t size) {
     return hash;
 }
 
+static void emit_llvm_metadata(FILE* header, FILE* manifest, u64 build_id) {
+    const char* requested = getenv("DOLRECOMP_LLVM_TARGET");
+    char triple[256] = "unknown";
+    char cpu[256] = "unknown";
+    char features[512] = "";
+    char fingerprint[2048] = "unknown";
+    dolllvm_effective_triple(requested, triple, sizeof(triple));
+    dolllvm_target_cpu(requested, cpu, sizeof(cpu));
+    dolllvm_target_features(requested, features, sizeof(features));
+    dolllvm_codegen_fingerprint(requested, fingerprint, sizeof(fingerprint));
+    const u64 layout = dolnative_state_layout_hash();
+
+    fprintf(header,
+            "\n// Immutable native-code build identity\n"
+            "#define DOLRECOMP_NATIVE_LAYOUT_METADATA 1\n"
+            "#define DOLRECOMP_NATIVE_BACKEND_NAME \"llvm\"\n"
+            "#define DOLRECOMP_NATIVE_TARGET_TRIPLE \"%s\"\n"
+            "#define DOLRECOMP_NATIVE_TARGET_CPU \"%s\"\n"
+            "#define DOLRECOMP_NATIVE_TARGET_FEATURES \"%s\"\n"
+            "#define DOLRECOMP_NATIVE_LLVM_VERSION \"%s\"\n"
+            "#define DOLRECOMP_NATIVE_DOLRECOMP_REVISION \"%s\"\n"
+            "#define DOLRECOMP_NATIVE_OPT_LEVEL %u\n"
+            "#define DOLRECOMP_NATIVE_RELOCATION_MODEL \"pic\"\n"
+            "#define DOLRECOMP_NATIVE_CODE_MODEL \"small\"\n"
+            "#define DOLRECOMP_NATIVE_CODEGEN_FINGERPRINT \"%s\"\n"
+            "#define DOLRECOMP_NATIVE_BUILD_ID \"dolllvm-%016llx\"\n"
+            "#define DOLRECOMP_NATIVE_STATE_LAYOUT_HASH 0x%016llxull\n",
+            triple, cpu, features, dolllvm_version(), DOLRECOMP_REVISION,
+            (unsigned)DOLLLVM_OPT_LEVEL, fingerprint,
+            (unsigned long long)build_id, (unsigned long long)layout);
+#define DOLNATIVE_EMIT_FIELD(id, field, count)                                 \
+    fprintf(header, "#define DOLRECOMP_NATIVE_OFFSET_" #id " %lluull\n"       \
+                    "#define DOLRECOMP_NATIVE_SIZE_" #id " %lluull\n",        \
+            (unsigned long long)offsetof(CPUState, field),                     \
+            (unsigned long long)sizeof(((CPUState*)0)->field));
+    DOLNATIVE_LAYOUT_FIELDS(DOLNATIVE_EMIT_FIELD)
+#undef DOLNATIVE_EMIT_FIELD
+
+    fprintf(manifest,
+            "// backend: llvm\n// target: %s\n// cpu: %s\n"
+            "// features: %s\n// llvm: %s\n// dolrecomp: %s\n"
+            "// opt: %u\n// codegen: %s\n// build-id: dolllvm-%016llx\n"
+            "// state-layout: %016llx\n",
+            triple, cpu, features, dolllvm_version(), DOLRECOMP_REVISION,
+            (unsigned)DOLLLVM_OPT_LEVEL, fingerprint,
+            (unsigned long long)build_id, (unsigned long long)layout);
+    printf("  LLVM metadata: revision=%s llvm=%s target=%s cpu=%s "
+           "features=%s opt=%u build=dolllvm-%016llx layout=%016llx\n",
+           DOLRECOMP_REVISION, dolllvm_version(), triple, cpu,
+           features[0] ? features : "<none>", (unsigned)DOLLLVM_OPT_LEVEL,
+           (unsigned long long)build_id, (unsigned long long)layout);
+}
+
 static u64 llvm_job_hash(const LLVMChunkJob* job) {
     u64 hash = 1469598103934665603ull;
     hash = hash_bytes(hash, DOLLLVM_CACHE_VERSION, strlen(DOLLLVM_CACHE_VERSION));
     hash = hash_bytes(hash, &job->function_address, sizeof(job->function_address));
     hash = hash_bytes(hash, &job->count, sizeof(job->count));
-    u32 state_size = (u32)sizeof(CPUState);
-    hash = hash_bytes(hash, &state_size, sizeof(state_size));
+    u64 state_layout = dolnative_state_layout_hash();
+    hash = hash_bytes(hash, &state_layout, sizeof(state_layout));
     // Host triples must distinguish caches when no target was requested.
     char triple[256];
     if (dolllvm_effective_triple(getenv("DOLRECOMP_LLVM_TARGET"), triple,
@@ -247,7 +310,8 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
     // these a codegen experiment reuses objects built with the old settings
     // and reports them as its result.
     char codegen[1024];
-    if (dolllvm_codegen_fingerprint(codegen, sizeof(codegen)))
+    if (dolllvm_codegen_fingerprint(getenv("DOLRECOMP_LLVM_TARGET"), codegen,
+                                    sizeof(codegen)))
         hash = hash_bytes(hash, codegen, strlen(codegen));
     u32 opt_level = (u32)DOLLLVM_OPT_LEVEL;
     hash = hash_bytes(hash, &opt_level, sizeof(opt_level));
@@ -634,6 +698,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
     FunctionList funcs = {0};
     SMCAnalysis smc = {0};
     u32 file_count = 0;
+    u64 build_id = 1469598103934665603ull;
     u32 range_count = 0;
     const u32 chunk_instructions = llvm_chunk_instructions();
     for (u32 s = 0; s < section_count; s++)
@@ -723,6 +788,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
             job->ranges = ranges;
             job->range_count = range_count;
             job->hash = llvm_job_hash(job);
+            build_id = hash_bytes(build_id, &job->hash, sizeof(job->hash));
             if (cache_dir[0]) {
                 char cache_name[64];
                 snprintf(cache_name, sizeof(cache_name), "%016llx.o",
@@ -794,6 +860,19 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         free(insts);
     }
 
+    // POSIX LLVM workers are short-lived fork children and deliberately use
+    // _exit(), so an atexit-based aggregate in the backend can never reach the
+    // parent. Under the default error policy, reaching here proves that every
+    // two-function object passed the positive entry-count check (or came from
+    // the exact profile-keyed cache). Print the title-wide proof here.
+    if (dolllvm_pgo_mode() == DOLLLVM_PGO_USE &&
+        dolllvm_pgo_stale_policy() == DOLLLVM_PGO_STALE_ERROR) {
+        const unsigned long long function_count =
+            (unsigned long long)file_count * 2ull;
+        printf("dolllvm: PGO profile match: %llu/%llu functions matched, "
+               "0 unmatched\n", function_count, function_count);
+    }
+
     {
         char report[1100];
         if (snprintf(report, sizeof(report), "%s_smc.txt", stem) >= (int)sizeof(report) ||
@@ -803,6 +882,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
         printf("warning: executable memory writes detected; report: %s\n", report);
     }
     emit_dispatch_helpers(header, &funcs, entry_point);
+    emit_llvm_metadata(header, manifest, build_id);
     emit_footer(header);
     fprintf(manifest, "\n// %u native objects\n", file_count);
     fclose(header);

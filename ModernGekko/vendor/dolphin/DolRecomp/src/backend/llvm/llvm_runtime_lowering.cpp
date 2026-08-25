@@ -4,11 +4,109 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Module.h>
 
 namespace dolllvm {
 
 using namespace llvm;
+
+namespace {
+
+Value *emitPairedFMA(IRBuilder<> &builder, Module &module, Value *a, Value *c,
+                     Value *b) {
+  FunctionCallee fma = Intrinsic::getOrInsertDeclaration(
+      &module, Intrinsic::fma, {Type::getDoubleTy(module.getContext())});
+  return builder.CreateCall(fma, {a, c, b});
+}
+
+Value *roundPairedC(IRBuilder<> &builder, Value *bits) {
+  return builder.CreateAdd(
+      builder.CreateAnd(bits, builder.getInt64(0xFFFFFFFFF8000000ull)),
+      builder.CreateAnd(bits, builder.getInt64(0x0000000008000000ull)));
+}
+
+Value *pairedCUnusual(IRBuilder<> &builder, Value *bits) {
+  const auto expMask = builder.getInt64(0x7FF0000000000000ull);
+  return builder.CreateAnd(
+      builder.CreateICmpEQ(builder.CreateAnd(bits, expMask),
+                           builder.getInt64(0)),
+      builder.CreateICmpNE(
+          builder.CreateAnd(bits,
+                            builder.getInt64(0x000FFFFFFFFFFFFFull)),
+          builder.getInt64(0)));
+}
+
+Value *nonFinite(IRBuilder<> &builder, Value *bits) {
+  const auto expMask = builder.getInt64(0x7FF0000000000000ull);
+  return builder.CreateICmpEQ(builder.CreateAnd(bits, expMask), expMask);
+}
+
+Value *pairedSingle(IRBuilder<> &builder, Value *ni, Value *result,
+                    Value *resultBits) {
+  Type *f32 = Type::getFloatTy(builder.getContext());
+  Value *rounded = builder.CreateFPTrunc(result, f32);
+  Value *magnitude = builder.CreateAnd(
+      resultBits, builder.getInt64(0x7FFFFFFFFFFFFFFFull));
+  Value *subnormal = builder.CreateICmpULT(
+      magnitude, builder.getInt64(0x3810000000000000ull));
+  Value *flush = builder.CreateAnd(ni, subnormal);
+  Value *sign = builder.CreateTrunc(
+      builder.CreateLShr(
+          builder.CreateAnd(resultBits,
+                            builder.getInt64(0x8000000000000000ull)),
+          builder.getInt64(32)),
+      Type::getInt32Ty(builder.getContext()));
+  Value *signedZero = builder.CreateBitCast(sign, f32);
+  return builder.CreateSelect(flush, signedZero, rounded);
+}
+
+Value *classifyPairedSingle(IRBuilder<> &builder, Value *value) {
+  Value *bits =
+      builder.CreateBitCast(value, Type::getInt32Ty(builder.getContext()));
+  Value *sign = builder.CreateICmpNE(
+      builder.CreateAnd(bits, builder.getInt32(0x80000000u)),
+      builder.getInt32(0));
+  Value *exponent = builder.CreateAnd(bits, builder.getInt32(0x7F800000u));
+  Value *fraction = builder.CreateAnd(bits, builder.getInt32(0x007FFFFFu));
+  Value *hasFraction =
+      builder.CreateICmpNE(fraction, builder.getInt32(0));
+  Value *isInfiniteOrNaN =
+      builder.CreateICmpEQ(exponent, builder.getInt32(0x7F800000u));
+  Value *isZeroOrDenormal =
+      builder.CreateICmpEQ(exponent, builder.getInt32(0));
+
+  Value *infinite = builder.CreateSelect(sign, builder.getInt32(0x09u),
+                                         builder.getInt32(0x05u));
+  Value *infiniteOrNaN =
+      builder.CreateSelect(hasFraction, builder.getInt32(0x11u), infinite);
+  Value *zero = builder.CreateSelect(sign, builder.getInt32(0x12u),
+                                     builder.getInt32(0x02u));
+  Value *denormal = builder.CreateSelect(sign, builder.getInt32(0x18u),
+                                         builder.getInt32(0x14u));
+  Value *zeroOrDenormal = builder.CreateSelect(hasFraction, denormal, zero);
+  Value *normal = builder.CreateSelect(sign, builder.getInt32(0x08u),
+                                       builder.getInt32(0x04u));
+  return builder.CreateSelect(
+      isInfiniteOrNaN, infiniteOrNaN,
+      builder.CreateSelect(isZeroOrDenormal, zeroOrDenormal, normal));
+}
+
+Value *pairedMaddUnusual(IRBuilder<> &builder, Value *cBits,
+                         Value *result0Bits, Value *result1Bits) {
+  auto resultUnusual = [&builder](Value *bits) {
+    Value *tie = builder.CreateICmpEQ(
+        builder.CreateAnd(bits, builder.getInt64(0x1FFFFFFFull)),
+        builder.getInt64(0x10000000ull));
+    return builder.CreateOr(tie, nonFinite(builder, bits));
+  };
+  return builder.CreateOr(
+      pairedCUnusual(builder, cBits),
+      builder.CreateOr(resultUnusual(result0Bits),
+                       resultUnusual(result1Bits)));
+}
+
+} // namespace
 
 AllocaInst *FunctionEmitter::temporary(Type *valueType, StringRef name) {
   IRBuilder<> allocations(entry_->getTerminator());
@@ -211,9 +309,9 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
   };
   Type *ptr = PointerType::getUnqual(context_);
   Type *f64 = Type::getDoubleTy(context_);
-  syncState(DOLIR_STATE_FPSCR);
 
   if (op == DOLIR_EXACT_FCMPU || op == DOLIR_EXACT_FCMPO) {
+    syncState(DOLIR_STATE_FPSCR);
     syncState(DOLIR_STATE_CR);
     auto callee = module_.getOrInsertFunction(
         "ppc_fcmp", FunctionType::get(Type::getVoidTy(context_),
@@ -230,7 +328,86 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
 
   DolIRStateSlot destination = fprSlot(d);
   Value *old = stateValue(destination);
+
+  // The ordinary finite cases can operate directly on the generated SSA
+  // register state. Besides eliminating the call itself, this avoids spilling
+  // every operand to CPUState merely so a helper can select constant indices.
+  if (op == DOLIR_EXACT_FADDS || op == DOLIR_EXACT_FSUBS ||
+      op == DOLIR_EXACT_FMULS) {
+    const bool multiply = op == DOLIR_EXACT_FMULS;
+    Value *lhs = stateValue(fprSlot(a));
+    Value *rhs = stateValue(fprSlot(multiply ? c : b));
+    Value *rhsBits =
+        builder_.CreateBitCast(rhs, Type::getInt64Ty(context_));
+    if (multiply)
+      rhs = builder_.CreateBitCast(roundPairedC(builder_, rhsBits), f64);
+    Value *result = op == DOLIR_EXACT_FADDS
+                        ? builder_.CreateFAdd(lhs, rhs)
+                    : op == DOLIR_EXACT_FSUBS
+                        ? builder_.CreateFSub(lhs, rhs)
+                        : builder_.CreateFMul(lhs, rhs);
+    Value *resultBits =
+        builder_.CreateBitCast(result, Type::getInt64Ty(context_));
+    Value *unusual = nonFinite(builder_, resultBits);
+    if (multiply)
+      unusual = builder_.CreateOr(unusual,
+                                  pairedCUnusual(builder_, rhsBits));
+
+    BasicBlock *fast =
+        BasicBlock::Create(context_, "scalar_single_fast", function_);
+    BasicBlock *slow =
+        BasicBlock::Create(context_, "scalar_single_exact", function_);
+    BasicBlock *done =
+        BasicBlock::Create(context_, "scalar_single_done", function_);
+    builder_.CreateCondBr(unusual, slow, fast);
+
+    builder_.SetInsertPoint(fast);
+    Value *fpscr = stateValue(DOLIR_STATE_FPSCR);
+    Value *ni = builder_.CreateICmpNE(
+        builder_.CreateAnd(fpscr, builder_.getInt32(0x4u)),
+        builder_.getInt32(0));
+    Value *single = pairedSingle(builder_, ni, result, resultBits);
+    Value *extended = builder_.CreateFPExt(single, f64);
+    builder_.CreateStore(extended, state_[destination]);
+    builder_.CreateStore(extended, state_[ps1Slot(d)]);
+    Value *preserveMask = builder_.getInt32(
+        multiply ? ~(0x00060000u | (0x1Fu << 12)) : ~(0x1Fu << 12));
+    Value *updatedFPSCR = builder_.CreateOr(
+        builder_.CreateAnd(fpscr, preserveMask),
+        builder_.CreateShl(classifyPairedSingle(builder_, single),
+                           builder_.getInt32(12)));
+    builder_.CreateStore(updatedFPSCR, state_[DOLIR_STATE_FPSCR]);
+    builder_.CreateBr(done);
+
+    builder_.SetInsertPoint(slow);
+    syncState(DOLIR_STATE_FPSCR);
+    syncState(destination);
+    syncState(ps1Slot(d));
+    syncState(fprSlot(a));
+    syncState(fprSlot(multiply ? c : b));
+    const char *name = op == DOLIR_EXACT_FADDS   ? "ppc_fadds"
+                       : op == DOLIR_EXACT_FSUBS ? "ppc_fsubs"
+                                                 : "ppc_fmuls";
+    auto callee = module_.getOrInsertFunction(
+        name, FunctionType::get(Type::getVoidTy(context_),
+                                {ptr, Type::getInt8Ty(context_),
+                                 Type::getInt8Ty(context_),
+                                 Type::getInt8Ty(context_)},
+                                false));
+    builder_.CreateCall(callee,
+                        {ctx_, builder_.getInt8(d), builder_.getInt8(a),
+                         builder_.getInt8(multiply ? c : b)});
+    reloadState(destination);
+    reloadState(ps1Slot(d));
+    reloadState(DOLIR_STATE_FPSCR);
+    builder_.CreateBr(done);
+
+    builder_.SetInsertPoint(done);
+    return;
+  }
+
   if (op >= DOLIR_EXACT_FADDS && op <= DOLIR_EXACT_FRSP) {
+    syncState(DOLIR_STATE_FPSCR);
     const char *name = nullptr;
     switch (op) {
     case DOLIR_EXACT_FADDS:
@@ -296,6 +473,7 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
     if (single)
       reloadState(ps1Slot(d));
   } else if (op == DOLIR_EXACT_FCTIW || op == DOLIR_EXACT_FCTIWZ) {
+    syncState(DOLIR_STATE_FPSCR);
     AllocaInst *output = temporary(Type::getInt64Ty(context_), "fctiw.result");
     builder_.CreateStore(
         builder_.CreateBitCast(old, Type::getInt64Ty(context_)), output);
@@ -311,6 +489,7 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
     builder_.CreateStore(builder_.CreateSelect(success, converted, old),
                          state_[destination]);
   } else if (op == DOLIR_EXACT_FRES || op == DOLIR_EXACT_FRSQRTE) {
+    syncState(DOLIR_STATE_FPSCR);
     AllocaInst *output = temporary(f64, "estimate.result");
     builder_.CreateStore(old, output);
     const char *name = op == DOLIR_EXACT_FRES ? "ppc_fres" : "ppc_frsqrte";
@@ -329,6 +508,7 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
                            state_[ps1]);
     }
   } else {
+    syncState(DOLIR_STATE_FPSCR);
     bool single = op >= DOLIR_EXACT_FMADDS && op <= DOLIR_EXACT_FNMSUBS;
     bool subtract = op == DOLIR_EXACT_FMSUB || op == DOLIR_EXACT_FNMSUB ||
                     op == DOLIR_EXACT_FMSUBS || op == DOLIR_EXACT_FNMSUBS;
@@ -385,9 +565,9 @@ void FunctionEmitter::emitExactPaired(u64 descriptor) {
   Type *ptr = PointerType::getUnqual(context_);
   Type *i8 = Type::getInt8Ty(context_);
   Type *f64 = Type::getDoubleTy(context_);
-  syncState(DOLIR_STATE_FPSCR);
 
   if (op >= DOLIR_EXACT_PS_CMPU0) {
+    syncState(DOLIR_STATE_FPSCR);
     bool lane1 = op == DOLIR_EXACT_PS_CMPU1 || op == DOLIR_EXACT_PS_CMPO1;
     bool ordered = op == DOLIR_EXACT_PS_CMPO0 || op == DOLIR_EXACT_PS_CMPO1;
     syncState(DOLIR_STATE_CR);
@@ -406,6 +586,146 @@ void FunctionEmitter::emitExactPaired(u64 descriptor) {
     return;
   }
 
+  // These two scalar-C forms dominate paired-single work in real games. Keep
+  // their ordinary finite path in SSA so constants register-select the source
+  // slots and the result never makes a round trip through CPUState. The rare
+  // cases which need exception bookkeeping or a fused tie correction retain
+  // the existing exact helper path.
+  if (op == DOLIR_EXACT_PS_MADDS0 || op == DOLIR_EXACT_PS_MADDS1) {
+    Value *a0 = stateValue(fprSlot(a));
+    Value *a1 = stateValue(ps1Slot(a));
+    Value *cValue =
+        stateValue(op == DOLIR_EXACT_PS_MADDS0 ? fprSlot(c) : ps1Slot(c));
+    Value *b0 = stateValue(fprSlot(b));
+    Value *b1 = stateValue(ps1Slot(b));
+    Value *cBits =
+        builder_.CreateBitCast(cValue, Type::getInt64Ty(context_));
+    Value *roundedCBits = roundPairedC(builder_, cBits);
+    Value *roundedC = builder_.CreateBitCast(roundedCBits, f64);
+    Value *result0 = emitPairedFMA(builder_, module_, a0, roundedC, b0);
+    Value *result1 = emitPairedFMA(builder_, module_, a1, roundedC, b1);
+    Value *result0Bits =
+        builder_.CreateBitCast(result0, Type::getInt64Ty(context_));
+    Value *result1Bits =
+        builder_.CreateBitCast(result1, Type::getInt64Ty(context_));
+
+    BasicBlock *fast =
+        BasicBlock::Create(context_, "ps_madds_fast", function_);
+    BasicBlock *slow =
+        BasicBlock::Create(context_, "ps_madds_exact", function_);
+    BasicBlock *done =
+        BasicBlock::Create(context_, "ps_madds_done", function_);
+    builder_.CreateCondBr(pairedMaddUnusual(builder_, cBits, result0Bits,
+                                            result1Bits),
+                          slow, fast);
+
+    builder_.SetInsertPoint(fast);
+    Value *fpscr = stateValue(DOLIR_STATE_FPSCR);
+    Value *ni = builder_.CreateICmpNE(
+        builder_.CreateAnd(fpscr, builder_.getInt32(0x4u)),
+        builder_.getInt32(0));
+    Value *single0 = pairedSingle(builder_, ni, result0, result0Bits);
+    Value *single1 = pairedSingle(builder_, ni, result1, result1Bits);
+    builder_.CreateStore(builder_.CreateFPExt(single0, f64),
+                         state_[fprSlot(d)]);
+    builder_.CreateStore(builder_.CreateFPExt(single1, f64),
+                         state_[ps1Slot(d)]);
+    Value *classification = classifyPairedSingle(builder_, single0);
+    Value *updatedFPSCR = builder_.CreateOr(
+        builder_.CreateAnd(fpscr, builder_.getInt32(~(0x1Fu << 12))),
+        builder_.CreateShl(classification, builder_.getInt32(12)));
+    builder_.CreateStore(updatedFPSCR, state_[DOLIR_STATE_FPSCR]);
+    builder_.CreateBr(done);
+
+    builder_.SetInsertPoint(slow);
+    syncState(DOLIR_STATE_FPSCR);
+    syncPair(d);
+    syncPair(a);
+    syncPair(b);
+    syncPair(c);
+    const char *name = op == DOLIR_EXACT_PS_MADDS0 ? "ppc_ps_madds0"
+                                                    : "ppc_ps_madds1";
+    auto callee = module_.getOrInsertFunction(
+        name, FunctionType::get(Type::getVoidTy(context_),
+                                {ptr, i8, i8, i8, i8}, false));
+    builder_.CreateCall(callee, {ctx_, builder_.getInt8(d),
+                                 builder_.getInt8(a), builder_.getInt8(c),
+                                 builder_.getInt8(b)});
+    reloadPair(d);
+    reloadState(DOLIR_STATE_FPSCR);
+    builder_.CreateBr(done);
+
+    builder_.SetInsertPoint(done);
+    return;
+  }
+
+  if (op == DOLIR_EXACT_PS_MULS0 || op == DOLIR_EXACT_PS_MULS1) {
+    Value *a0 = stateValue(fprSlot(a));
+    Value *a1 = stateValue(ps1Slot(a));
+    Value *cValue =
+        stateValue(op == DOLIR_EXACT_PS_MULS0 ? fprSlot(c) : ps1Slot(c));
+    Value *cBits =
+        builder_.CreateBitCast(cValue, Type::getInt64Ty(context_));
+    Value *roundedC =
+        builder_.CreateBitCast(roundPairedC(builder_, cBits), f64);
+    Value *result0 = builder_.CreateFMul(a0, roundedC);
+    Value *result1 = builder_.CreateFMul(a1, roundedC);
+    Value *result0Bits =
+        builder_.CreateBitCast(result0, Type::getInt64Ty(context_));
+    Value *result1Bits =
+        builder_.CreateBitCast(result1, Type::getInt64Ty(context_));
+    Value *unusual = builder_.CreateOr(
+        pairedCUnusual(builder_, cBits),
+        builder_.CreateOr(nonFinite(builder_, result0Bits),
+                          nonFinite(builder_, result1Bits)));
+
+    BasicBlock *fast =
+        BasicBlock::Create(context_, "ps_muls_fast", function_);
+    BasicBlock *slow =
+        BasicBlock::Create(context_, "ps_muls_exact", function_);
+    BasicBlock *done =
+        BasicBlock::Create(context_, "ps_muls_done", function_);
+    builder_.CreateCondBr(unusual, slow, fast);
+
+    builder_.SetInsertPoint(fast);
+    Value *fpscr = stateValue(DOLIR_STATE_FPSCR);
+    Value *ni = builder_.CreateICmpNE(
+        builder_.CreateAnd(fpscr, builder_.getInt32(0x4u)),
+        builder_.getInt32(0));
+    Value *single0 = pairedSingle(builder_, ni, result0, result0Bits);
+    Value *single1 = pairedSingle(builder_, ni, result1, result1Bits);
+    builder_.CreateStore(builder_.CreateFPExt(single0, f64),
+                         state_[fprSlot(d)]);
+    builder_.CreateStore(builder_.CreateFPExt(single1, f64),
+                         state_[ps1Slot(d)]);
+    Value *updatedFPSCR = builder_.CreateOr(
+        builder_.CreateAnd(fpscr, builder_.getInt32(~(0x1Fu << 12))),
+        builder_.CreateShl(classifyPairedSingle(builder_, single0),
+                           builder_.getInt32(12)));
+    builder_.CreateStore(updatedFPSCR, state_[DOLIR_STATE_FPSCR]);
+    builder_.CreateBr(done);
+
+    builder_.SetInsertPoint(slow);
+    syncState(DOLIR_STATE_FPSCR);
+    syncPair(d);
+    syncPair(a);
+    syncPair(c);
+    const char *name =
+        op == DOLIR_EXACT_PS_MULS0 ? "ppc_ps_muls0" : "ppc_ps_muls1";
+    auto callee = module_.getOrInsertFunction(
+        name,
+        FunctionType::get(Type::getVoidTy(context_), {ptr, i8, i8, i8}, false));
+    builder_.CreateCall(callee, {ctx_, builder_.getInt8(d),
+                                 builder_.getInt8(a), builder_.getInt8(c)});
+    reloadPair(d);
+    reloadState(DOLIR_STATE_FPSCR);
+    builder_.CreateBr(done);
+
+    builder_.SetInsertPoint(done);
+    return;
+  }
+
+  syncState(DOLIR_STATE_FPSCR);
   syncPair(d);
   if (op == DOLIR_EXACT_PS_RES || op == DOLIR_EXACT_PS_RSQRTE) {
     syncPair(b);

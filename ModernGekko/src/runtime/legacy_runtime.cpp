@@ -3,6 +3,7 @@
 #include "Core/Boot/BootMemory.h"
 #include "Core/Boot/DolReader.h"
 #include "moderngekko/interpreter.hpp"
+#include "core/native_state_layout.h"
 
 #include <limits>
 
@@ -24,6 +25,7 @@ ModuleLoadResult LegacyRuntime::LoadModule(const std::string& path, const std::s
   const ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION,
       static_cast<std::uint32_t>(sizeof(CPUState)),
+      dolnative_state_layout_hash(),
       game_id.c_str(),
   };
   const ModuleLoadResult result = m_module.Open(path, requirements);
@@ -42,6 +44,7 @@ ModuleLoadResult LegacyRuntime::AttachModule(const ModernGekkoModuleDesc* descri
   const ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION,
       static_cast<std::uint32_t>(sizeof(CPUState)),
+      dolnative_state_layout_hash(),
       game_id.c_str(),
   };
   const ModuleLoadResult result = m_module.Attach(descriptor, requirements);

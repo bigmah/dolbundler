@@ -1,9 +1,19 @@
 cmake_minimum_required(VERSION 3.16)
 project(DolRecomp C)
 
+execute_process(
+    COMMAND git rev-parse --verify HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE DOLRECOMP_REVISION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT DOLRECOMP_REVISION)
+    set(DOLRECOMP_REVISION "unknown")
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-option(DOLRECOMP_ENABLE_LLVM "Build the x86-64 LLVM object backend" OFF)
+option(DOLRECOMP_ENABLE_LLVM "Build the LLVM native object backend" OFF)
 
 # Discover LLVM before creating targets so its MSVC runtime choice is uniform.
 if(DOLRECOMP_ENABLE_LLVM)
@@ -14,6 +24,15 @@ if(DOLRECOMP_ENABLE_LLVM)
     if(LLVM_PACKAGE_VERSION VERSION_LESS 19 OR LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL 21)
         message(FATAL_ERROR "DolRecomp LLVM backend requires LLVM 19 or 20 (found ${LLVM_PACKAGE_VERSION})")
     endif()
+    if(NOT "AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
+        message(FATAL_ERROR
+            "DolRecomp LLVM backend requires an LLVM build with the AArch64 target")
+    endif()
+    if(NOT "X86" IN_LIST LLVM_TARGETS_TO_BUILD)
+        message(FATAL_ERROR
+            "DolRecomp LLVM backend requires an LLVM build with the X86 target")
+    endif()
+    message(STATUS "DolRecomp LLVM ${LLVM_PACKAGE_VERSION}; targets: ${LLVM_TARGETS_TO_BUILD}")
 endif()
 
 # iOS forbids process spawning outright, and its SDK marks system() unavailable
@@ -130,6 +149,8 @@ if(DOLRECOMP_ENABLE_LLVM)
         src/backend/llvm/llvm_runtime_lowering.cpp
     )
     target_include_directories(dr_llvm PUBLIC ${DOLRECOMP_SRC})
+    target_include_directories(dr_llvm PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../GXRuntime/include")
     target_include_directories(dr_llvm SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(dr_llvm PUBLIC DOLRECOMP_ENABLE_LLVM=1)
     target_compile_definitions(dr_llvm PRIVATE ${LLVM_DEFINITIONS})
@@ -147,11 +168,11 @@ if(DOLRECOMP_ENABLE_LLVM)
                 Core Support Analysis Passes Target MC native nativecodegen)
             target_link_libraries(dr_llvm PRIVATE ${DOLRECOMP_LLVM_LIBS})
         endif()
-    elseif(TARGET LLVM)
-        target_link_libraries(dr_llvm PRIVATE LLVM)
     else()
         llvm_map_components_to_libnames(DOLRECOMP_LLVM_LIBS
-            Core Support Analysis Passes Target MC native nativecodegen)
+            Core Support Analysis Passes Target MC
+            AArch64CodeGen AArch64Desc AArch64Info AArch64Utils
+            X86CodeGen X86Desc X86Info)
         target_link_libraries(dr_llvm PRIVATE ${DOLRECOMP_LLVM_LIBS})
     endif()
 endif()
@@ -188,6 +209,10 @@ target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform dr_ir dr_vm_backend)
 if(DOLRECOMP_ENABLE_LLVM)
     target_link_libraries(dr_app PUBLIC dr_llvm)
+    target_include_directories(dr_app PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../GXRuntime/include")
+    target_compile_definitions(dr_app PRIVATE
+        DOLRECOMP_REVISION="${DOLRECOMP_REVISION}")
 endif()
 
 add_executable(dolrecomp src/app/main.c)
@@ -367,6 +392,21 @@ if(DOLRECOMP_ENABLE_LLVM)
     add_test(NAME llvm_backend COMMAND test_llvm_backend
              ${CMAKE_CURRENT_BINARY_DIR}/dolir_test.o
              ${CMAKE_CURRENT_BINARY_DIR}/dolir_test.ll)
+    if(APPLE)
+        add_test(NAME llvm_backend_ios COMMAND test_llvm_backend
+                 ${CMAKE_CURRENT_BINARY_DIR}/dolir_ios_test.o
+                 ${CMAKE_CURRENT_BINARY_DIR}/dolir_ios_test.ll
+                 arm64-apple-ios17.0)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME llvm_ios_helper_abi
+                 COMMAND Python3::Interpreter
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llvm_ios_helper_abi.py
+                   --emitter-ir ${CMAKE_CURRENT_BINARY_DIR}/dolir_ios_test.ll
+                   --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/llvm_ios_helper_abi.c
+                   --gxruntime-include ${CMAKE_CURRENT_SOURCE_DIR}/../GXRuntime/include)
+        set_tests_properties(llvm_ios_helper_abi PROPERTIES
+            DEPENDS llvm_backend_ios)
+    endif()
     set(DOLRECOMP_TEST_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/dolir_execute.o)
     set(DOLRECOMP_TEST_IR ${CMAKE_CURRENT_BINARY_DIR}/dolir_execute.ll)
     add_custom_command(
@@ -385,4 +425,11 @@ if(DOLRECOMP_ENABLE_LLVM)
     add_test(NAME llvm_pipeline COMMAND test_llvm_pipeline
              $<TARGET_FILE:dolrecomp>
              ${CMAKE_CURRENT_BINARY_DIR}/llvm_pipeline)
+    if(APPLE)
+        add_test(NAME llvm_pipeline_ios COMMAND test_llvm_pipeline
+                 $<TARGET_FILE:dolrecomp>
+                 ${CMAKE_CURRENT_BINARY_DIR}/llvm_pipeline_ios)
+        set_tests_properties(llvm_pipeline_ios PROPERTIES
+            ENVIRONMENT "DOLRECOMP_LLVM_TARGET=arm64-apple-ios17.0;DOLRECOMP_LLVM_CACHE=off")
+    endif()
 endif()

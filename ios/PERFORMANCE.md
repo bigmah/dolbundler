@@ -1427,3 +1427,32 @@ before today. Runtime::Create is one second on the phone. The peak column
 names the two rough seconds that remain: a 225ms spike at a load
 transition and a 63-96ms patch entering the movie, both first-session
 pipeline compiles the now-working shader cache absorbs on the next launch.
+
+## LLVM AOT chunk size was the simulator bottleneck (2026-08-25)
+
+Disney Olliewood was still slower in native AOT than DolVM after inlining its
+dominant exact paired-single helpers and removing repeated CPU-state loads.
+Fair 20-second iOS Simulator runs, using the same save and with the sampling
+thread disabled, isolated the remaining problem:
+
+| backend | LLVM chunk | mean speed |
+|---|---:|---:|
+| DolVM | n/a | 91.1% |
+| LLVM AOT, matched PGO | 128 | 71.8% |
+| LLVM AOT, matched PGO, run 1 | 64 | 105.4% |
+| LLVM AOT, matched PGO, run 2 | 64 | 106.9% |
+
+The 64-instruction profile was collected from a separate instrumented build
+because changing boundaries changes every LLVM function. The release generator
+matched all **14,834/14,834** profile records, with zero stale or unmatched
+functions. The two release runs used the embedded native GEXE52 module and the
+same `olliewood_plaza.sav`; their ten two-second speed samples were
+`101,114,117,120,94,91,97,101,108,111` and
+`107,114,120,121,93,93,98,103,109,111`.
+
+That is a reproducible **~48% native uplift** over 128-instruction chunks and
+puts LLVM AOT **~17% ahead of DolVM** on the simulator workload. The prior hot
+128-instruction objects were 30-41 KB apiece, so register-allocation scope and
+instruction-cache locality outweighed the extra cross-chunk gates. The LLVM
+default is now 64; `DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS` remains available for
+per-title sweeps.

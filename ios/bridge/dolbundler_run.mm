@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <sys/stat.h>
@@ -26,6 +27,17 @@
 #include <mutex>
 #include <string>
 #include <thread>
+
+#ifdef DOLBUNDLER_NATIVE_GAME_ID
+extern "C" const ModernGekkoModuleDesc* staticrecomp_get_module(void);
+#endif
+
+#ifdef DOLBUNDLER_LLVM_PGO_GENERATE
+// The embedded module target supplies this definition only to instrumentation
+// builds, whose final link already pulls in compiler-rt's profile runtime.
+// Ordinary and profile-use builds compile out both the call and the symbol.
+extern "C" int __llvm_profile_write_file(void);
+#endif
 
 namespace
 {
@@ -207,6 +219,17 @@ void StartRunTimer(std::atomic<bool>* running)
   }).detach();
 }
 
+void FlushLLVMProfileIfRequested()
+{
+#ifdef DOLBUNDLER_LLVM_PGO_GENERATE
+  if (!getenv("LLVM_PROFILE_FILE"))
+    return;
+
+  const int status = __llvm_profile_write_file();
+  run_log("LLVM profile flush returned %d", status);
+#endif
+}
+
 void set_err(char* err, size_t err_size, const std::string& message)
 {
   if (err && err_size)
@@ -254,6 +277,14 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   moderngekko::RuntimeConfig config;
   config.game_root = game_root;
   config.user_directory = user_dir;
+#ifdef DOLBUNDLER_NATIVE_GAME_ID
+  if (std::filesystem::path(game_root).filename() == DOLBUNDLER_NATIVE_GAME_ID)
+  {
+    config.module = moderngekko::ModuleSource::AttachedDescriptor(staticrecomp_get_module());
+    run_log("using embedded native module for %s", DOLBUNDLER_NATIVE_GAME_ID);
+  }
+  else
+#endif
   config.module = moderngekko::ModuleSource::BytecodePath(module_path);
   config.graphics.backend = "Metal";
   // Metal implements Dolphin's compute-shader texture decoder. Keep texture
@@ -374,6 +405,7 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     s_runtime.reset();
   }
   s_running.store(false);
+  FlushLLVMProfileIfRequested();
 
   if (result.reason == moderngekko::RuntimeExitReason::BootFailed)
   {

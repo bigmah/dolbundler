@@ -116,6 +116,15 @@ private:
   llvm::Value *guard_cycles_ = nullptr;
   // Termination backstop for zero-cycle loops.
   llvm::Value *guard_steps_ = nullptr;
+  // Stable for the duration of one generated-body invocation. Snapshotting
+  // these at entry prevents opaque runtime hooks from forcing a CPUState
+  // reload before every guest RAM access.
+  llvm::Value *ram_ = nullptr;
+  llvm::Value *ram_size_ = nullptr;
+  llvm::Value *exram_ = nullptr;
+  llvm::Value *exram_size_ = nullptr;
+  llvm::Value *journal_ = nullptr;
+  llvm::Value *journal_user_ = nullptr;
   std::array<llvm::AllocaInst *, DOLIR_STATE_COUNT> state_{};
   std::array<bool, DOLIR_STATE_COUNT> used_{};
   std::array<bool, DOLIR_STATE_COUNT> dirty_{};

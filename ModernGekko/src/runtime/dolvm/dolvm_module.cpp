@@ -17,6 +17,7 @@
 #include "moderngekko/dolvm_module.hpp"
 
 #include "dolvm_bridge.h"
+#include "core/native_state_layout.h"
 
 #include <algorithm>
 #include <cstring>
@@ -32,6 +33,8 @@ std::vector<ModernGekkoRange> s_code_ranges;
 std::vector<ModernGekkoRange> s_chunk_ranges;
 std::vector<ModernGekkoRange> s_smc_ranges;
 std::vector<std::uint64_t> s_chunk_hashes;
+ModernGekkoNativeMetadata s_metadata{
+    "dolvm", "portable-bytecode", "dolvm", "dolvm-container", "dolvm", 0};
 
 std::vector<ModernGekkoRange> MergeAdjacent(const DolVMBridgeRange* ranges, std::uint32_t count)
 {
@@ -93,6 +96,7 @@ bool DolVMModule::Open(const std::filesystem::path& path, const std::string& dis
   s_descriptor.abi_version = MODERNGEKKO_MODULE_ABI_VERSION;
   s_descriptor.cpu_abi_version = MODERNGEKKO_CPU_ABI_VERSION;
   s_descriptor.cpu_state_size = static_cast<std::uint32_t>(sizeof(CPUState));
+  s_metadata.cpu_state_layout_hash = dolnative_state_layout_hash();
   // A module built before the container carried a game id still runs; it just
   // cannot be the thing that catches a module paired with the wrong disc.
   const std::string game_id = info.game_id && info.game_id[0] ? info.game_id : disc_id;
@@ -116,6 +120,8 @@ bool DolVMModule::Open(const std::filesystem::path& path, const std::string& dis
   s_descriptor.chunk_hashes = s_chunk_hashes.data();
   s_descriptor.rel_modules = nullptr;
   s_descriptor.num_rel_modules = 0;
+  s_descriptor.native_metadata = &s_metadata;
+  s_descriptor.publish_gate = nullptr;
 
   s_open = true;
   return true;

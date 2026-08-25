@@ -39,6 +39,37 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   builder_.SetInsertPoint(callBlock);
   emitBudgetGuard(target);
   materialize(target);
+  // The chassis ABI requires chunk_ranges to be sorted by guest address, but
+  // the pipeline visits DOL sections in file-table order.  Those orders are
+  // not necessarily the same (a low-address data section commonly follows all
+  // text sections), so the array position is not the chassis chunk index.
+  // Use the range's address rank, matching gen_module_tables.py's sorted table.
+  u32 rangeIndex = 0;
+  for (u32 i = 0; i < range_count_; ++i)
+    if (ranges_[i].start < range->start)
+      ++rangeIndex;
+
+  auto gate = module_.getOrInsertFunction(
+      "dolrecomp_native_gate_allows",
+      FunctionType::get(Type::getInt1Ty(context_),
+                        {PointerType::getUnqual(context_),
+                         Type::getInt32Ty(context_), Type::getInt64Ty(context_)},
+                        false));
+  if (auto *gateFunction = dyn_cast<Function>(gate.getCallee()))
+    gateFunction->addRetAttr(Attribute::ZExt);
+  Value *charged =
+      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_);
+  CallInst *allowed = builder_.CreateCall(
+      gate, {ctx_, builder_.getInt32(rangeIndex), charged});
+  allowed->addRetAttr(Attribute::ZExt);
+  BasicBlock *direct =
+      BasicBlock::Create(context_, "gate_open", function_);
+  BasicBlock *closed =
+      BasicBlock::Create(context_, "gate_closed", function_);
+  builder_.CreateCondBr(allowed, direct, closed);
+  builder_.SetInsertPoint(closed);
+  builder_.CreateRetVoid();
+  builder_.SetInsertPoint(direct);
   char name[64];
   snprintf(name, sizeof(name), "func_%08X_budget", range->start);
   auto callee = module_.getOrInsertFunction(
@@ -49,6 +80,11 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
     calleeFunction->setDSOLocal(true);
+    for (unsigned index : {1u, 2u}) {
+      calleeFunction->addParamAttr(index, Attribute::NoAlias);
+      calleeFunction->addParamAttr(index, Attribute::NoCapture);
+      calleeFunction->addParamAttr(index, Attribute::NonNull);
+    }
   }
   builder_.CreateCall(callee, {ctx_, guard_cycles_, guard_steps_});
   if (!term.linked) {

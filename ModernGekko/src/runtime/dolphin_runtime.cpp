@@ -26,6 +26,7 @@
 #include "moderngekko/dolvm_module.hpp"
 #include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
+#include "core/native_state_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -51,6 +52,10 @@ namespace {
 static_assert(sizeof(ModernGekkoModuleDesc) == sizeof(StaticRecompModuleDesc));
 static_assert(offsetof(ModernGekkoModuleDesc, chunk_hashes) ==
               offsetof(StaticRecompModuleDesc, chunk_hashes));
+static_assert(offsetof(ModernGekkoModuleDesc, native_metadata) ==
+              offsetof(StaticRecompModuleDesc, native_metadata));
+static_assert(offsetof(ModernGekkoModuleDesc, publish_gate) ==
+              offsetof(StaticRecompModuleDesc, publish_gate));
 std::mutex s_runtime_mutex;
 bool s_runtime_active = false;
 Platform *s_platform = nullptr;
@@ -61,6 +66,13 @@ std::unique_ptr<BootSessionData> s_boot_session_data;
 u64 s_previous_net_wait_ns = 0;
 double s_net_wait_ms_per_second = 0.0;
 std::chrono::steady_clock::time_point s_previous_net_wait_sample;
+
+void PublishAttachedNativeGate(const StaticRecompDispatchGate* gate, void* user)
+{
+  const auto* descriptor = static_cast<const ModernGekkoModuleDesc*>(user);
+  if (descriptor && descriptor->publish_gate)
+    descriptor->publish_gate(gate);
+}
 
 std::string FormatWindowTitle(const std::string &title, double fps) {
   if (!std::isfinite(fps) || fps < 0.0)
@@ -217,6 +229,7 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
 
   const ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION, static_cast<std::uint32_t>(sizeof(CPUState)),
+      dolnative_state_layout_hash(),
       inspected.metadata->disc_id.c_str()};
   ModuleLibrary validation_library;
   ModuleLoadResult module_result{};
@@ -371,9 +384,17 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     recomp_source =
         StaticRecompModuleSource::Dynamic(impl->config.module.path.string());
   else if (impl->config.module.kind == ModuleSource::Kind::AttachedDescriptor)
+  {
     recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(
             impl->config.module.descriptor));
+    if (impl->config.module.descriptor->publish_gate)
+    {
+      recomp_source.publish_gate = &PublishAttachedNativeGate;
+      recomp_source.publish_gate_user =
+          const_cast<ModernGekkoModuleDesc*>(impl->config.module.descriptor);
+    }
+  }
   else if (impl->config.module.kind == ModuleSource::Kind::BytecodePath) {
     recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(

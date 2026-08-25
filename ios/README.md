@@ -28,6 +28,38 @@ Device Management**.
 Requirements: Xcode 15+, an iOS 17+ device with an A-series chip. Built and
 tested against an iPhone 15 Pro Max.
 
+### Developer-only LLVM AOT build
+
+The normal app remains the DolVM build described below. For a private,
+pre-signed native experiment, build the host recompiler with the pinned LLVM
+20 wrapper, emit iPhoneOS objects on the Mac, and embed them before Xcode signs
+the app:
+
+```sh
+./ios/build-dolrecomp-llvm20.sh
+
+export DOLRECOMP_LLVM_TARGET=arm64-apple-ios17.0
+export DOLRECOMP_LLVM_CPU=apple-a16
+export DOLRECOMP_LLVM_CACHE=/tmp/dolbundler-gexe52-llvm-cache
+
+build-dolrecomp-llvm20/dolrecomp \
+  --gamecube --backend llvm --game-id GEXE52 \
+  /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios
+cp /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios/generated/main.dol
+
+export DOLBUNDLER_NATIVE_GAME_ID=GEXE52
+export DOLBUNDLER_NATIVE_GENERATED_DIR=/tmp/gexe52-llvm-ios/generated
+export DOLBUNDLER_TEAM=<your Apple Developer team ID>
+./ios/build.sh --install
+```
+
+The wrapper rejects an unversioned or non-20 LLVM and keeps the host tool out
+of `build-ios`. The module configure step validates its target, minimum OS,
+CPUState layout, and complete undefined-symbol inventory; the final app link
+uses `-undefined error` and writes a native link map. Generated game code stays
+outside the repository. No compiler is linked into the phone app, and no
+object is added or changed after signing.
+
 ## Getting a disc onto the device
 
 Either tap **+** in the app and pick an `.iso`, or drop one into the DolBundler

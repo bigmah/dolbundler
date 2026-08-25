@@ -81,6 +81,19 @@ int main(void) {
     CHECK((cpu.fpscr & 0x00040000u) != 0, "rounded-up frsp did not set FR");
     CHECK((cpu.fpscr & 0x02000000u) != 0, "inexact frsp did not set XX");
 
+    f64 fused;
+    cpu.fpscr = 0x00040000u;
+    CHECK(ppc_fma(&cpu, 1.0, 1.0, 0x1p-25, true, false, false, &fused),
+          "finite fmadds should produce a result");
+    CHECK(fused == 1.0, "fmadds tie rounded to %.17g instead of 1", fused);
+    CHECK((cpu.fpscr & 0x00020000u) != 0, "inexact fmadds did not set FI");
+    CHECK((cpu.fpscr & 0x00040000u) == 0, "fmadds did not clear FR");
+
+    cpu.fpscr |= 0x00060000u;
+    CHECK(ppc_fma(&cpu, 1.0, 1.0, 0.0, true, false, false, &fused),
+          "exact fmadds should produce a result");
+    CHECK((cpu.fpscr & 0x00060000u) == 0, "exact fmadds did not clear FI/FR");
+
     cpu_free(&cpu);
     return failures != 0;
 }

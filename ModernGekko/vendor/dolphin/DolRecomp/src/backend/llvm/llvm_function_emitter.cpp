@@ -1,6 +1,10 @@
 #include "backend/llvm/llvm_function_emitter.h"
 #include "cpu/cpu.h"
 
+#define DOLNATIVE_WITH_DOLIR 1
+#include "core/dispatch_gate.h"
+#include "core/native_state_layout.h"
+
 #include <cstdio>
 
 #include <llvm/ADT/SmallVector.h>
@@ -40,6 +44,15 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   function_->setVisibility(GlobalValue::HiddenVisibility);
   function_->setDSOLocal(true);
   function_->addFnAttr(Attribute::NoInline);
+  // Both counters are private wrapper-stack objects. They cannot overlap the
+  // CPU state, emulated RAM reached through it, or one another. Describing
+  // that fact lets LLVM keep their per-instruction increments in registers
+  // instead of conservatively reloading around every guest memory access.
+  for (unsigned index : {1u, 2u}) {
+    function_->addParamAttr(index, Attribute::NoAlias);
+    function_->addParamAttr(index, Attribute::NoCapture);
+    function_->addParamAttr(index, Attribute::NonNull);
+  }
   ctx_ = function_->getArg(0);
   ctx_->setName("ctx");
   guard_cycles_ = function_->getArg(1);
@@ -124,58 +137,7 @@ Type *FunctionEmitter::type(DolIRType t) {
 }
 
 size_t FunctionEmitter::stateOffset(DolIRStateSlot slot) const {
-  if (slot >= DOLIR_STATE_GPR0 && slot <= DOLIR_STATE_GPR31)
-    return offsetof(CPUState, gpr) + 4u * (slot - DOLIR_STATE_GPR0);
-  if (slot >= DOLIR_STATE_FPR0 && slot <= DOLIR_STATE_FPR31)
-    return offsetof(CPUState, fpr) + 8u * (slot - DOLIR_STATE_FPR0);
-  if (slot >= DOLIR_STATE_PS1_0 && slot <= DOLIR_STATE_PS1_31)
-    return offsetof(CPUState, ps1) + 8u * (slot - DOLIR_STATE_PS1_0);
-  if (slot >= DOLIR_STATE_SR0 && slot <= DOLIR_STATE_SR15)
-    return offsetof(CPUState, sr) + 4u * (slot - DOLIR_STATE_SR0);
-  if (slot >= DOLIR_STATE_GQR0 && slot <= DOLIR_STATE_GQR7)
-    return offsetof(CPUState, gqr) + 4u * (slot - DOLIR_STATE_GQR0);
-  switch (slot) {
-  case DOLIR_STATE_PC:
-    return offsetof(CPUState, pc);
-  case DOLIR_STATE_LR:
-    return offsetof(CPUState, lr);
-  case DOLIR_STATE_CTR:
-    return offsetof(CPUState, ctr);
-  case DOLIR_STATE_CR:
-    return offsetof(CPUState, cr);
-  case DOLIR_STATE_XER:
-    return offsetof(CPUState, xer);
-  case DOLIR_STATE_FPSCR:
-    return offsetof(CPUState, fpscr);
-  case DOLIR_STATE_MSR:
-    return offsetof(CPUState, msr);
-  case DOLIR_STATE_SRR0:
-    return offsetof(CPUState, srr0);
-  case DOLIR_STATE_SRR1:
-    return offsetof(CPUState, srr1);
-  case DOLIR_STATE_DAR:
-    return offsetof(CPUState, dar);
-  case DOLIR_STATE_DSISR:
-    return offsetof(CPUState, dsisr);
-  case DOLIR_STATE_EAR:
-    return offsetof(CPUState, ear);
-  case DOLIR_STATE_HID2:
-    return offsetof(CPUState, hid2);
-  case DOLIR_STATE_TIMEBASE:
-    return offsetof(CPUState, timebase);
-  case DOLIR_STATE_EXCEPTION:
-    return offsetof(CPUState, exception);
-  case DOLIR_STATE_PROGRAM_EXCEPTION:
-    return offsetof(CPUState, program_exception);
-  case DOLIR_STATE_RESERVE_ADDR:
-    return offsetof(CPUState, reserve_addr);
-  case DOLIR_STATE_RESERVE_VALID:
-    return offsetof(CPUState, reserve_valid);
-  case DOLIR_STATE_DOWNCOUNT:
-    return offsetof(CPUState, downcount);
-  default:
-    return 0;
-  }
+  return dolnative_state_offset(slot);
 }
 
 Value *FunctionEmitter::bytePtr(size_t offset) {
@@ -380,6 +342,16 @@ void FunctionEmitter::emitEntry() {
       builder_.CreateAlloca(Type::getInt64Ty(context_), nullptr, "cycles");
   builder_.CreateStore(ConstantInt::get(Type::getInt64Ty(context_), 0),
                        cycles_);
+  // The chassis cannot replace a running core's RAM mappings while a native
+  // body is executing. Keep one SSA snapshot so calls that legitimately
+  // mutate architectural CPUState do not pessimize every memory operation.
+  Type *pointer = PointerType::getUnqual(context_);
+  ram_ = loadOffset(pointer, offsetof(CPUState, ram));
+  ram_size_ =
+      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
+  exram_ = loadOffset(pointer, offsetof(CPUState, exram));
+  exram_size_ =
+      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
   Value *pc = loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, pc));
   BasicBlock *bad = BasicBlock::Create(context_, "entry_miss", function_);
   auto *dispatch = builder_.CreateSwitch(pc, bad, source_.block_count);
@@ -430,19 +402,118 @@ void FunctionEmitter::sideExit(u32 pc) {
 }
 
 void FunctionEmitter::emitBudgetGuard(u32 pc) {
-  // Guard the whole native call chain, not one generated function.
-  Value *cycles =
-      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_);
-  Value *over_cycles = builder_.CreateICmpUGE(
-      cycles, ConstantInt::get(Type::getInt64Ty(context_), 256));
-  // Backstop for zero-cycle loops.
-  Value *steps = builder_.CreateLoad(Type::getInt64Ty(context_), guard_steps_);
-  Value *next_steps = builder_.CreateAdd(
-      steps, ConstantInt::get(Type::getInt64Ty(context_), 1));
-  builder_.CreateStore(next_steps, guard_steps_);
-  Value *over_steps = builder_.CreateICmpUGE(
-      next_steps, ConstantInt::get(Type::getInt64Ty(context_), 2048));
-  Value *exhausted = builder_.CreateOr(over_cycles, over_steps);
+  Type *i8 = Type::getInt8Ty(context_);
+  Type *i32 = Type::getInt32Ty(context_);
+  Type *i64 = Type::getInt64Ty(context_);
+  Type *pointer = PointerType::getUnqual(context_);
+
+  // Guard the whole native call chain, not one generated function.  Without a
+  // published chassis gate (host execution tests and standalone modules), keep
+  // the conservative fixed allowance.  An attached iOS module instead runs to
+  // the end of the chassis's live slice, exactly as DolVM does.
+  GlobalVariable *gate = module_.getGlobalVariable("dolrecomp_native_gate", true);
+  if (!gate) {
+    gate = new GlobalVariable(
+        module_, ArrayType::get(i8, sizeof(StaticRecompDispatchGate)), false,
+        GlobalValue::ExternalLinkage, nullptr, "dolrecomp_native_gate");
+    gate->setVisibility(GlobalValue::HiddenVisibility);
+    gate->setDSOLocal(true);
+  }
+  const auto gateField = [&](Type *fieldType, size_t offset) {
+    Value *address = builder_.CreateInBoundsGEP(
+        i8, gate, ConstantInt::get(i64, offset));
+    return builder_.CreateLoad(fieldType, address);
+  };
+
+  Value *chunkOpen = gateField(
+      pointer, offsetof(StaticRecompDispatchGate, chunk_open));
+  Value *budgetPointer = gateField(
+      pointer, offsetof(StaticRecompDispatchGate, budget));
+  Value *pendingPointer = gateField(
+      pointer, offsetof(StaticRecompDispatchGate, pending));
+  Value *hasGate = builder_.CreateAnd(
+      builder_.CreateIsNotNull(chunkOpen),
+      builder_.CreateAnd(builder_.CreateIsNotNull(budgetPointer),
+                         builder_.CreateIsNotNull(pendingPointer)));
+
+  BasicBlock *fixed = BasicBlock::Create(context_, "budget_fixed", function_);
+  BasicBlock *live = BasicBlock::Create(context_, "budget_live", function_);
+  BasicBlock *checked = BasicBlock::Create(context_, "budget_checked", function_);
+  builder_.CreateCondBr(hasGate, live, fixed);
+
+  builder_.SetInsertPoint(fixed);
+  Value *fixedCycles = builder_.CreateLoad(i64, guard_cycles_);
+  Value *fixedOverCycles = builder_.CreateICmpUGE(
+      fixedCycles, ConstantInt::get(i64, 256));
+  Value *fixedSteps = builder_.CreateLoad(i64, guard_steps_);
+  Value *fixedNextSteps = builder_.CreateAdd(fixedSteps, ConstantInt::get(i64, 1));
+  builder_.CreateStore(fixedNextSteps, guard_steps_);
+  Value *fixedOverSteps = builder_.CreateICmpUGE(
+      fixedNextSteps, ConstantInt::get(i64, 2048));
+  Value *fixedExhausted = builder_.CreateOr(fixedOverCycles, fixedOverSteps);
+  builder_.CreateBr(checked);
+
+  builder_.SetInsertPoint(live);
+  Value *budget32 = builder_.CreateLoad(i32, budgetPointer);
+  Value *budgetPositive = builder_.CreateICmpSGT(budget32, builder_.getInt32(0));
+  Value *budget64 = builder_.CreateZExt(budget32, i64);
+  // Hooks flush materialized charge and reset ctx->downcount.  Add only the
+  // charge not materialized yet; a lifetime counter would double-count every
+  // hook, the same failure mode the cross-chunk gate explicitly avoids.
+  Value *materialized = loadOffset(i64, offsetof(CPUState, downcount));
+  Value *unmaterialized = builder_.CreateLoad(i64, cycles_);
+  Value *unflushed = builder_.CreateAdd(builder_.CreateNeg(materialized),
+                                        unmaterialized);
+  Value *liveOverCycles = builder_.CreateOr(
+      builder_.CreateNot(budgetPositive),
+      builder_.CreateICmpUGE(unflushed, budget64));
+
+  Value *liveSteps = builder_.CreateLoad(i64, guard_steps_);
+  Value *liveNextSteps = builder_.CreateAdd(liveSteps, ConstantInt::get(i64, 1));
+  builder_.CreateStore(liveNextSteps, guard_steps_);
+  Value *stepLimit = builder_.CreateSelect(
+      builder_.CreateICmpUGT(budget64, ConstantInt::get(i64, 2048)),
+      budget64, ConstantInt::get(i64, 2048));
+  Value *liveOverSteps = builder_.CreateICmpUGE(liveNextSteps, stepLimit);
+
+  const DolLLVMFunctionRange *currentRange = rangeFor(source_.guest_start);
+  u32 currentIndex = 0;
+  if (currentRange) {
+    for (u32 i = 0; i < range_count_; ++i)
+      if (ranges_[i].start < currentRange->start)
+        ++currentIndex;
+  }
+  Value *currentOpen = builder_.CreateLoad(
+      i8, builder_.CreateInBoundsGEP(i8, chunkOpen,
+                                     builder_.getInt64(currentIndex)));
+  Value *chunkClosed = builder_.CreateICmpEQ(currentOpen, builder_.getInt8(0));
+
+  Value *pending = builder_.CreateLoad(i32, pendingPointer);
+  Value *pendingSyncMask = gateField(
+      i32, offsetof(StaticRecompDispatchGate, pending_sync));
+  Value *pendingAsyncMask = gateField(
+      i32, offsetof(StaticRecompDispatchGate, pending_async));
+  Value *syncPending = builder_.CreateICmpNE(
+      builder_.CreateAnd(pending, pendingSyncMask), builder_.getInt32(0));
+  Value *msr = used_[DOLIR_STATE_MSR] ? stateValue(DOLIR_STATE_MSR)
+                                      : loadContext(DOLIR_STATE_MSR);
+  Value *interruptsEnabled = builder_.CreateICmpNE(
+      builder_.CreateAnd(msr, builder_.getInt32(0x00008000u)),
+      builder_.getInt32(0));
+  Value *asyncPending = builder_.CreateAnd(
+      interruptsEnabled,
+      builder_.CreateICmpNE(builder_.CreateAnd(pending, pendingAsyncMask),
+                            builder_.getInt32(0)));
+  Value *liveExhausted = builder_.CreateOr(
+      builder_.CreateOr(liveOverCycles, liveOverSteps),
+      builder_.CreateOr(chunkClosed,
+                        builder_.CreateOr(syncPending, asyncPending)));
+  builder_.CreateBr(checked);
+
+  builder_.SetInsertPoint(checked);
+  PHINode *exhausted = builder_.CreatePHI(Type::getInt1Ty(context_), 2);
+  exhausted->addIncoming(fixedExhausted, fixed);
+  exhausted->addIncoming(liveExhausted, live);
   BasicBlock *run = BasicBlock::Create(context_, "budget_run", function_);
   BasicBlock *exit = BasicBlock::Create(context_, "budget_exit", function_);
   builder_.CreateCondBr(exhausted, exit, run);
@@ -492,8 +563,8 @@ Value *FunctionEmitter::bswap(Value *value) {
   auto *integer = cast<IntegerType>(value->getType());
   if (integer->getBitWidth() == 8)
     return value;
-  Function *intrinsic =
-      Intrinsic::getDeclaration(&module_, Intrinsic::bswap, {value->getType()});
+  FunctionCallee intrinsic = Intrinsic::getOrInsertDeclaration(
+      &module_, Intrinsic::bswap, {value->getType()});
   return builder_.CreateCall(intrinsic, {value});
 }
 
@@ -556,15 +627,15 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     result = builder_.CreateAShr(operand(inst, 0), operand(inst, 1));
     break;
   case DOLIR_OP_ROTL: {
-    Function *intrinsic =
-        Intrinsic::getDeclaration(&module_, Intrinsic::fshl, {resultType});
+    FunctionCallee intrinsic = Intrinsic::getOrInsertDeclaration(
+        &module_, Intrinsic::fshl, {resultType});
     result = builder_.CreateCall(
         intrinsic, {operand(inst, 0), operand(inst, 0), operand(inst, 1)});
     break;
   }
   case DOLIR_OP_CLZ: {
-    Function *intrinsic =
-        Intrinsic::getDeclaration(&module_, Intrinsic::ctlz, {resultType});
+    FunctionCallee intrinsic = Intrinsic::getOrInsertDeclaration(
+        &module_, Intrinsic::ctlz, {resultType});
     result = builder_.CreateCall(
         intrinsic, {operand(inst, 0), ConstantInt::getFalse(context_)});
     break;
@@ -627,8 +698,8 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     result = builder_.CreateFNeg(operand(inst, 0));
     break;
   case DOLIR_OP_FABS: {
-    Function *intrinsic =
-        Intrinsic::getDeclaration(&module_, Intrinsic::fabs, {resultType});
+    FunctionCallee intrinsic = Intrinsic::getOrInsertDeclaration(
+        &module_, Intrinsic::fabs, {resultType});
     result = builder_.CreateCall(intrinsic, {operand(inst, 0)});
     break;
   }

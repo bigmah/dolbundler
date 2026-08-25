@@ -282,8 +282,13 @@ u32 dolir_instruction_cycle_cost(const PPCInst* inst) {
     if (inst->embedded_data)
         return 0;
     switch (inst->op) {
-    case PPC_OP_UNKNOWN: case PPC_OP_DCBST: case PPC_OP_DCBF:
-    case PPC_OP_DCBI: case PPC_OP_ICBI: return 0;
+    case PPC_OP_UNKNOWN: return 0;
+    // Match Dolphin's PPCTables costs. These instructions lower to a direct
+    // cache-control hook, not instruction fallback, so nobody else charges
+    // them. Treating them as zero lets tight SDK cache-range loops execute
+    // several times too many iterations in one timing slice.
+    case PPC_OP_DCBST: case PPC_OP_DCBF: case PPC_OP_DCBI: return 5;
+    case PPC_OP_ICBI: return 4;
     case PPC_OP_MULLI: return 3;
     case PPC_OP_SC: case PPC_OP_RFI: case PPC_OP_TW: return 2;
     case PPC_OP_LMW: case PPC_OP_STMW: return 11;

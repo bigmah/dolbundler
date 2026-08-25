@@ -2078,10 +2078,12 @@ dispatch:
             regs[DOLVM_HOME_GPR(5)].u = head;
             regs[DOLVM_HOME_CTR].u = 0;
             // What the interpreted path would have charged: the prologue less
-            // what the block's own CHARGE already took, two per line for the
-            // loop, and the ending -- `sc` at 2, blr at 1, sync-isync-blr
-            // at 5.
-            u32 model = 8u + (old_math && head ? 1u : 0u) + 2u * lines +
+            // what the block's own CHARGE already took, the cache op plus
+            // addi/bdnz per line, and the ending -- `sc` at 2, blr at 1,
+            // sync-isync-blr at 5. ICBI is four cycles in Dolphin's table;
+            // the data-cache controls are five.
+            const u32 line_cost = (cache_op == PPC_CACHE_ICBI ? 4u : 5u) + 2u;
+            u32 model = 8u + (old_math && head ? 1u : 0u) + line_cost * lines +
                         (tail == 0 ? 2u : tail == 1 ? 1u : 5u);
             charge = model > paid ? model - paid : 0u;
         } else {

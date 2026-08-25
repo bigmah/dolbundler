@@ -12,6 +12,21 @@
 #include "Core/PowerPC/Interpreter/Interpreter_FPUtils.h"
 #include "Core/PowerPC/PowerPC.h"
 
+namespace
+{
+constexpr u32 ReplaceFPCC(u32 fprf, u32 compare_value)
+{
+  // FPRF is a five-bit BitField value here, while FPCC_MASK describes the
+  // shifted bits in the raw FPSCR register.  Convert the mask back to the
+  // field's coordinate space before clearing FPCC; otherwise a less-than
+  // followed by an equal comparison incorrectly accumulates to 0xa.
+  return (fprf & ~(FPCC_MASK >> FPRF_SHIFT)) | compare_value;
+}
+
+static_assert(ReplaceFPCC(0x08, 0x02) == 0x02);
+static_assert(ReplaceFPCC(0x18, 0x02) == 0x12);  // Preserve FPRF's class bit.
+}  // namespace
+
 void Interpreter::Helper_FloatCompareOrdered(PowerPC::PowerPCState& ppc_state,
                                              UGeckoInstruction inst, double fa, double fb)
 {
@@ -49,7 +64,7 @@ void Interpreter::Helper_FloatCompareOrdered(PowerPC::PowerPCState& ppc_state,
   const u32 compare_value = static_cast<u32>(compare_result);
 
   // Clear and set the FPCC bits accordingly.
-  ppc_state.fpscr.FPRF = (ppc_state.fpscr.FPRF & ~FPCC_MASK) | compare_value;
+  ppc_state.fpscr.FPRF = ReplaceFPCC(ppc_state.fpscr.FPRF, compare_value);
 
   ppc_state.cr.SetField(inst.CRFD, compare_value);
 }
@@ -84,7 +99,7 @@ void Interpreter::Helper_FloatCompareUnordered(PowerPC::PowerPCState& ppc_state,
   const u32 compare_value = static_cast<u32>(compare_result);
 
   // Clear and set the FPCC bits accordingly.
-  ppc_state.fpscr.FPRF = (ppc_state.fpscr.FPRF & ~FPCC_MASK) | compare_value;
+  ppc_state.fpscr.FPRF = ReplaceFPCC(ppc_state.fpscr.FPRF, compare_value);
 
   ppc_state.cr.SetField(inst.CRFD, compare_value);
 }
@@ -106,4 +121,3 @@ void Interpreter::fcmpu(Interpreter& interpreter, UGeckoInstruction inst)
 
   Helper_FloatCompareUnordered(ppc_state, inst, a.PS0AsDouble(), b.PS0AsDouble());
 }
-

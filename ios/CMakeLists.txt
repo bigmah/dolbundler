@@ -70,6 +70,43 @@ target_link_libraries(DolBundler PRIVATE
   fmt::fmt
 )
 
+# Development-only native AOT module. Native game code must be part of the
+# signed executable before installation; iOS will not load a module produced
+# on the phone. The generated directory is deliberately supplied from outside
+# the source tree so no game-derived code can enter the repository.
+set(DOLBUNDLER_NATIVE_GAME_ID "" CACHE STRING
+    "Disc ID of a native module to embed in the iOS app")
+set(DOLBUNDLER_NATIVE_GENERATED_DIR "" CACHE PATH
+    "DolRecomp generated output to embed in the iOS app")
+if(DOLBUNDLER_NATIVE_GAME_ID OR DOLBUNDLER_NATIVE_GENERATED_DIR)
+  if(NOT DOLBUNDLER_NATIVE_GAME_ID OR NOT DOLBUNDLER_NATIVE_GENERATED_DIR)
+    message(FATAL_ERROR
+      "DOLBUNDLER_NATIVE_GAME_ID and DOLBUNDLER_NATIVE_GENERATED_DIR must be set together")
+  endif()
+
+  set(GAME_ID "${DOLBUNDLER_NATIVE_GAME_ID}" CACHE STRING "" FORCE)
+  set(GENERATED_DIR "${DOLBUNDLER_NATIVE_GENERATED_DIR}" CACHE PATH "" FORCE)
+  set(GXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/vendor/dolphin/GXRuntime"
+      CACHE PATH "" FORCE)
+  set(CHASSIS_ABI_DIR "${DOLPHIN_CORE_DIR}/Core/PowerPC/StaticRecomp"
+      CACHE PATH "" FORCE)
+  set(RECOMPCORE_MODULE_EMBEDDED ON CACHE BOOL "" FORCE)
+  set(RECOMPCORE_MODULE_OPT_LEVEL 3 CACHE STRING "" FORCE)
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/vendor/dolphin/module-template"
+    "${CMAKE_BINARY_DIR}/native-game")
+
+  target_link_libraries(DolBundler PRIVATE
+    "g${DOLBUNDLER_NATIVE_GAME_ID}_recomp")
+  set(DOLBUNDLER_NATIVE_LINK_MAP "${CMAKE_BINARY_DIR}/DolBundler-native.map"
+      CACHE FILEPATH "Link map for the iOS executable containing the native module")
+  target_link_options(DolBundler PRIVATE
+    "LINKER:-undefined,error"
+    "LINKER:-map,${DOLBUNDLER_NATIVE_LINK_MAP}")
+  target_compile_definitions(DolBundler PRIVATE
+    DOLBUNDLER_NATIVE_GAME_ID="${DOLBUNDLER_NATIVE_GAME_ID}")
+endif()
+
 target_compile_definitions(DolBundler PRIVATE MODERNGEKKO_HAVE_UIKIT=1)
 
 # Porting to iOS means compiling out whole platform implementations, which

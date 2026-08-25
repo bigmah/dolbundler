@@ -52,6 +52,62 @@ add_custom_command(
 
 file(READ "${GENERATED_DIR}/generated.h" GENERATED_HEADER_TEXT)
 if(GENERATED_HEADER_TEXT MATCHES "DOLRECOMP_BACKEND_LLVM")
+  foreach(REQUIRED_METADATA
+          DOLRECOMP_NATIVE_BACKEND_NAME
+          DOLRECOMP_NATIVE_TARGET_TRIPLE
+          DOLRECOMP_NATIVE_TARGET_CPU
+          DOLRECOMP_NATIVE_LLVM_VERSION
+          DOLRECOMP_NATIVE_CODEGEN_FINGERPRINT
+          DOLRECOMP_NATIVE_BUILD_ID
+          DOLRECOMP_NATIVE_STATE_LAYOUT_HASH)
+    if(NOT GENERATED_HEADER_TEXT MATCHES "#define ${REQUIRED_METADATA} ")
+      message(FATAL_ERROR
+        "DolRecomp LLVM metadata is incomplete: ${REQUIRED_METADATA} is missing")
+    endif()
+  endforeach()
+  if(NOT GENERATED_HEADER_TEXT MATCHES
+      "#define DOLRECOMP_NATIVE_BACKEND_NAME \"llvm\"")
+    message(FATAL_ERROR "Generated object manifest does not identify the LLVM backend")
+  endif()
+  set(LLVM_SYMBOL_AUDIT_OPTIONS)
+  set(RECOMPCORE_MODULE_PGO_GENERATE OFF)
+  if(GENERATED_HEADER_TEXT MATCHES "pgo=gen")
+    # Instrumented LLVM objects intentionally reference compiler-rt's profile
+    # runtime. Keep the normal object audit closed over all other symbols and
+    # propagate the driver option that links the runtime into the final app.
+    list(APPEND LLVM_SYMBOL_AUDIT_OPTIONS --allow-profile-runtime)
+    set(RECOMPCORE_MODULE_PGO_GENERATE ON)
+  endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
+     NOT CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+    set(EXPECTED_LLVM_TRIPLE "arm64-apple-ios${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(NOT GENERATED_HEADER_TEXT MATCHES
+       "#define DOLRECOMP_NATIVE_TARGET_TRIPLE \"${EXPECTED_LLVM_TRIPLE}\"")
+      message(FATAL_ERROR
+        "Generated LLVM target must be ${EXPECTED_LLVM_TRIPLE} for this iPhoneOS build")
+    endif()
+    set(RECOMPCORE_EXPECTED_LLVM_CPU "apple-a16" CACHE STRING
+        "Required LLVM CPU for embedded iPhoneOS objects")
+    if(NOT GENERATED_HEADER_TEXT MATCHES
+       "#define DOLRECOMP_NATIVE_TARGET_CPU \"${RECOMPCORE_EXPECTED_LLVM_CPU}\"")
+      message(FATAL_ERROR
+        "Generated LLVM CPU does not match ${RECOMPCORE_EXPECTED_LLVM_CPU}")
+    endif()
+  endif()
+
+  include(CheckCSourceCompiles)
+  set(_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+  set(CMAKE_REQUIRED_INCLUDES
+      "${GENERATED_DIR};${GXRUNTIME_DIR}/include")
+  check_c_source_compiles(
+    "#include \"generated.h\"\n#include \"core/native_state_layout.h\"\nint main(void) { return 0; }"
+    RECOMPCORE_NATIVE_LAYOUT_MATCHES)
+  set(CMAKE_REQUIRED_INCLUDES "${_saved_required_includes}")
+  if(NOT RECOMPCORE_NATIVE_LAYOUT_MATCHES)
+    message(FATAL_ERROR
+      "Generated LLVM CPUState offsets do not match the target GXRuntime layout")
+  endif()
+
   set(GENERATED_MANIFEST)
   foreach(MANIFEST_CANDIDATE
           "${GENERATED_DIR}/${GAME_ID}.c"
@@ -76,6 +132,21 @@ if(GENERATED_HEADER_TEXT MATCHES "DOLRECOMP_BACKEND_LLVM")
       message(FATAL_ERROR "DolRecomp LLVM object is missing: ${CHUNK_INPUT}")
     endif()
   endforeach()
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/verify_llvm_objects.py"
+            --nm "${CMAKE_NM}"
+            --cpu-header "${GXRUNTIME_DIR}/include/core/cpu.h"
+            ${LLVM_SYMBOL_AUDIT_OPTIONS}
+            ${CHUNK_INPUTS}
+    RESULT_VARIABLE LLVM_SYMBOL_AUDIT_RESULT
+    OUTPUT_VARIABLE LLVM_SYMBOL_AUDIT_OUTPUT
+    ERROR_VARIABLE LLVM_SYMBOL_AUDIT_ERROR)
+  if(NOT LLVM_SYMBOL_AUDIT_RESULT EQUAL 0)
+    message(FATAL_ERROR
+      "LLVM object symbol audit failed:\n${LLVM_SYMBOL_AUDIT_OUTPUT}${LLVM_SYMBOL_AUDIT_ERROR}")
+  endif()
+  message(STATUS "${LLVM_SYMBOL_AUDIT_OUTPUT}")
   set_source_files_properties(${CHUNK_INPUTS} PROPERTIES EXTERNAL_OBJECT TRUE)
 else()
   file(GLOB CHUNK_INPUTS CONFIGURE_DEPENDS "${GENERATED_DIR}/chunks/*.c")
@@ -84,16 +155,46 @@ if(NOT CHUNK_INPUTS)
   message(FATAL_ERROR "DolRecomp output has no generated chunks in ${GENERATED_DIR}/chunks")
 endif()
 
-add_library(${MODULE_NAME} SHARED
+option(RECOMPCORE_MODULE_EMBEDDED
+       "Build a static module that shares the host's GXRuntime CPU helpers" OFF)
+
+if(RECOMPCORE_MODULE_EMBEDDED)
+  set(MODULE_LIBRARY_TYPE STATIC)
+  # moderngekko_dolvm already provides the common CPU helpers in an embedded
+  # host. The exception implementation is the only native-module source it
+  # does not compile itself.
+  set(MODULE_RUNTIME_SOURCES
+      "${GXRUNTIME_DIR}/src/core/cpu_exception.c")
+else()
+  set(MODULE_LIBRARY_TYPE SHARED)
+  set(MODULE_RUNTIME_SOURCES
+      "${GXRUNTIME_DIR}/src/core/cpu.c"
+      "${GXRUNTIME_DIR}/src/core/cpu_exception.c"
+      "${GXRUNTIME_DIR}/src/core/cpu_interpreter.c"
+      "${GXRUNTIME_DIR}/src/core/cpu_interpreter_table.c"
+      "${GXRUNTIME_DIR}/src/core/cpu_interpreter_float.c"
+      "${GXRUNTIME_DIR}/src/core/cpu_interpreter_integer.c")
+endif()
+
+add_library(${MODULE_NAME} ${MODULE_LIBRARY_TYPE}
   module_export.c
   "${MODULE_TABLES}"
-  "${GXRUNTIME_DIR}/src/core/cpu.c"
-  "${GXRUNTIME_DIR}/src/core/cpu_exception.c"
-  "${GXRUNTIME_DIR}/src/core/cpu_interpreter.c"
-  "${GXRUNTIME_DIR}/src/core/cpu_interpreter_table.c"
-  "${GXRUNTIME_DIR}/src/core/cpu_interpreter_float.c"
-  "${GXRUNTIME_DIR}/src/core/cpu_interpreter_integer.c"
+  ${MODULE_RUNTIME_SOURCES}
   ${CHUNK_INPUTS})
+
+if(RECOMPCORE_MODULE_PGO_GENERATE)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR
+      "LLVM profile-generation objects require a Clang final-link driver")
+  endif()
+  if(RECOMPCORE_MODULE_EMBEDDED)
+    target_link_options(${MODULE_NAME} INTERFACE -fprofile-instr-generate)
+    target_compile_definitions(${MODULE_NAME} INTERFACE
+      DOLBUNDLER_LLVM_PGO_GENERATE=1)
+  else()
+    target_link_options(${MODULE_NAME} PRIVATE -fprofile-instr-generate)
+  endif()
+endif()
 
 set_target_properties(${MODULE_NAME} PROPERTIES
   PREFIX ""

@@ -130,6 +130,11 @@ bool StaticRecompLockstepVerifier::LockstepWindowOpen() const
 void StaticRecompLockstepVerifier::Prepare(const CPUState& guest)
 {
   m_ls_entry = guest.pc;
+  // Hooks such as dcbz flush the charge accumulated so far into the chassis
+  // before returning to the same native dispatch. Remember the lifetime
+  // counter here so the shadow run can include those mid-dispatch flushes as
+  // well as the charge still resident in guest.downcount at Verify().
+  m_ls_charged_cycles_start = m_core.m_charged_cycles;
   m_ls_snapshot = guest;
   m_journal.Clear();
   m_ls_fallback_seen = false;

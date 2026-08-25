@@ -1,4 +1,5 @@
 #include "moderngekko/module_abi.h"
+#include "core/native_state_layout.h"
 
 static int dispatch(CPUState* state, uint32_t address)
 {
@@ -11,6 +12,10 @@ static const ModernGekkoRange code_ranges[] = {
 
 static const uint64_t chunk_hashes[] = {
     0xCBF29CE484222325ull,
+};
+
+static ModernGekkoNativeMetadata metadata = {
+    "test", "test-target", "test-toolchain", "test-codegen", "test-build", 0,
 };
 
 static const ModernGekkoModuleDesc descriptor = {
@@ -28,9 +33,14 @@ static const ModernGekkoModuleDesc descriptor = {
     code_ranges,
     1u,
     chunk_hashes,
+    0,
+    0u,
+    &metadata,
+    0,
 };
 
 MODERNGEKKO_MODULE_EXPORT const ModernGekkoModuleDesc* staticrecomp_get_module(void)
 {
+    metadata.cpu_state_layout_hash = dolnative_state_layout_hash();
     return &descriptor;
 }

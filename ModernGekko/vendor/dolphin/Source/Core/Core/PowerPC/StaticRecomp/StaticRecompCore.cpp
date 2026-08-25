@@ -108,6 +108,8 @@ bool RelModulesValid(const StaticRecompModuleDesc& desc)
 }
 }  // namespace
 
+void StaticRecompNativeSamplerStopAndReport();
+
 bool StaticRecompCore::IsModuleActive() const
 {
   return m_module_active;
@@ -216,6 +218,7 @@ void StaticRecompCore::Init()
 
 void StaticRecompCore::Shutdown()
 {
+  StaticRecompNativeSamplerStopAndReport();
   PublishGate(false);
   g_static_recomp_core = nullptr;
   std::fprintf(stderr,
@@ -361,6 +364,17 @@ void StaticRecompCore::LoadModule()
       ChunkContainsHostCall(i);
   }
 
+  if (desc->native_metadata)
+  {
+    const StaticRecompNativeMetadata& metadata = *desc->native_metadata;
+    std::fprintf(stderr,
+                 "[staticrecomp] module identity: backend=%s target=%s toolchain=%s "
+                 "build=%s layout=%016llx codegen=%s\n",
+                 metadata.backend_name, metadata.target_triple, metadata.toolchain_version,
+                 metadata.build_id,
+                 static_cast<unsigned long long>(metadata.cpu_state_layout_hash),
+                 metadata.codegen_fingerprint);
+  }
   std::fprintf(stderr, "[staticrecomp] module loaded: %s entry=0x%08X\n", path.c_str(),
                desc->entry_point);
   NOTICE_LOG_FMT(POWERPC,

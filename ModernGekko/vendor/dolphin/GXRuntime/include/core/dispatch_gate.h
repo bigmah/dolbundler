@@ -18,6 +18,7 @@
 #ifndef GXRUNTIME_CORE_DISPATCH_GATE_H
 #define GXRUNTIME_CORE_DISPATCH_GATE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -44,6 +45,36 @@ typedef struct StaticRecompDispatchGate
   uint32_t pending_sync;
   uint32_t pending_async;
 } StaticRecompDispatchGate;
+
+// Native modules publish the chassis-owned pointers here so generated loop
+// guards can read them directly.  A zeroed value means no gate is available.
+// Keeping the small descriptor in module-owned data avoids a helper call on
+// every guest back edge while preserving the same live checks as DolVM.
+extern StaticRecompDispatchGate dolrecomp_native_gate;
+
+// True while the charge accumulated since the last chassis flush still fits
+// in the live timing slice.  The accumulator is non-positive: generated code
+// subtracts cycles from CPUState::downcount, and a hook resets it to zero after
+// moving those cycles into *gate->budget.  Comparing a lifetime-wide counter
+// here would count flushed cycles twice.
+static inline bool staticrecomp_dispatch_budget_allows(
+    const StaticRecompDispatchGate* gate, int64_t charge_accumulator)
+{
+  if (!gate || !gate->budget)
+    return true;
+  const int32_t budget = *gate->budget;
+  return budget > 0 && charge_accumulator > -(int64_t)budget;
+}
+
+static inline bool staticrecomp_dispatch_has_pending(
+    const StaticRecompDispatchGate* gate, uint32_t msr)
+{
+  if (!gate || !gate->pending)
+    return false;
+  const uint32_t pending = *gate->pending;
+  return (pending & gate->pending_sync) != 0 ||
+         ((msr & 0x00008000u) != 0 && (pending & gate->pending_async) != 0);
+}
 
 #ifdef __cplusplus
 }
