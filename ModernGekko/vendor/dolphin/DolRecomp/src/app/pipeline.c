@@ -71,7 +71,9 @@ static u32 c_chunk_instructions(void) {
 // indexes that gate by address-sorted ABI chunk rather than DOL section order.
 // v12 makes native loop guards use the chassis's live timing/exception gate.
 // v13 charges direct cache-control instructions at Dolphin's table costs.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v16"
+// v18 includes GameCube-only memory lowering, invariant gate snapshots, and
+// the expanded in-SSA paired/single floating-point fast paths.
+#define DOLLLVM_CACHE_VERSION "dolllvm-v18"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
@@ -88,6 +90,7 @@ typedef struct {
     u32 total;
     const DolLLVMFunctionRange* ranges;
     u32 range_count;
+    int gamecube;
     u64 hash;
     char name[128];
     char path[1400];
@@ -299,6 +302,7 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
     hash = hash_bytes(hash, DOLLLVM_CACHE_VERSION, strlen(DOLLLVM_CACHE_VERSION));
     hash = hash_bytes(hash, &job->function_address, sizeof(job->function_address));
     hash = hash_bytes(hash, &job->count, sizeof(job->count));
+    hash = hash_bytes(hash, &job->gamecube, sizeof(job->gamecube));
     u64 state_layout = dolnative_state_layout_hash();
     hash = hash_bytes(hash, &state_layout, sizeof(state_layout));
     // Host triples must distinguish caches when no target was requested.
@@ -431,6 +435,7 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     options.verify = 1;
     options.function_ranges = job->ranges;
     options.function_range_count = job->range_count;
+    options.gamecube = job->gamecube;
     char ir_path[1440];
     const char* dump_ir = getenv("DOLRECOMP_LLVM_DUMP_IR");
     if (dump_ir && (!strcmp(dump_ir, "1") || strstr(job->name, dump_ir))) {
@@ -787,6 +792,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
             job->total = range_count;
             job->ranges = ranges;
             job->range_count = range_count;
+            job->gamecube = cpu == DOLRECOMP_CPU_GEKKO;
             job->hash = llvm_job_hash(job);
             build_id = hash_bytes(build_id, &job->hash, sizeof(job->hash));
             if (cache_dir[0]) {

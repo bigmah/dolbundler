@@ -23,9 +23,9 @@ using namespace llvm;
 FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
                                  const DolIRFunction &source,
                                  const DolLLVMFunctionRange *ranges,
-                                 u32 range_count)
+                                 u32 range_count, bool gamecube)
     : context_(context), module_(module), source_(source), builder_(context),
-      ranges_(ranges), range_count_(range_count) {}
+      ranges_(ranges), range_count_(range_count), gamecube_(gamecube) {}
 
 bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   auto *pointer = PointerType::getUnqual(context_);
@@ -178,12 +178,22 @@ void FunctionEmitter::scanState() {
           inst.aux == DOLIR_HELPER_EXACT_PAIRED)
         scanExactPaired(inst.immediate);
       if (inst.op == DOLIR_OP_HELPER_CALL &&
-          inst.aux == DOLIR_HELPER_PSQ_LOAD) {
+          (inst.aux == DOLIR_HELPER_PSQ_LOAD ||
+           inst.aux == DOLIR_HELPER_PSQ_STORE)) {
         u32 reg = inst.immediate & 0xFFu;
+        u32 gqr = (inst.immediate >> 9) & 7u;
+        used_[DOLIR_STATE_HID2] = true;
+        used_[DOLIR_STATE_GQR0 + gqr] = true;
         used_[DOLIR_STATE_FPR0 + reg] = true;
-        dirty_[DOLIR_STATE_FPR0 + reg] = true;
         used_[DOLIR_STATE_PS1_0 + reg] = true;
-        dirty_[DOLIR_STATE_PS1_0 + reg] = true;
+        if (inst.aux == DOLIR_HELPER_PSQ_LOAD) {
+          dirty_[DOLIR_STATE_FPR0 + reg] = true;
+          dirty_[DOLIR_STATE_PS1_0 + reg] = true;
+        } else {
+          used_[DOLIR_STATE_RESERVE_ADDR] = true;
+          used_[DOLIR_STATE_RESERVE_VALID] = true;
+          dirty_[DOLIR_STATE_RESERVE_VALID] = true;
+        }
       }
       if (inst.op == DOLIR_OP_HELPER_CALL &&
           inst.aux == DOLIR_HELPER_STORE_CONDITIONAL) {
@@ -349,9 +359,41 @@ void FunctionEmitter::emitEntry() {
   ram_ = loadOffset(pointer, offsetof(CPUState, ram));
   ram_size_ =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
-  exram_ = loadOffset(pointer, offsetof(CPUState, exram));
-  exram_size_ =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
+  if (gamecube_) {
+    exram_ = ConstantPointerNull::get(cast<PointerType>(pointer));
+    exram_size_ = builder_.getInt32(0);
+  } else {
+    exram_ = loadOffset(pointer, offsetof(CPUState, exram));
+    exram_size_ =
+        loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
+  }
+  GlobalVariable *gate = module_.getGlobalVariable("dolrecomp_native_gate", true);
+  if (!gate) {
+    gate = new GlobalVariable(
+        module_, ArrayType::get(Type::getInt8Ty(context_),
+                                sizeof(StaticRecompDispatchGate)),
+        false, GlobalValue::ExternalLinkage, nullptr,
+        "dolrecomp_native_gate");
+    gate->setVisibility(GlobalValue::HiddenVisibility);
+    gate->setDSOLocal(true);
+  }
+  const auto gateField = [&](Type *fieldType, size_t offset) {
+    Value *field = builder_.CreateInBoundsGEP(
+        Type::getInt8Ty(context_), gate, builder_.getInt64(offset));
+    return builder_.CreateLoad(fieldType, field);
+  };
+  gate_chunk_open_ = gateField(
+      pointer, offsetof(StaticRecompDispatchGate, chunk_open));
+  gate_budget_ =
+      gateField(pointer, offsetof(StaticRecompDispatchGate, budget));
+  gate_pending_ =
+      gateField(pointer, offsetof(StaticRecompDispatchGate, pending));
+  gate_pending_sync_ = gateField(
+      Type::getInt32Ty(context_),
+      offsetof(StaticRecompDispatchGate, pending_sync));
+  gate_pending_async_ = gateField(
+      Type::getInt32Ty(context_),
+      offsetof(StaticRecompDispatchGate, pending_async));
   Value *pc = loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, pc));
   BasicBlock *bad = BasicBlock::Create(context_, "entry_miss", function_);
   auto *dispatch = builder_.CreateSwitch(pc, bad, source_.block_count);
@@ -405,36 +447,15 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
   Type *i8 = Type::getInt8Ty(context_);
   Type *i32 = Type::getInt32Ty(context_);
   Type *i64 = Type::getInt64Ty(context_);
-  Type *pointer = PointerType::getUnqual(context_);
 
   // Guard the whole native call chain, not one generated function.  Without a
   // published chassis gate (host execution tests and standalone modules), keep
   // the conservative fixed allowance.  An attached iOS module instead runs to
   // the end of the chassis's live slice, exactly as DolVM does.
-  GlobalVariable *gate = module_.getGlobalVariable("dolrecomp_native_gate", true);
-  if (!gate) {
-    gate = new GlobalVariable(
-        module_, ArrayType::get(i8, sizeof(StaticRecompDispatchGate)), false,
-        GlobalValue::ExternalLinkage, nullptr, "dolrecomp_native_gate");
-    gate->setVisibility(GlobalValue::HiddenVisibility);
-    gate->setDSOLocal(true);
-  }
-  const auto gateField = [&](Type *fieldType, size_t offset) {
-    Value *address = builder_.CreateInBoundsGEP(
-        i8, gate, ConstantInt::get(i64, offset));
-    return builder_.CreateLoad(fieldType, address);
-  };
-
-  Value *chunkOpen = gateField(
-      pointer, offsetof(StaticRecompDispatchGate, chunk_open));
-  Value *budgetPointer = gateField(
-      pointer, offsetof(StaticRecompDispatchGate, budget));
-  Value *pendingPointer = gateField(
-      pointer, offsetof(StaticRecompDispatchGate, pending));
   Value *hasGate = builder_.CreateAnd(
-      builder_.CreateIsNotNull(chunkOpen),
-      builder_.CreateAnd(builder_.CreateIsNotNull(budgetPointer),
-                         builder_.CreateIsNotNull(pendingPointer)));
+      builder_.CreateIsNotNull(gate_chunk_open_),
+      builder_.CreateAnd(builder_.CreateIsNotNull(gate_budget_),
+                         builder_.CreateIsNotNull(gate_pending_)));
 
   BasicBlock *fixed = BasicBlock::Create(context_, "budget_fixed", function_);
   BasicBlock *live = BasicBlock::Create(context_, "budget_live", function_);
@@ -454,7 +475,7 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
   builder_.CreateBr(checked);
 
   builder_.SetInsertPoint(live);
-  Value *budget32 = builder_.CreateLoad(i32, budgetPointer);
+  Value *budget32 = builder_.CreateLoad(i32, gate_budget_);
   Value *budgetPositive = builder_.CreateICmpSGT(budget32, builder_.getInt32(0));
   Value *budget64 = builder_.CreateZExt(budget32, i64);
   // Hooks flush materialized charge and reset ctx->downcount.  Add only the
@@ -484,17 +505,13 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
         ++currentIndex;
   }
   Value *currentOpen = builder_.CreateLoad(
-      i8, builder_.CreateInBoundsGEP(i8, chunkOpen,
+      i8, builder_.CreateInBoundsGEP(i8, gate_chunk_open_,
                                      builder_.getInt64(currentIndex)));
   Value *chunkClosed = builder_.CreateICmpEQ(currentOpen, builder_.getInt8(0));
 
-  Value *pending = builder_.CreateLoad(i32, pendingPointer);
-  Value *pendingSyncMask = gateField(
-      i32, offsetof(StaticRecompDispatchGate, pending_sync));
-  Value *pendingAsyncMask = gateField(
-      i32, offsetof(StaticRecompDispatchGate, pending_async));
+  Value *pending = builder_.CreateLoad(i32, gate_pending_);
   Value *syncPending = builder_.CreateICmpNE(
-      builder_.CreateAnd(pending, pendingSyncMask), builder_.getInt32(0));
+      builder_.CreateAnd(pending, gate_pending_sync_), builder_.getInt32(0));
   Value *msr = used_[DOLIR_STATE_MSR] ? stateValue(DOLIR_STATE_MSR)
                                       : loadContext(DOLIR_STATE_MSR);
   Value *interruptsEnabled = builder_.CreateICmpNE(
@@ -502,7 +519,7 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
       builder_.getInt32(0));
   Value *asyncPending = builder_.CreateAnd(
       interruptsEnabled,
-      builder_.CreateICmpNE(builder_.CreateAnd(pending, pendingAsyncMask),
+      builder_.CreateICmpNE(builder_.CreateAnd(pending, gate_pending_async_),
                             builder_.getInt32(0)));
   Value *liveExhausted = builder_.CreateOr(
       builder_.CreateOr(liveOverCycles, liveOverSteps),

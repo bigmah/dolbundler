@@ -150,6 +150,15 @@ void StaticRecompCore::Init()
   g_static_recomp_core = this;
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
+  const char* poll_skip = std::getenv("STATICRECOMP_POLL_SKIP");
+  m_poll_skip_enabled = !poll_skip || poll_skip[0] != '0';
+  m_poll_next_site = 0;
+  m_poll_run = 0;
+  m_poll_run_live = false;
+  m_poll_reads = 0;
+  m_poll_yields = 0;
+  for (PollSite& site : m_poll_sites)
+    site = {};
   const char* vector_hle = std::getenv("DOLVM_VECTOR_HLE");
   m_vector_stubs_enabled = !vector_hle || std::strcmp(vector_hle, "0") != 0;
   ResetVectorStubs();
@@ -224,14 +233,15 @@ void StaticRecompCore::Shutdown()
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
                "vector_hle=%llu smc_failed=%u smc_lost=%lluB verifications=%llu "
-               "reverify_events=%llu bursts=%llu cycles=%llu\n",
+               "reverify_events=%llu bursts=%llu cycles=%llu poll_reads=%llu poll_yields=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
                (unsigned long long)m_hook_fallback_instructions,
                (unsigned long long)m_vector_stub_hits, m_failed_chunks,
                (unsigned long long)m_smc_lost_bytes, (unsigned long long)m_verifications,
                (unsigned long long)m_reverify_events, (unsigned long long)m_bursts,
-               (unsigned long long)m_charged_cycles);
+               (unsigned long long)m_charged_cycles, (unsigned long long)m_poll_reads,
+               (unsigned long long)m_poll_yields);
   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
                                                     m_dispatch_samples.end());
   std::sort(dispatch_samples.begin(), dispatch_samples.end(),

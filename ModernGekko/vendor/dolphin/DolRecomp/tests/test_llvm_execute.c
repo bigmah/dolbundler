@@ -19,6 +19,7 @@ void func_80002900(CPUState* cpu);
 void func_80002A00(CPUState* cpu);
 void func_80002B00(CPUState* cpu);
 void func_80002B40(CPUState* cpu);
+void func_80002B80(CPUState* cpu);
 void func_80002C00(CPUState* cpu);
 void func_80002D00(CPUState* cpu);
 void func_80003000(CPUState* cpu);
@@ -41,10 +42,7 @@ static void journal_write(u32 offset, u32 size, void* user) {
     journal_bad |= offset != 0 || size != 4 || user != &journal_count;
 }
 
-bool dolrecomp_native_gate_allows(CPUState* cpu, u32 chunk_index,
-                                  u64 charged_cycles) {
-    (void)cpu;
-    (void)charged_cycles;
+bool dolrecomp_native_gate_allows(CPUState* cpu, u32 chunk_index) {
     native_gate_calls++;
     native_gate_last_chunk = chunk_index;
     return cpu && dolrecomp_native_gate.chunk_open &&
@@ -250,6 +248,7 @@ int main(void) {
     CHECK(cpu.fpr[10] == 3.5 && cpu.ps1[10] == 3.5);
     CHECK(cpu.fpr[13] == 3.75);
     CHECK(cpu.fpr[16] == 5.5);
+    CHECK(cpu.fpr[17] == 12.0 && cpu.ps1[17] == 12.0);
     CHECK(cpu.fpr[19] == 6.0);
     CHECK(cpu.fpr[22] == 3.5);
 
@@ -344,6 +343,51 @@ int main(void) {
     CHECK(memcmp(cpu.fpr, expected.fpr, sizeof(cpu.fpr)) == 0);
     CHECK(memcmp(cpu.ps1, expected.ps1, sizeof(cpu.ps1)) == 0);
     CHECK(cpu.fpscr == expected.fpscr);
+
+    // The common unquantised PSQ form stays inside generated SSA/memory code;
+    // quantised and exceptional forms use the exact helper behind the same
+    // generated function. Exercise both arms so the fast-path guard cannot
+    // silently weaken architectural checks.
+    prepare_call(&cpu, 0x80002B80u);
+    cpu.msr = 1u << 13;
+    cpu.hid2 = PPC_HID2_PSE | PPC_HID2_LSQE;
+    cpu.gqr[0] = 0;
+    cpu.gpr[3] = GC_RAM_BASE + 0x400u;
+    mem_write32(&cpu, cpu.gpr[3], 0x3FC00000u);
+    mem_write32(&cpu, cpu.gpr[3] + 4u, 0xC0200000u);
+    func_80002B80(&cpu);
+    CHECK(cpu.fpr[1] == 1.5 && cpu.ps1[1] == -2.5);
+    CHECK(mem_read32(&cpu, cpu.gpr[3] + 8u) == 0x3FC00000u);
+    CHECK(mem_read32(&cpu, cpu.gpr[3] + 12u) == 0xC0200000u);
+
+    prepare_call(&cpu, 0x80002B80u);
+    cpu.msr = 1u << 13;
+    cpu.hid2 = PPC_HID2_PSE | PPC_HID2_LSQE;
+    cpu.gqr[0] = 0x01040104u;
+    cpu.gpr[3] = GC_RAM_BASE + 0x420u;
+    mem_write8(&cpu, cpu.gpr[3], 10u);
+    mem_write8(&cpu, cpu.gpr[3] + 1u, 246u);
+    func_80002B80(&cpu);
+    CHECK(cpu.fpr[1] == 5.0 && cpu.ps1[1] == 123.0);
+    CHECK(mem_read8(&cpu, cpu.gpr[3] + 8u) == 10u);
+    CHECK(mem_read8(&cpu, cpu.gpr[3] + 9u) == 246u);
+
+    prepare_call(&cpu, 0x80002B80u);
+    cpu.msr = 1u << 13;
+    cpu.hid2 = 0;
+    cpu.gqr[0] = 0;
+    cpu.gpr[3] = GC_RAM_BASE + 0x440u;
+    func_80002B80(&cpu);
+    CHECK(cpu.exception & PPC_EXC_PROGRAM);
+    CHECK(cpu.program_exception & PPC_PROGRAM_ILLEGAL);
+
+    prepare_call(&cpu, 0x80002B80u);
+    cpu.msr = 1u << 13;
+    cpu.hid2 = PPC_HID2_PSE | PPC_HID2_LSQE;
+    cpu.gqr[0] = 0;
+    cpu.gpr[3] = GC_RAM_BASE + 0x441u;
+    func_80002B80(&cpu);
+    CHECK(cpu.exception & PPC_EXC_ALIGNMENT);
 
     CHECK(fallback_count == 1);
 

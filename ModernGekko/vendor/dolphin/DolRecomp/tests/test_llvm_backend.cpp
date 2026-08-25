@@ -130,9 +130,9 @@ int main(int argc, char** argv) {
     const u32 float_words[] = {
         0xEC22182Au, 0xEC853028u, 0xECE80272u, 0xED4B6024u,
         0xFDAE782Au, 0xFE119028u, 0xFE740572u, 0xFED7C024u,
-        0x4E800020u,
+        0xEE32A4FAu, 0x4E800020u,
     };
-    CHECK(add_chunk(&module, float_words, 9, 0x80002A00u));
+    CHECK(add_chunk(&module, float_words, 10, 0x80002A00u));
 
     const u32 paired_words[] = {
         0x1022182Au, 0x10E80272u, 0x11AE83FAu, 0x10A03030u,
@@ -147,8 +147,8 @@ int main(int argc, char** argv) {
     };
     CHECK(add_chunk(&module, paired_madds_words, 8, 0x80002B40u));
 
-    const u32 psq_words[] = {0xE0230000u, 0x4E800020u};
-    CHECK(add_chunk(&module, psq_words, 2, 0x80002B80u));
+    const u32 psq_words[] = {0xE0230000u, 0xF0230008u, 0x4E800020u};
+    CHECK(add_chunk(&module, psq_words, 3, 0x80002B80u));
 
     // Runtime boundaries must not reset the dispatcher budget.
     const u32 budget_words[] = {
@@ -183,6 +183,7 @@ int main(int argc, char** argv) {
     options.verify = 1;
     options.emit_ir = 1;
     options.ir_path = argv[2];
+    options.gamecube = 1;
     // Deliberately model DOL section order rather than address order. The gate
     // index is an ABI chunk-table index and must still use address rank.
     const DolLLVMFunctionRange ranges[] = {
@@ -222,6 +223,7 @@ int main(int argc, char** argv) {
           std::string::npos);
     CHECK(irText.find("@llvm.ctlz.i32") != std::string::npos);
     CHECK(irText.find("@llvm.fma.") != std::string::npos);
+    CHECK(irText.find("load_mem2") == std::string::npos);
 
     char iosFingerprint[2048]{};
     char macFingerprint[2048]{};

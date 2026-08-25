@@ -418,7 +418,8 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     dolllvm::FunctionEmitter emitter(
         context, module, source->functions[i],
         options ? options->function_ranges : nullptr,
-        options ? options->function_range_count : 0);
+        options ? options->function_range_count : 0,
+        options && options->gamecube);
     if (!emitter.emit(diagnosticStream)) {
       diagnosticStream.flush();
       fprintf(diagnostics, "%s", diagnosticText.c_str());

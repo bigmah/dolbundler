@@ -53,14 +53,12 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
       "dolrecomp_native_gate_allows",
       FunctionType::get(Type::getInt1Ty(context_),
                         {PointerType::getUnqual(context_),
-                         Type::getInt32Ty(context_), Type::getInt64Ty(context_)},
+                         Type::getInt32Ty(context_)},
                         false));
   if (auto *gateFunction = dyn_cast<Function>(gate.getCallee()))
     gateFunction->addRetAttr(Attribute::ZExt);
-  Value *charged =
-      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_);
   CallInst *allowed = builder_.CreateCall(
-      gate, {ctx_, builder_.getInt32(rangeIndex), charged});
+      gate, {ctx_, builder_.getInt32(rangeIndex)});
   allowed->addRetAttr(Attribute::ZExt);
   BasicBlock *direct =
       BasicBlock::Create(context_, "gate_open", function_);

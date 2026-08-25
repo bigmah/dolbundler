@@ -20,6 +20,7 @@ typedef struct {
     const char* ir_path;
     const DolLLVMFunctionRange* function_ranges;
     u32 function_range_count;
+    int gamecube;
 } DolLLVMOptions;
 
 bool dolllvm_emit_object(const DolIRModule* module, const char* object_path,

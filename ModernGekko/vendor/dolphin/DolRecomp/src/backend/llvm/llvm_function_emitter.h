@@ -29,7 +29,8 @@ class FunctionEmitter final {
 public:
   FunctionEmitter(llvm::LLVMContext &context, llvm::Module &module,
                   const DolIRFunction &source,
-                  const DolLLVMFunctionRange *ranges, u32 range_count);
+                  const DolLLVMFunctionRange *ranges, u32 range_count,
+                  bool gamecube);
 
   bool emit(llvm::raw_ostream &diagnostics);
 
@@ -125,6 +126,11 @@ private:
   llvm::Value *exram_size_ = nullptr;
   llvm::Value *journal_ = nullptr;
   llvm::Value *journal_user_ = nullptr;
+  llvm::Value *gate_chunk_open_ = nullptr;
+  llvm::Value *gate_budget_ = nullptr;
+  llvm::Value *gate_pending_ = nullptr;
+  llvm::Value *gate_pending_sync_ = nullptr;
+  llvm::Value *gate_pending_async_ = nullptr;
   std::array<llvm::AllocaInst *, DOLIR_STATE_COUNT> state_{};
   std::array<bool, DOLIR_STATE_COUNT> used_{};
   std::array<bool, DOLIR_STATE_COUNT> dirty_{};
@@ -134,6 +140,7 @@ private:
   std::vector<u32> continuations_;
   const DolLLVMFunctionRange *ranges_ = nullptr;
   u32 range_count_ = 0;
+  bool gamecube_ = false;
   u32 current_pc_ = 0;
 };
 

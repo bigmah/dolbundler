@@ -146,6 +146,15 @@ private:
   // guest is at rather than the start of the dispatch.
   void FlushGuestCharge();
 
+  // Some SDK waits hide their hardware poll behind a call, so the frontend's
+  // ordinary idle-loop analysis cannot see that the back edge has no way to
+  // change the value being tested. Remember repeated identical chassis reads
+  // and end the current timing slice after the wait has proved itself. The
+  // generated loop guard then leaves at the loop head and polls again next
+  // slice, matching DolVM's conservative poll-spin handling.
+  void TrackExternalRead(u32 pc, u32 address, u64 value);
+  void ResetExternalPollRun();
+
   // CPUState hooks (module -> chassis environment). `cpu->external_user_data`
   // is the StaticRecompCore*.
   static u64 HookExternalRead(CPUState* cpu, u32 ea, u8 size);
@@ -184,6 +193,26 @@ private:
   std::unordered_map<u32, u64> m_dispatch_samples;
   u64 m_bursts = 0;          // SyncIn..SyncOut native runs (diagnostic)
   u64 m_charged_cycles = 0;  // cycles flushed from module charges (diagnostic)
+
+  static constexpr u32 POLL_SPIN_READS = 16;
+  static constexpr u32 POLL_SITE_COUNT = 8;
+  struct PollSite
+  {
+    u32 pc = 0;
+    u32 address = 0;
+    u64 value = 0;
+    bool live = false;
+  };
+  PollSite m_poll_sites[POLL_SITE_COUNT]{};
+  u32 m_poll_next_site = 0;
+  u32 m_poll_pc = 0;
+  u32 m_poll_address = 0;
+  u64 m_poll_value = 0;
+  u32 m_poll_run = 0;
+  bool m_poll_run_live = false;
+  bool m_poll_skip_enabled = true;
+  u64 m_poll_reads = 0;
+  u64 m_poll_yields = 0;
 
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;

@@ -30,16 +30,11 @@ StaticRecompDispatchGate dolrecomp_native_gate;
 // branches at every generated edge substantially inflates the title's hot
 // code; loop guards still read the live gate inline where their smaller check
 // amortizes across iterations.
-bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index,
-                                  u64 charged_cycles)
+bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index)
 {
     // materialize() has already moved this function's outstanding charge into
-    // ctx->downcount before the gate is called.  Hooks flush that accumulator
-    // into the chassis's live budget and reset it to zero.  charged_cycles is
-    // deliberately lifetime-wide for the generated loop backstop, so comparing
-    // it with the already-reduced live budget would count every flushed charge
-    // twice and collapse MMIO-heavy native chains into tiny redispatches.
-    (void)charged_cycles;
+    // ctx->downcount before the gate is called. Hooks flush that accumulator
+    // into the chassis's live budget and reset it to zero.
     const StaticRecompDispatchGate* gate = &dolrecomp_native_gate;
     if (!gate || !gate->chunk_open || chunk_index >= gate->chunk_count)
         return false;
