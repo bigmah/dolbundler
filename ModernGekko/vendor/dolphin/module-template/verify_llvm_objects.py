@@ -10,31 +10,34 @@ import subprocess
 import sys
 
 
-GENERATED = re.compile(r"func_[0-9A-Fa-f]{8}(?:_budget)?$")
 JOURNAL = {"g_mem_write_journal", "g_mem_write_journal_user"}
 PROFILE_RUNTIME = {"__llvm_profile_instrument_target", "__llvm_profile_runtime"}
 
 
 def symbols(nm: str, paths: list[pathlib.Path]) -> tuple[set[str], set[str]]:
-    # One inventory process matters for a full title: GEXE52 has thousands of
-    # objects, and launching nm twice per object turns a configure-time safety
-    # check into minutes of process overhead.
-    command = [nm, "-g", *(str(path) for path in paths)]
-    result = subprocess.run(command, check=False, text=True, capture_output=True)
-    if result.returncode:
-        raise RuntimeError(
-            f"{nm} -g <{len(paths)} objects>: {result.stderr.strip()}")
+    # Inventory in sizeable batches. One nm per object turns a full title into
+    # minutes of process overhead, while putting every object on one command
+    # line exceeds macOS ARG_MAX on larger games (Melee has 15,000+ chunks).
     defined: set[str] = set()
     undefined: set[str] = set()
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if not fields or line.endswith(":"):
-            continue
-        name = fields[-1].removeprefix("_")
-        if len(fields) >= 2 and fields[-2].upper() == "U":
-            undefined.add(name)
-        else:
-            defined.add(name)
+    batch_size = 512
+    for first in range(0, len(paths), batch_size):
+        batch = paths[first : first + batch_size]
+        command = [nm, "-g", *(str(path) for path in batch)]
+        result = subprocess.run(command, check=False, text=True, capture_output=True)
+        if result.returncode:
+            raise RuntimeError(
+                f"{nm} -g <objects {first + 1}..{first + len(batch)}>: "
+                f"{result.stderr.strip()}")
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if not fields or line.endswith(":"):
+                continue
+            name = fields[-1].removeprefix("_")
+            if len(fields) >= 2 and fields[-2].upper() == "U":
+                undefined.add(name)
+            else:
+                defined.add(name)
     return defined, undefined
 
 
@@ -42,9 +45,21 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--nm", required=True)
     parser.add_argument("--cpu-header", type=pathlib.Path, required=True)
+    parser.add_argument("--symbol-prefix", default="")
     parser.add_argument("--allow-profile-runtime", action="store_true")
-    parser.add_argument("objects", nargs="+", type=pathlib.Path)
+    parser.add_argument("--object-list", type=pathlib.Path)
+    parser.add_argument("objects", nargs="*", type=pathlib.Path)
     args = parser.parse_args()
+    if args.object_list:
+        args.objects.extend(
+            pathlib.Path(line)
+            for line in args.object_list.read_text(encoding="utf-8").splitlines()
+            if line
+        )
+    if not args.objects:
+        parser.error("provide objects or --object-list")
+    generated = re.compile(
+        re.escape(args.symbol_prefix) + r"func_[0-9A-Fa-f]{8}(?:_budget)?$")
 
     cpu_text = args.cpu_header.read_text(encoding="utf-8")
     gx_helpers = set(re.findall(r"\b(ppc_[A-Za-z0-9_]+)\s*\(", cpu_text))
@@ -62,10 +77,11 @@ def main() -> int:
         "unexpected": [],
     }
     for name in sorted(undefined):
-        if GENERATED.fullmatch(name) and name in defined:
+        if generated.fullmatch(name) and name in defined:
             categories["generated cross-chunk"].append(name)
         elif name in gx_helpers or name in {
-            "dolrecomp_native_gate", "dolrecomp_native_gate_allows"
+            args.symbol_prefix + "dolrecomp_native_gate",
+            args.symbol_prefix + "dolrecomp_native_gate_allows",
         }:
             categories["GXRuntime CPU helper"].append(name)
         elif name in JOURNAL:

@@ -30,12 +30,13 @@ public:
   FunctionEmitter(llvm::LLVMContext &context, llvm::Module &module,
                   const DolIRFunction &source,
                   const DolLLVMFunctionRange *ranges, u32 range_count,
-                  bool gamecube);
+                  bool gamecube, llvm::StringRef symbol_prefix = {});
 
   bool emit(llvm::raw_ostream &diagnostics);
 
 private:
   std::string blockName(u32 index) const;
+  std::string symbolName(llvm::StringRef name) const;
   llvm::Type *type(DolIRType type);
   std::size_t stateOffset(DolIRStateSlot slot) const;
   llvm::Value *bytePtr(std::size_t offset);
@@ -141,6 +142,7 @@ private:
   const DolLLVMFunctionRange *ranges_ = nullptr;
   u32 range_count_ = 0;
   bool gamecube_ = false;
+  std::string symbol_prefix_;
   u32 current_pc_ = 0;
 };
 

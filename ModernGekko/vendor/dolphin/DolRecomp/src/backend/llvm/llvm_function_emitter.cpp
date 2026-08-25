@@ -23,15 +23,18 @@ using namespace llvm;
 FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
                                  const DolIRFunction &source,
                                  const DolLLVMFunctionRange *ranges,
-                                 u32 range_count, bool gamecube)
+                                 u32 range_count, bool gamecube,
+                                 StringRef symbol_prefix)
     : context_(context), module_(module), source_(source), builder_(context),
-      ranges_(ranges), range_count_(range_count), gamecube_(gamecube) {}
+      ranges_(ranges), range_count_(range_count), gamecube_(gamecube),
+      symbol_prefix_(symbol_prefix) {}
 
 bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   auto *pointer = PointerType::getUnqual(context_);
   auto *type = FunctionType::get(Type::getVoidTy(context_),
                                  {pointer, pointer, pointer}, false);
-  const std::string bodyName = std::string(source_.name) + "_budget";
+  const std::string wrapperName = symbolName(source_.name);
+  const std::string bodyName = wrapperName + "_budget";
   function_ = module_.getFunction(bodyName);
   if (!function_)
     function_ = Function::Create(type, GlobalValue::ExternalLinkage, bodyName,
@@ -78,12 +81,13 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
 bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
   auto *pointer = PointerType::getUnqual(context_);
   auto *type = FunctionType::get(Type::getVoidTy(context_), {pointer}, false);
-  Function *wrapper = module_.getFunction(source_.name);
+  const std::string wrapperName = symbolName(source_.name);
+  Function *wrapper = module_.getFunction(wrapperName);
   if (!wrapper)
-    wrapper = Function::Create(type, GlobalValue::ExternalLinkage, source_.name,
+    wrapper = Function::Create(type, GlobalValue::ExternalLinkage, wrapperName,
                                module_);
   if (wrapper->getFunctionType() != type || !wrapper->empty()) {
-    diagnostics << "dolllvm: conflicting native entry " << source_.name << "\n";
+    diagnostics << "dolllvm: conflicting native entry " << wrapperName << "\n";
     return false;
   }
   wrapper->setCallingConv(CallingConv::C);
@@ -109,6 +113,10 @@ std::string FunctionEmitter::blockName(u32 index) const {
   snprintf(text, sizeof(text), "guest_%08X_b%u",
            source_.blocks[index].guest_address, index);
   return text;
+}
+
+std::string FunctionEmitter::symbolName(StringRef name) const {
+  return symbol_prefix_ + name.str();
 }
 
 Type *FunctionEmitter::type(DolIRType t) {
@@ -367,13 +375,14 @@ void FunctionEmitter::emitEntry() {
     exram_size_ =
         loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
   }
-  GlobalVariable *gate = module_.getGlobalVariable("dolrecomp_native_gate", true);
+  const std::string gateName = symbolName("dolrecomp_native_gate");
+  GlobalVariable *gate = module_.getGlobalVariable(gateName, true);
   if (!gate) {
     gate = new GlobalVariable(
         module_, ArrayType::get(Type::getInt8Ty(context_),
                                 sizeof(StaticRecompDispatchGate)),
         false, GlobalValue::ExternalLinkage, nullptr,
-        "dolrecomp_native_gate");
+        gateName);
     gate->setVisibility(GlobalValue::HiddenVisibility);
     gate->setDSOLocal(true);
   }

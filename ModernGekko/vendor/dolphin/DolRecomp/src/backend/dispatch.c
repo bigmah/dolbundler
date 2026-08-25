@@ -37,6 +37,11 @@ typedef enum {
 // on a GameCube title and exists so a bad input degrades rather than explodes.
 #define DISPATCH_MAX_INDEX_PAGES 65536u
 
+static const char* generated_symbol_prefix(void) {
+    const char* prefix = getenv("DOLRECOMP_LLVM_SYMBOL_PREFIX");
+    return prefix ? prefix : "";
+}
+
 static DispatchLookupMode dispatch_lookup_mode(void) {
     const char* configured = getenv("DOLRECOMP_DISPATCH_LOOKUP");
     if (!configured || !configured[0])
@@ -52,7 +57,8 @@ static DispatchLookupMode dispatch_lookup_mode(void) {
 }
 
 void emit_chunk_prototype(FILE* out, u32 func_addr) {
-    fprintf(out, "void func_%08X(CPUState* ctx);\n", func_addr);
+    fprintf(out, "void %sfunc_%08X(CPUState* ctx);\n",
+            generated_symbol_prefix(), func_addr);
 }
 
 void function_list_free(FunctionList* list) {
@@ -118,9 +124,10 @@ static void emit_lookup_run(FILE* out, const FunctionList* funcs,
     if (end == first + 1u || first_range->start >= first_range->end) {
         fprintf(out,
                 "    if (address >= 0x%08Xu && address < 0x%08Xu && "
-                "((address - 0x%08Xu) & 3u) == 0u) return func_%08X;\n",
+                "((address - 0x%08Xu) & 3u) == 0u) return %sfunc_%08X;\n",
                 first_range->start, first_range->end,
-                first_range->start, first_range->start);
+                first_range->start, generated_symbol_prefix(),
+                first_range->start);
         return;
     }
 
@@ -137,7 +144,8 @@ static void emit_lookup_run(FILE* out, const FunctionList* funcs,
     fprintf(out,
             "            static const DolRecompFunction chunk_functions[] = {\n");
     for (u32 i = first; i < end; i++) {
-        fprintf(out, "                func_%08X,\n", funcs->ranges[i].start);
+        fprintf(out, "                %sfunc_%08X,\n",
+                generated_symbol_prefix(), funcs->ranges[i].start);
     }
     fprintf(out, "            };\n");
     fprintf(out, "            return chunk_functions[offset / 0x%08Xu];\n",
@@ -309,7 +317,8 @@ static int emit_lookup_indexed(FILE* out, const FunctionList* funcs) {
             "dolrecomp_run_chunks[%uu] DOLRECOMP_UNUSED = {\n",
             sorted_count);
     for (u32 i = 0; i < sorted_count; i++)
-        fprintf(out, "    func_%08X,\n", sorted[i].start);
+        fprintf(out, "    %sfunc_%08X,\n",
+                generated_symbol_prefix(), sorted[i].start);
     fprintf(out, "};\n");
 
     fprintf(out,

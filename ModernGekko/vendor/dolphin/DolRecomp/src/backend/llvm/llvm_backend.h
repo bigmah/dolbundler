@@ -21,6 +21,10 @@ typedef struct {
     const DolLLVMFunctionRange* function_ranges;
     u32 function_range_count;
     int gamecube;
+    // Optional C identifier prefix for every module-private generated symbol.
+    // This lets multiple games whose guest address ranges overlap coexist in
+    // one statically linked iOS executable.
+    const char* symbol_prefix;
 } DolLLVMOptions;
 
 bool dolllvm_emit_object(const DolIRModule* module, const char* object_path,

@@ -22,20 +22,27 @@
 #define DOLRECOMP_NATIVE_BUILD_ID "legacy-c-output"
 #endif
 
+#ifndef MODULE_SYMBOL_PREFIX
+#define MODULE_SYMBOL_PREFIX
+#endif
+#define MODULE_SYMBOL_INNER(prefix, name) prefix##name
+#define MODULE_SYMBOL_EXPAND(prefix, name) MODULE_SYMBOL_INNER(prefix, name)
+#define MODULE_SYMBOL(name) MODULE_SYMBOL_EXPAND(MODULE_SYMBOL_PREFIX, name)
+
 #include "module_tables.inc"
 
-StaticRecompDispatchGate dolrecomp_native_gate;
+StaticRecompDispatchGate MODULE_SYMBOL(dolrecomp_native_gate);
 
 // Keep the full cross-chunk check out of line. Replicating these loads and
 // branches at every generated edge substantially inflates the title's hot
 // code; loop guards still read the live gate inline where their smaller check
 // amortizes across iterations.
-bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index)
+bool MODULE_SYMBOL(dolrecomp_native_gate_allows)(CPUState* ctx, u32 chunk_index)
 {
     // materialize() has already moved this function's outstanding charge into
     // ctx->downcount before the gate is called. Hooks flush that accumulator
     // into the chassis's live budget and reset it to zero.
-    const StaticRecompDispatchGate* gate = &dolrecomp_native_gate;
+    const StaticRecompDispatchGate* gate = &MODULE_SYMBOL(dolrecomp_native_gate);
     if (!gate || !gate->chunk_open || chunk_index >= gate->chunk_count)
         return false;
     if (!gate->chunk_open[chunk_index])
@@ -50,9 +57,10 @@ bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index)
 static void chassis_publish_gate(const StaticRecompDispatchGate* gate)
 {
     if (gate && gate->chunk_count == MODULE_CHUNK_RANGE_COUNT)
-        dolrecomp_native_gate = *gate;
+        MODULE_SYMBOL(dolrecomp_native_gate) = *gate;
     else
-        memset(&dolrecomp_native_gate, 0, sizeof(dolrecomp_native_gate));
+        memset(&MODULE_SYMBOL(dolrecomp_native_gate), 0,
+               sizeof(MODULE_SYMBOL(dolrecomp_native_gate)));
 }
 
 static int chassis_dispatch(CPUState* ctx, u32 address)
@@ -102,7 +110,8 @@ static StaticRecompModuleDesc s_desc = {
 #define RECOMP_MODULE_EXPORT
 #endif
 
-RECOMP_MODULE_EXPORT const StaticRecompModuleDesc* staticrecomp_get_module(void)
+RECOMP_MODULE_EXPORT const StaticRecompModuleDesc*
+MODULE_SYMBOL(staticrecomp_get_module)(void)
 {
     s_metadata.cpu_state_layout_hash = dolnative_state_layout_hash();
     return &s_desc;

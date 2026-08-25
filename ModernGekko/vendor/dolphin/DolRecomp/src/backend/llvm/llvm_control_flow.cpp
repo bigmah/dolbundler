@@ -50,7 +50,7 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
       ++rangeIndex;
 
   auto gate = module_.getOrInsertFunction(
-      "dolrecomp_native_gate_allows",
+      symbolName("dolrecomp_native_gate_allows"),
       FunctionType::get(Type::getInt1Ty(context_),
                         {PointerType::getUnqual(context_),
                          Type::getInt32Ty(context_)},
@@ -71,10 +71,11 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   char name[64];
   snprintf(name, sizeof(name), "func_%08X_budget", range->start);
   auto callee = module_.getOrInsertFunction(
-      name, FunctionType::get(Type::getVoidTy(context_),
-                              {PointerType::getUnqual(context_),
-                               PointerType::getUnqual(context_),
-                               PointerType::getUnqual(context_)}, false));
+      symbolName(name),
+      FunctionType::get(Type::getVoidTy(context_),
+                        {PointerType::getUnqual(context_),
+                         PointerType::getUnqual(context_),
+                         PointerType::getUnqual(context_)}, false));
   if (auto *calleeFunction = dyn_cast<Function>(callee.getCallee())) {
     calleeFunction->setVisibility(GlobalValue::HiddenVisibility);
     calleeFunction->setDSOLocal(true);

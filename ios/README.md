@@ -53,6 +53,26 @@ export DOLBUNDLER_TEAM=<your Apple Developer team ID>
 ./ios/build.sh --install
 ```
 
+Several AOT titles can coexist in one signed app. Give each generated module a
+unique C-identifier prefix while recompiling, then pass all `GAME_ID=directory`
+pairs to the iOS build:
+
+```sh
+export DOLRECOMP_LLVM_SYMBOL_PREFIX=gG4QE01_
+build-dolrecomp-llvm20/dolrecomp \
+  --gamecube --backend llvm --game-id G4QE01 \
+  /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios
+cp /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios/generated/main.dol
+
+export DOLBUNDLER_NATIVE_MODULES='GEXE52=/tmp/gexe52-llvm-ios/generated;G4QE01=/tmp/g4qe01-llvm-ios/generated'
+./ios/build.sh --install
+```
+
+The app selects the embedded descriptor whose disc ID matches the library
+entry. The older `DOLBUNDLER_NATIVE_GAME_ID` and
+`DOLBUNDLER_NATIVE_GENERATED_DIR` variables remain available for a one-title
+build.
+
 The wrapper rejects an unversioned or non-20 LLVM and keeps the host tool out
 of `build-ios`. The module configure step validates its target, minimum OS,
 CPUState layout, and complete undefined-symbol inventory; the final app link

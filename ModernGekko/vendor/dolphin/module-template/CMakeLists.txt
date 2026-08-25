@@ -14,11 +14,16 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(GAME_ID "" CACHE STRING "Six-character disc ID, e.g. G4QE01")
+if(NOT DEFINED GAME_ID)
+  set(GAME_ID "" CACHE STRING "Six-character disc ID, e.g. G4QE01")
+endif()
 if(NOT GAME_ID)
   message(FATAL_ERROR "Set -DGAME_ID=<disc id> (e.g. -DGAME_ID=G4QE01)")
 endif()
-set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated" CACHE PATH "DolRecomp output directory (generated.h, generated_smc.txt, main.dol, chunks/)")
+if(NOT DEFINED GENERATED_DIR)
+  set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated" CACHE PATH
+      "DolRecomp output directory (generated.h, generated_smc.txt, main.dol, chunks/)")
+endif()
 if(NOT EXISTS "${GENERATED_DIR}")
   message(FATAL_ERROR "Generated directory not found at ${GENERATED_DIR}. Set -DGENERATED_DIR=<path to DolRecomp output>")
 endif()
@@ -28,12 +33,18 @@ foreach(REQUIRED_GENERATED_FILE generated.h generated_smc.txt main.dol)
       "DolRecomp output is incomplete: ${GENERATED_DIR}/${REQUIRED_GENERATED_FILE} is missing")
   endif()
 endforeach()
-set(GXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../GXRuntime" CACHE PATH "GXRuntime checkout")
+if(NOT DEFINED GXRUNTIME_DIR)
+  set(GXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../GXRuntime" CACHE PATH
+      "GXRuntime checkout")
+endif()
 if(NOT EXISTS "${GXRUNTIME_DIR}")
   message(FATAL_ERROR "GXRuntime not found at ${GXRUNTIME_DIR}. Set -DGXRUNTIME_DIR=<path to GXRuntime>")
 endif()
-set(CHASSIS_ABI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Core/Core/PowerPC/StaticRecomp"
-    CACHE PATH "RecompCore StaticRecomp ABI directory")
+if(NOT DEFINED CHASSIS_ABI_DIR)
+  set(CHASSIS_ABI_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Core/Core/PowerPC/StaticRecomp"
+      CACHE PATH "RecompCore StaticRecomp ABI directory")
+endif()
 
 set(MODULE_NAME "g${GAME_ID}_recomp")
 
@@ -51,6 +62,20 @@ add_custom_command(
   COMMENT "Generating module_tables.inc")
 
 file(READ "${GENERATED_DIR}/generated.h" GENERATED_HEADER_TEXT)
+set(MODULE_SYMBOL_PREFIX "")
+string(REGEX MATCH
+  "#define DOLRECOMP_NATIVE_SYMBOL_PREFIX \"[^\"]*\""
+  MODULE_SYMBOL_PREFIX_LINE "${GENERATED_HEADER_TEXT}")
+if(MODULE_SYMBOL_PREFIX_LINE)
+  string(REGEX REPLACE
+    "^#define DOLRECOMP_NATIVE_SYMBOL_PREFIX \"([^\"]*)\"$" "\\1"
+    MODULE_SYMBOL_PREFIX "${MODULE_SYMBOL_PREFIX_LINE}")
+endif()
+if(MODULE_SYMBOL_PREFIX AND
+   NOT MODULE_SYMBOL_PREFIX MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+  message(FATAL_ERROR
+    "Invalid generated symbol prefix: ${MODULE_SYMBOL_PREFIX}")
+endif()
 if(GENERATED_HEADER_TEXT MATCHES "DOLRECOMP_BACKEND_LLVM")
   foreach(REQUIRED_METADATA
           DOLRECOMP_NATIVE_BACKEND_NAME
@@ -132,13 +157,17 @@ if(GENERATED_HEADER_TEXT MATCHES "DOLRECOMP_BACKEND_LLVM")
       message(FATAL_ERROR "DolRecomp LLVM object is missing: ${CHUNK_INPUT}")
     endif()
   endforeach()
+  set(LLVM_OBJECT_LIST "${CMAKE_CURRENT_BINARY_DIR}/llvm_objects.txt")
+  list(JOIN CHUNK_INPUTS "\n" LLVM_OBJECT_LIST_TEXT)
+  file(WRITE "${LLVM_OBJECT_LIST}" "${LLVM_OBJECT_LIST_TEXT}\n")
   execute_process(
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/verify_llvm_objects.py"
             --nm "${CMAKE_NM}"
             --cpu-header "${GXRUNTIME_DIR}/include/core/cpu.h"
+            --symbol-prefix "${MODULE_SYMBOL_PREFIX}"
+            --object-list "${LLVM_OBJECT_LIST}"
             ${LLVM_SYMBOL_AUDIT_OPTIONS}
-            ${CHUNK_INPUTS}
     RESULT_VARIABLE LLVM_SYMBOL_AUDIT_RESULT
     OUTPUT_VARIABLE LLVM_SYMBOL_AUDIT_OUTPUT
     ERROR_VARIABLE LLVM_SYMBOL_AUDIT_ERROR)
@@ -204,6 +233,10 @@ set_target_properties(${MODULE_NAME} PROPERTIES
 set_source_files_properties("${MODULE_TABLES}" PROPERTIES HEADER_FILE_ONLY TRUE GENERATED TRUE)
 
 target_compile_definitions(${MODULE_NAME} PRIVATE MODULE_GAME_ID="${GAME_ID}")
+if(MODULE_SYMBOL_PREFIX)
+  target_compile_definitions(${MODULE_NAME} PRIVATE
+    MODULE_SYMBOL_PREFIX=${MODULE_SYMBOL_PREFIX})
+endif()
 
 target_include_directories(${MODULE_NAME} PRIVATE
   "${GENERATED_DIR}"
@@ -215,15 +248,21 @@ if(NOT WIN32)
   target_link_libraries(${MODULE_NAME} PRIVATE m)
 endif()
 if(UNIX AND NOT APPLE)
+  set(MODULE_EXPORTS "${CMAKE_CURRENT_BINARY_DIR}/module.exports")
+  file(WRITE "${MODULE_EXPORTS}"
+    "{\n  global:\n    ${MODULE_SYMBOL_PREFIX}staticrecomp_get_module;\n"
+    "    ppc_set_mem_write_journal;\n  local:\n    *;\n};\n")
   target_link_options(${MODULE_NAME} PRIVATE
-    "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/module.exports")
+    "LINKER:--version-script=${MODULE_EXPORTS}")
   set_property(TARGET ${MODULE_NAME} APPEND PROPERTY LINK_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/module.exports")
+    "${MODULE_EXPORTS}")
 endif()
 
 option(RECOMPCORE_MODULE_ENABLE_IPO "Enable Clang module interprocedural optimization when supported" ON)
-set(RECOMPCORE_MODULE_OPT_LEVEL "2" CACHE STRING
-    "Optimization level for generated module translation units (0, 1, 2, or 3)")
+if(NOT DEFINED RECOMPCORE_MODULE_OPT_LEVEL)
+  set(RECOMPCORE_MODULE_OPT_LEVEL "2" CACHE STRING
+      "Optimization level for generated module translation units (0, 1, 2, or 3)")
+endif()
 set_property(CACHE RECOMPCORE_MODULE_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)
 if(NOT RECOMPCORE_MODULE_OPT_LEVEL MATCHES "^[0-3]$")
   message(FATAL_ERROR

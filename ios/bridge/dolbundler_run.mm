@@ -28,8 +28,8 @@
 #include <string>
 #include <thread>
 
-#ifdef DOLBUNDLER_NATIVE_GAME_ID
-extern "C" const ModernGekkoModuleDesc* staticrecomp_get_module(void);
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+#include "dolbundler_native_modules.inc"
 #endif
 
 #ifdef DOLBUNDLER_LLVM_PGO_GENERATE
@@ -277,15 +277,23 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   moderngekko::RuntimeConfig config;
   config.game_root = game_root;
   config.user_directory = user_dir;
-#ifdef DOLBUNDLER_NATIVE_GAME_ID
-  if (std::filesystem::path(game_root).filename() == DOLBUNDLER_NATIVE_GAME_ID)
+  bool found_native_module = false;
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  const std::string game_id =
+      std::filesystem::path(game_root).filename().string();
+  for (const DolBundlerNativeModuleEntry& native_module : kDolBundlerNativeModules)
   {
-    config.module = moderngekko::ModuleSource::AttachedDescriptor(staticrecomp_get_module());
-    run_log("using embedded native module for %s", DOLBUNDLER_NATIVE_GAME_ID);
+    if (game_id != native_module.game_id)
+      continue;
+    config.module =
+        moderngekko::ModuleSource::AttachedDescriptor(native_module.get_module());
+    run_log("using embedded native module for %s", native_module.game_id);
+    found_native_module = true;
+    break;
   }
-  else
 #endif
-  config.module = moderngekko::ModuleSource::BytecodePath(module_path);
+  if (!found_native_module)
+    config.module = moderngekko::ModuleSource::BytecodePath(module_path);
   config.graphics.backend = "Metal";
   // Metal implements Dolphin's compute-shader texture decoder. Keep texture
   // conversion off the emulation thread, where it competes directly with the

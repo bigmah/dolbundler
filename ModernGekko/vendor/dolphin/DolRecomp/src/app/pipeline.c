@@ -21,6 +21,7 @@
 #include "cpu/cpu.h"
 #include "core/native_state_layout.h"
 #endif
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,8 +73,9 @@ static u32 c_chunk_instructions(void) {
 // v12 makes native loop guards use the chassis's live timing/exception gate.
 // v13 charges direct cache-control instructions at Dolphin's table costs.
 // v18 includes GameCube-only memory lowering, invariant gate snapshots, and
-// the expanded in-SSA paired/single floating-point fast paths.
-#define DOLLLVM_CACHE_VERSION "dolllvm-v18"
+// the expanded in-SSA paired/single floating-point fast paths. v19 namespaces
+// every external symbol so several games can be linked into one iOS binary.
+#define DOLLLVM_CACHE_VERSION "dolllvm-v19"
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
@@ -246,6 +248,9 @@ static u64 hash_bytes(u64 hash, const void* data, size_t size) {
 
 static void emit_llvm_metadata(FILE* header, FILE* manifest, u64 build_id) {
     const char* requested = getenv("DOLRECOMP_LLVM_TARGET");
+    const char* symbol_prefix = getenv("DOLRECOMP_LLVM_SYMBOL_PREFIX");
+    if (!symbol_prefix)
+        symbol_prefix = "";
     char triple[256] = "unknown";
     char cpu[256] = "unknown";
     char features[512] = "";
@@ -268,11 +273,12 @@ static void emit_llvm_metadata(FILE* header, FILE* manifest, u64 build_id) {
             "#define DOLRECOMP_NATIVE_OPT_LEVEL %u\n"
             "#define DOLRECOMP_NATIVE_RELOCATION_MODEL \"pic\"\n"
             "#define DOLRECOMP_NATIVE_CODE_MODEL \"small\"\n"
+            "#define DOLRECOMP_NATIVE_SYMBOL_PREFIX \"%s\"\n"
             "#define DOLRECOMP_NATIVE_CODEGEN_FINGERPRINT \"%s\"\n"
             "#define DOLRECOMP_NATIVE_BUILD_ID \"dolllvm-%016llx\"\n"
             "#define DOLRECOMP_NATIVE_STATE_LAYOUT_HASH 0x%016llxull\n",
             triple, cpu, features, dolllvm_version(), DOLRECOMP_REVISION,
-            (unsigned)DOLLLVM_OPT_LEVEL, fingerprint,
+            (unsigned)DOLLLVM_OPT_LEVEL, symbol_prefix, fingerprint,
             (unsigned long long)build_id, (unsigned long long)layout);
 #define DOLNATIVE_EMIT_FIELD(id, field, count)                                 \
     fprintf(header, "#define DOLRECOMP_NATIVE_OFFSET_" #id " %lluull\n"       \
@@ -285,10 +291,11 @@ static void emit_llvm_metadata(FILE* header, FILE* manifest, u64 build_id) {
     fprintf(manifest,
             "// backend: llvm\n// target: %s\n// cpu: %s\n"
             "// features: %s\n// llvm: %s\n// dolrecomp: %s\n"
-            "// opt: %u\n// codegen: %s\n// build-id: dolllvm-%016llx\n"
+            "// opt: %u\n// symbol-prefix: %s\n// codegen: %s\n"
+            "// build-id: dolllvm-%016llx\n"
             "// state-layout: %016llx\n",
             triple, cpu, features, dolllvm_version(), DOLRECOMP_REVISION,
-            (unsigned)DOLLLVM_OPT_LEVEL, fingerprint,
+            (unsigned)DOLLLVM_OPT_LEVEL, symbol_prefix, fingerprint,
             (unsigned long long)build_id, (unsigned long long)layout);
     printf("  LLVM metadata: revision=%s llvm=%s target=%s cpu=%s "
            "features=%s opt=%u build=dolllvm-%016llx layout=%016llx\n",
@@ -303,6 +310,9 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
     hash = hash_bytes(hash, &job->function_address, sizeof(job->function_address));
     hash = hash_bytes(hash, &job->count, sizeof(job->count));
     hash = hash_bytes(hash, &job->gamecube, sizeof(job->gamecube));
+    const char* symbol_prefix = getenv("DOLRECOMP_LLVM_SYMBOL_PREFIX");
+    if (symbol_prefix)
+        hash = hash_bytes(hash, symbol_prefix, strlen(symbol_prefix));
     u64 state_layout = dolnative_state_layout_hash();
     hash = hash_bytes(hash, &state_layout, sizeof(state_layout));
     // Host triples must distinguish caches when no target was requested.
@@ -436,6 +446,7 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     options.function_ranges = job->ranges;
     options.function_range_count = job->range_count;
     options.gamecube = job->gamecube;
+    options.symbol_prefix = getenv("DOLRECOMP_LLVM_SYMBOL_PREFIX");
     char ir_path[1440];
     const char* dump_ir = getenv("DOLRECOMP_LLVM_DUMP_IR");
     if (dump_ir && (!strcmp(dump_ir, "1") || strstr(job->name, dump_ir))) {
@@ -632,6 +643,22 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                                    DolRecompCPU cpu, u32 entry_point,
                                    u32 requested_jobs, int local_chunks_dir,
                                    const DolRecompSymbolMap* symbols) {
+    const char* symbol_prefix = getenv("DOLRECOMP_LLVM_SYMBOL_PREFIX");
+    if (symbol_prefix && symbol_prefix[0]) {
+        if (!(isalpha((unsigned char)symbol_prefix[0]) ||
+              symbol_prefix[0] == '_')) {
+            fprintf(stderr,
+                    "error: DOLRECOMP_LLVM_SYMBOL_PREFIX must be a C identifier prefix\n");
+            return 0;
+        }
+        for (const char* cursor = symbol_prefix + 1; *cursor; cursor++) {
+            if (!isalnum((unsigned char)*cursor) && *cursor != '_') {
+                fprintf(stderr,
+                        "error: DOLRECOMP_LLVM_SYMBOL_PREFIX must be a C identifier prefix\n");
+                return 0;
+            }
+        }
+    }
     char stem[1024];
     char header_path[1100];
     char symbol_header_path[1100];
