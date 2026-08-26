@@ -1,4 +1,6 @@
 #include "moderngekko/module.h"
+#include "core/dispatch_gate.h"
+#include "core/native_state_layout.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -20,6 +22,10 @@ int main(void)
 {
     static const ModernGekkoRange code_ranges[] = {{0x80003100u, 0x80003200u}};
     static const uint64_t chunk_hashes[] = {0xCBF29CE484222325ull};
+    StaticRecompNativeMetadata metadata = {
+        "test", "test-target", "test-toolchain", "test-codegen", "test-build",
+        dolnative_state_layout_hash(),
+    };
     StaticRecompModuleDesc descriptor = {
         MODERNGEKKO_MODULE_ABI_VERSION,
         MODERNGEKKO_CPU_ABI_VERSION,
@@ -35,16 +41,25 @@ int main(void)
         code_ranges,
         1u,
         chunk_hashes,
+        NULL,
+        0u,
+        &metadata,
+        NULL,
     };
     const ModernGekkoModuleRequirements requirements = {
         MODERNGEKKO_CPU_ABI_VERSION,
         (uint32_t)sizeof(CPUState),
+        dolnative_state_layout_hash(),
         "TEST01",
     };
     CPUState state = {0};
+    int32_t live_budget = 40;
+    const StaticRecompDispatchGate gate = {
+        NULL, 0u, &live_budget, NULL, 0u, 0u,
+    };
 
-    COMPILE_ASSERT(module_abi_version_is_three,
-                   MODERNGEKKO_MODULE_ABI_VERSION == 3u);
+    COMPILE_ASSERT(module_abi_version_is_four,
+                   MODERNGEKKO_MODULE_ABI_VERSION == 4u);
     COMPILE_ASSERT(game_id_storage_is_eight_bytes,
                    sizeof(descriptor.game_id) == 8u);
     COMPILE_ASSERT(dispatch_follows_entry_point,
@@ -63,6 +78,19 @@ int main(void)
     descriptor.on_state_loaded(&state);
     if (state.gpr[0] != 0u)
         return 5;
+
+    // A hook may already have flushed a much larger lifetime charge.  Only
+    // the currently unflushed CPUState accumulator is compared with the live
+    // budget, otherwise native MMIO paths collapse into redispatch storms.
+    if (!staticrecomp_dispatch_budget_allows(&gate, 0))
+        return 12;
+    if (!staticrecomp_dispatch_budget_allows(&gate, -39))
+        return 13;
+    if (staticrecomp_dispatch_budget_allows(&gate, -40))
+        return 14;
+    live_budget = 0;
+    if (staticrecomp_dispatch_budget_allows(&gate, 0))
+        return 15;
 
     descriptor.abi_version++;
     if (moderngekko_validate_module(&descriptor, &requirements) !=
@@ -83,6 +111,12 @@ int main(void)
         MODERNGEKKO_MODULE_CPU_STATE_SIZE_MISMATCH)
         return 8;
     descriptor.cpu_state_size--;
+
+    metadata.cpu_state_layout_hash++;
+    if (moderngekko_validate_module(&descriptor, &requirements) !=
+        MODERNGEKKO_MODULE_CPU_STATE_LAYOUT_MISMATCH)
+        return 11;
+    metadata.cpu_state_layout_hash--;
 
     descriptor.entry_point = 0x80004000u;
     if (moderngekko_validate_module(&descriptor, &requirements) !=

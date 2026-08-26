@@ -89,7 +89,10 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   u8* const vmem = memory.GetFakeVMEM();
   const u32 vmem_size = memory.GetFakeVMemSize();
 
-  const s64 native_charge = -m_core.m_guest.downcount;
+  const u64 flushed_charge = m_core.m_charged_cycles - m_ls_charged_cycles_start;
+  const s64 resident_charge = -m_core.m_guest.downcount;
+  const s64 native_charge = static_cast<s64>(flushed_charge) +
+                            (resident_charge > 0 ? resident_charge : 0);
   if (native_charge <= 0)
   {
     ++m_ls_skipped_zero;
@@ -138,6 +141,10 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   StaticRecompLockstep::g_ram_write_journal_user = this;
   StaticRecompLockstep::g_lc_write_journal = &StaticRecompLockstepVerifier::LsShadowLcJournalTrampoline;
   StaticRecompLockstep::g_lc_write_journal_user = this;
+  // A shadow re-run has to see every locked-cache write so it can undo them,
+  // and the guest's direct pointer to that buffer routes around this journal.
+  // Withdraw it for the duration; null puts the access back on the hook path.
+  m_core.m_guest.l1cache = nullptr;
   StaticRecompLockstep::g_vmem_write_journal = &StaticRecompLockstepVerifier::LsShadowVmemJournalTrampoline;
   StaticRecompLockstep::g_vmem_write_journal_user = this;
   StaticRecompLockstep::g_tb_override_active = true;
@@ -171,11 +178,21 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
 
     if (m_ls_trace_pc != 0 && entry_pc == m_ls_trace_pc)
     {
+      const auto fbits = [&](u32 reg) {
+        u64 bits;
+        const double value = ppc.ps[reg].PS0AsDouble();
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+      };
       std::fprintf(stderr,
                    "[ls-trace] step %d: pc=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r13=0x%08X "
-                   "msr=0x%08X xer=0x%08X cr=0x%08X lr=0x%08X ctr=0x%08X\n",
+                   "msr=0x%08X xer=0x%08X cr=0x%08X fpscr=0x%08X lr=0x%08X ctr=0x%08X "
+                   "f0=%016llX f6=%016llX f10=%016llX f12=%016llX\n",
                    steps, before, ppc.gpr[3], ppc.gpr[4], ppc.gpr[5], ppc.gpr[13], ppc.msr.Hex,
-                   ppc.GetXER().Hex, ppc.cr.Get(), ppc.spr[SPR_LR], ppc.spr[SPR_CTR]);
+                   ppc.GetXER().Hex, ppc.cr.Get(), ppc.fpscr.Hex, ppc.spr[SPR_LR],
+                   ppc.spr[SPR_CTR], (unsigned long long)fbits(0),
+                   (unsigned long long)fbits(6), (unsigned long long)fbits(10),
+                   (unsigned long long)fbits(12));
     }
     if (ppc.pc == end_pc)
     {
@@ -208,6 +225,7 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   StaticRecompLockstep::g_ram_write_journal_user = nullptr;
   StaticRecompLockstep::g_lc_write_journal = nullptr;
   StaticRecompLockstep::g_lc_write_journal_user = nullptr;
+  m_core.m_guest.l1cache = m_core.m_system.GetMemory().GetL1Cache();
   StaticRecompLockstep::g_vmem_write_journal = nullptr;
   StaticRecompLockstep::g_vmem_write_journal_user = nullptr;
   StaticRecompLockstep::g_tb_override_active = false;

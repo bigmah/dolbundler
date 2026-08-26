@@ -126,6 +126,13 @@ private:
   u32 TranslateRelAddress(u32 linked_address);
   void RefreshRelSections();
 
+  // OS exception-vector stand-ins: run a low-RAM stub whose every word proved
+  // out against the SDK template instead of single-stepping it. See
+  // StaticRecompCore_Vectors.cpp for the pattern and the argument.
+  bool TryVectorStub(PowerPC::PowerPCState& ppc);
+  void VerifyVectorStub(u32 slot);
+  void ResetVectorStubs();
+
   static void SetPPCStateFromGuestState(const CPUState& s, PowerPC::PowerPCState& ppc);
 
   // D1 state residency: registers live in m_guest while native code runs;
@@ -138,6 +145,15 @@ private:
   // reads or schedules against CoreTiming's clock sees the exact moment the
   // guest is at rather than the start of the dispatch.
   void FlushGuestCharge();
+
+  // Some SDK waits hide their hardware poll behind a call, so the frontend's
+  // ordinary idle-loop analysis cannot see that the back edge has no way to
+  // change the value being tested. Remember repeated identical chassis reads
+  // and end the current timing slice after the wait has proved itself. The
+  // generated loop guard then leaves at the loop head and polls again next
+  // slice, matching DolVM's conservative poll-spin handling.
+  void TrackExternalRead(u32 pc, u32 address, u64 value);
+  void ResetExternalPollRun();
 
   // CPUState hooks (module -> chassis environment). `cpu->external_user_data`
   // is the StaticRecompCore*.
@@ -178,6 +194,26 @@ private:
   u64 m_bursts = 0;          // SyncIn..SyncOut native runs (diagnostic)
   u64 m_charged_cycles = 0;  // cycles flushed from module charges (diagnostic)
 
+  static constexpr u32 POLL_SPIN_READS = 16;
+  static constexpr u32 POLL_SITE_COUNT = 8;
+  struct PollSite
+  {
+    u32 pc = 0;
+    u32 address = 0;
+    u64 value = 0;
+    bool live = false;
+  };
+  PollSite m_poll_sites[POLL_SITE_COUNT]{};
+  u32 m_poll_next_site = 0;
+  u32 m_poll_pc = 0;
+  u32 m_poll_address = 0;
+  u64 m_poll_value = 0;
+  u32 m_poll_run = 0;
+  bool m_poll_run_live = false;
+  bool m_poll_skip_enabled = true;
+  u64 m_poll_reads = 0;
+  u64 m_poll_yields = 0;
+
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;
   std::vector<u8> m_chunk_open;
@@ -196,6 +232,21 @@ private:
   std::vector<ActiveRelSection> m_active_rel_sections;
   std::vector<int> m_chunk_rel_sections;
   std::vector<u64> m_effective_chunk_hashes;
+  // The last range the guest invalidated inside each chunk. A chunk that fails
+  // verification failed because the guest rewrote an instruction in it, and the
+  // guest has to invalidate what it rewrote or the CPU would not see it -- so
+  // this names the patched address, which is otherwise a day's work to find.
+  struct LastInvalidation
+  {
+    u32 address = 0;
+    u32 length = 0;
+  };
+  std::vector<LastInvalidation> m_chunk_last_invalidate;
+  // One report per chunk. A failing chunk is re-verified on every invalidation
+  // that touches it, and a game that invalidates in a loop would otherwise
+  // print thousands of identical lines.
+  std::vector<u8> m_chunk_reported;
+  u64 m_smc_lost_bytes = 0;  // guest code the module stopped covering
   u64 m_rel_mapping_generation = 0;
   u32 m_failed_chunks = 0;    // chunks currently failing verification (real SMC)
   u64 m_verifications = 0;    // chunk hash checks performed
@@ -215,6 +266,33 @@ private:
   bool m_collect_dispatch_samples = false;
   bool m_has_rel_modules = false;
   u32 m_idle_pc = 0;
+
+  // Vector stand-in state, one slot per 0x100 of low RAM. Verification is
+  // cached until an icache invalidation over low RAM or a ClearCache (which
+  // savestate loads pass through) drops it.
+  enum VectorStubState : u8
+  {
+    VECTOR_STUB_UNKNOWN = 0,
+    VECTOR_STUB_VERIFIED = 1,
+    VECTOR_STUB_MISMATCH = 2,
+  };
+  struct VectorStubCharge
+  {
+    u32 cycles = 0;
+    u32 load_stores = 0;
+  };
+  struct VectorStubSlot
+  {
+    bool syscall = false;
+    u32 debugger_target = 0;
+    VectorStubCharge charge_taken;
+    VectorStubCharge charge_fallthrough;
+  };
+  u8 m_vector_stub_state[0x18] = {};
+  VectorStubSlot m_vector_stub_slots[0x18];
+  bool m_vector_stubs_enabled = true;
+  u64 m_vector_stub_hits = 0;
+  u64 m_vector_stub_verifies = 0;
 };
 
 extern StaticRecompCore* g_static_recomp_core;

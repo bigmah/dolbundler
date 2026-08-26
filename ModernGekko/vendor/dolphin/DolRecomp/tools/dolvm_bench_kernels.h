@@ -9,7 +9,7 @@
 
 #include "common/types.h"
 
-#define DOLVM_BENCH_KERNEL_COUNT 3u
+#define DOLVM_BENCH_KERNEL_COUNT 5u
 #define DOLVM_BENCH_MAX_WORDS 16u
 
 typedef struct {
@@ -76,6 +76,43 @@ static void dolvm_bench_kernels(DolVMBenchKernel* out) {
     scale->words[scale->count++] = dolvm_bench_bne_back(5u);
     scale->words[scale->count++] = 0x4E800020u;  // blr
     scale->loop_body = 6u;
+
+    // Eight adds whose result each feeds the next: every op's input is the
+    // previous op's output, so the interpreter runs at the latency of one
+    // register-file round trip per op. Same opcode mix as `par` below.
+    DolVMBenchKernel* chain = &out[3];
+    chain->name = "chain";
+    chain->description = "8 serially dependent adds, then addic./bne";
+    chain->address = 0x80103000u;
+    chain->count = 0;
+    for (u32 i = 0; i < 8u; i++)
+        chain->words[chain->count++] = 0x7CC63A14u;  // add r6, r6, r7
+    chain->words[chain->count++] = 0x34A5FFFFu;      // addic. r5, r5, -1
+    chain->words[chain->count++] = dolvm_bench_bne_back(9u);
+    chain->words[chain->count++] = 0x4E800020u;      // blr
+    chain->loop_body = 10u;
+
+    // The same eight adds spread over eight destinations: identical opcode
+    // count, no dependency between them, so the machine may overlap the
+    // register-file traffic. The gap between this and `chain` is what the
+    // round-trip latency costs.
+    DolVMBenchKernel* par = &out[4];
+    par->name = "par";
+    par->description = "8 independent adds, then addic./bne";
+    par->address = 0x80104000u;
+    par->count = 0;
+    par->words[par->count++] = 0x7CC63A14u;  // add r6, r6, r7
+    par->words[par->count++] = 0x7D083A14u;  // add r8, r8, r7
+    par->words[par->count++] = 0x7D293A14u;  // add r9, r9, r7
+    par->words[par->count++] = 0x7D4A3A14u;  // add r10, r10, r7
+    par->words[par->count++] = 0x7D6B3A14u;  // add r11, r11, r7
+    par->words[par->count++] = 0x7D8C3A14u;  // add r12, r12, r7
+    par->words[par->count++] = 0x7DCE3A14u;  // add r14, r14, r7
+    par->words[par->count++] = 0x7DEF3A14u;  // add r15, r15, r7
+    par->words[par->count++] = 0x34A5FFFFu;  // addic. r5, r5, -1
+    par->words[par->count++] = dolvm_bench_bne_back(9u);
+    par->words[par->count++] = 0x4E800020u;  // blr
+    par->loop_body = 10u;
 }
 
 #endif

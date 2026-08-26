@@ -158,6 +158,23 @@ struct CPUState {
     PPCSPRRead spr_read;
     PPCSPRWrite spr_write;
     PPCCacheControl cache_control;
+
+    /* The Gekko's locked cache, mapped at 0xE0000000. It is memory -- a plain
+     * buffer the chassis owns -- but it is neither MEM1 nor MEM2, so every
+     * access to it used to leave through external_read/external_write. Games
+     * use it as the scratchpad for exactly the work that is hottest: Melee's
+     * paired-single stores land there, 220 million of them per twelve seconds
+     * of guest time, and each one was an indirect call, a charge flush, an
+     * address translation and an MMU dispatch to reach a memcpy.
+     *
+     * Null disables the fast path and restores the old route, which is what
+     * the lockstep shadow wants while it is journaling these writes.
+     *
+     * ModernGekko mirrors this struct in include/moderngekko/cpu_state.h and
+     * the chassis rejects a module whose descriptor disagrees about
+     * sizeof(CPUState), so the two have to be edited together. */
+    u8* l1cache;
+    u32 l1cache_size;
 };
 
 #include <stdio.h>
@@ -184,7 +201,21 @@ static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size
         if (out_offset) *out_offset = offset;
         return cpu->ram + offset;
     }
-    
+
+    // The locked cache. Checked last, so a hit in RAM pays nothing for it, and
+    // against the *unmasked* address: the uncached-window bit this function
+    // folds out of a MEM1 address is already set in 0xE0000000, and clearing it
+    // would name MEM2's mirror instead. The write journal exists to catch code
+    // being written in MEM1 and nothing executes out of the locked cache, so it
+    // is told nothing happened.
+    if (cpu->l1cache && cpu->l1cache_size >= size) {
+        u32 l1_offset = addr - 0xE0000000u;
+        if (l1_offset <= cpu->l1cache_size - size) {
+            if (out_offset) *out_offset = (u32)-1;
+            return cpu->l1cache + l1_offset;
+        }
+    }
+
     return NULL;
 }
 

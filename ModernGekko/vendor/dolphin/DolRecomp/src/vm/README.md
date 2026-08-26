@@ -96,6 +96,39 @@ It matters more than it sounds: `GXDrawDone`'s wait for the GPU is this loop,
 and before it was skipped it was 40% of Melee's guest cycles and half of Mario
 Party 4's.
 
+### Waits the loop shape cannot see
+
+That test wants one load, no stores and no call, and plenty of waits have all
+three. Disney's Extreme Skate Adventure spends 45% of every frame here:
+
+```
+loop:   bl    GXGetGPStatus      ; lhz from 0xCC000000, unpacks five bits
+        lbz   r0, overhi
+        cmpwi r0, 0
+        beq   loop
+```
+
+`overhi` is the command processor's FIFO-overflow bit and only a FIFO *write*
+can set it, so nothing the loop does can end the wait -- but the loop calls a
+function, and that function stores. Run faithfully it was 57% of every opcode
+the interpreter executed and a quarter of its wall clock, most of the second
+part because the `lhz` leaves RAM and the chassis services it.
+
+So the interpreter recognises the wait at the poll instead of at the loop. It
+counts consecutive reads the chassis had to service that come back with the
+same value, from the same guest instruction, at the same address; past
+`DOLVM_POLL_SPIN` of them the next back edge charges the slice and leaves,
+exactly as a recognised idle loop does. Nothing a loop can do while making
+progress produces that run: a write the chassis services resets it, and a
+`poll_fresh` flag stops a run left behind by a loop that has already exited
+from firing on the next loop's first back edge. A wait that has once been
+proved is remembered by (pc, address, value), so the threshold is paid once and
+not once per timing slice -- worth another 11% on top, because the loop is
+re-entered six hundred thousand times over a run.
+
+The value is part of that key on purpose: the read that finally *answers* the
+wait does not match the site that recorded the waiting.
+
 The interpreter is compiled against the chassis's own `CPUState`, not the
 recompiler's. The two agree on every field a bytecode state access can name and
 differ past the last of them, so `sizeof(CPUState)` is the wrong thing to check.
@@ -198,6 +231,7 @@ work as the sequence it replaces and costs one dispatch instead of several:
 | `jmp.if.cr.guard` | a loop's entire back edge -- the test, the budget guard and the charge -- which a loop pays on every iteration |
 | `cmp.jmp.if.cr`, `.charge`, `.guard` | a compare against a constant *and* the branch that reads the field it just wrote |
 | `supervisor` | the MSR read, mask, compare and raise every privileged instruction opens with |
+| `rotl32i.and`, `shl32i.and`, `lshr32i.and`, `ashr32i.and` | a shift or rotate by a constant and the mask that follows it -- `rlwinm`, which is how PowerPC extracts every bitfield there is |
 
 A fused branch is also allowed to name its target block directly instead of
 jumping over the other edge's code, which takes the unconditional jump off the
@@ -210,7 +244,11 @@ compare stored it -- a store-to-load round trip on the loop's carried
 dependency. And every privileged instruction opens with a check that the guest
 is in supervisor mode, which the builder writes out longhand; a game's operating
 system runs `mfmsr`/`mtmsr` around every interrupt mask it takes, so those four
-opcodes came to a tenth of everything the interpreter executed.
+opcodes came to a tenth of everything the interpreter executed. And `rlwinm` is
+one guest instruction that the builder writes as two, with the second reading
+back through the register file what the first just wrote: on Disney skate every
+single `rotl32i` executed was followed by the `andi` that consumed it, together
+9% of all opcodes.
 
 What pays and what does not is worth stating, because it is not what counting
 opcodes suggests, and the rule has held through every change since. **Removing a
@@ -232,6 +270,54 @@ On Melee's `main.dol`: 6.65M DolIR instructions become 3.69M, 970,568 blocks
 become 233,582, and the module holds 2.40M bytecode instructions -- 2.5 per
 guest instruction, against 4.2 before guest state was homed. Lowering the whole
 title takes about six seconds.
+
+## The SDK stand-ins
+
+Profiling heavy scenes by *ops attributed per guest loop* (entry counts
+overweight short blocks by orders of magnitude) found that the worst of them
+are not spent in the games' own code but in the Nintendo SDK every title
+statically links: Melee's slowest scene is 96% its THP video decoder; Star Fox
+Assault retires 32 million `DCFlushRange` cache lines per twelve billion
+cycles. And a microbenchmark (`dolvm_bench`'s `chain`/`par` kernels) says the
+interpreter's tax is wildly uneven: 10-13x native on branchy integer code,
+1.1x where the exact-float helpers dominate both arms.
+
+So the emitter proves a routine is the known SDK code -- every instruction
+word compared against a stored pattern (`backend/vm/dolvm_hle_match.c`),
+nothing masked, because a stand-in replaces the exact effect of exact words --
+and plants `DOLVM_OP_HLE` at its entry, after the block's charge, where the
+map, a resolved call and a body-landing branch all pass. Two kinds of
+stand-in:
+
+- **Interpreter helpers**: the cache-range family (`DCFlushRange` and its
+  five siblings, both SDK generations' alignment math), hand-written in the
+  handler with the exact register, CR0 and cycle effects, one homes bracket
+  instead of one per line, and the routine's own ending -- the `sc` fast-sync
+  raised where the guest would, or the blr resolved as INDIRECT would.
+- **Native functions**: the pattern's words run through the C backend -- the
+  backend that defines correct -- at build time, shipped inside the
+  interpreter (`vm/dolvm_hle_native.c`, regenerated by
+  `tools/dolvm_hle_gen.c` from `vm/dolvm_hle_native_patterns.inc`). A pattern
+  may span several routines, lowered as one chunk so the calls between them
+  stay native, and may declare entries mid-routine: Melee's THP frame body
+  begins where the last component decoder's return lands, so an invocation
+  whose prologue ran interpreted rejoins native code there -- and because
+  returns resolve inside the chunk, entering any site natively carries the
+  rest of the frame with it. These patterns pin their link address (the
+  generated code bakes it into exception paths); the same bytes linked
+  elsewhere stay interpreted until regenerated as a variant.
+
+Either kind may decline -- `DOLVM_HLE=0`, an unmodeled mode, a function not
+built in -- and the interpreted body that still follows the op runs, so the
+op is an optimisation and never a dependency. Measured on savestated heavy
+scenes, back to back on one binary: Melee's THP scene 0.96x -> **1.97x**;
+Star Fox +2.2% and Disney skate +1.2% from the cache loops. Disney's
+paired-single matrix kernels were tried as natives and measured *nothing* --
+where the exact-float helpers are the work, native runs at the interpreter's
+speed -- which is the boundary of the mechanism, and the microbenchmark's two
+ratios seen in the wild. `test_dolvm` checks every helper against its
+interpreted body over randomized state, and the native cluster over
+randomized RAM images as well.
 
 ## Mid-block entry
 
@@ -300,11 +386,29 @@ cycles, which `MODERNGEKKO_DOLVM_BENCH` reports and which a busy machine barely
 moves. Over each title's first six billion guest cycles, against the Gekko's
 486 MHz, on an M4 Pro:
 
-| Title | homed registers | + gate, idle loops, build flags |
-|---|---|---|
-| Mario Party 4 | 1.69x | **2.94x** |
-| The SpongeBob SquarePants Movie | 1.25x | **1.81x** |
-| Super Smash Bros Melee | 0.92x | **1.39x** |
+| Title | homed registers | + gate, idle loops, build flags | now |
+|---|---|---|---|
+| Mario Party 4 | 1.69x | 2.94x | **4.06x** |
+| The SpongeBob SquarePants Movie | 1.25x | 1.81x | **11.89x** |
+| Super Smash Bros Melee | 0.92x | 1.39x | **1.62x** |
+| Disney's Extreme Skate Adventure | -- | 1.46x | 1.39x |
+| Luigi's Mansion | -- | -- | **6.05x** |
+| Star Fox Assault | -- | -- | **34.4x** |
+
+In savestated **heavy scenes**, which is the number that matters: Disney skate
+1.023x -> **2.693x**, Melee 0.974x -> **1.341x**, Star Fox Assault 0.451x ->
+**1.203x**.
+
+Those are each title's first six billion cycles, which for most of them is
+boot -- and the boot column is misleading enough to be worth a warning. Star
+Fox Assault's 34x is not a fast game; it is a game that spends its first
+seventy guest seconds waiting on the disc, which the interpreter now skips. In
+its heavy scene it runs at 1.09x. It
+moves by a factor of six on SpongeBob, whose boot is almost entirely hardware
+waiting, and by nothing at all on Disney skate, whose wait loop does not run
+until the game is playing. Measured instead over a fixed *gameplay* window --
+a savestate 82 billion cycles into a run -- Disney skate goes from **1.055x to
+2.88x**. Bench the scene you care about.
 
 Where the second column came from, in the order it was found: the dispatch gate
 (+5%, +21%, +9%); one indirect branch per handler, which LLVM's tail merger

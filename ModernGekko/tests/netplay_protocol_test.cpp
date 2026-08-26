@@ -8,6 +8,7 @@
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/runtime.hpp"
 #include "netplay_compatibility.hpp"
+#include "core/native_state_layout.h"
 
 #include <array>
 #include <atomic>
@@ -30,6 +31,9 @@ constexpr ModernGekkoRange module_ranges[] = {
 constexpr std::uint64_t first_hashes[] = {0x123456789abcdef0u};
 constexpr std::uint64_t second_hashes[] = {0x123456789abcdef0u};
 constexpr std::uint64_t changed_hashes[] = {0x123456789abcdef1u};
+const ModernGekkoNativeMetadata native_metadata = {
+    "llvm", "arm64-apple-ios17.0", "LLVM 20.1.8", "test-codegen",
+    "test-build", dolnative_state_layout_hash()};
 
 const ModernGekkoModuleDesc first_descriptor = {
     MODERNGEKKO_MODULE_ABI_VERSION,
@@ -46,6 +50,10 @@ const ModernGekkoModuleDesc first_descriptor = {
     module_ranges,
     1,
     first_hashes,
+    nullptr,
+    0,
+    &native_metadata,
+    nullptr,
 };
 
 const ModernGekkoModuleDesc second_descriptor = {
@@ -63,6 +71,10 @@ const ModernGekkoModuleDesc second_descriptor = {
     module_ranges,
     1,
     second_hashes,
+    nullptr,
+    0,
+    &native_metadata,
+    nullptr,
 };
 
 const ModernGekkoModuleDesc changed_descriptor = {
@@ -80,6 +92,10 @@ const ModernGekkoModuleDesc changed_descriptor = {
     module_ranges,
     1,
     changed_hashes,
+    nullptr,
+    0,
+    &native_metadata,
+    nullptr,
 };
 } // namespace
 

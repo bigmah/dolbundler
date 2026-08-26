@@ -9,6 +9,7 @@
 // nothing reaches it that did not pass through this file.
 
 #include "vm/dolvm.h"
+#include "vm/dolvm_interp.h"
 #include "vm/dolvm_state.h"
 #include "cpu/cpu.h"
 
@@ -43,6 +44,7 @@ static const u8 g_word_counts[DOLVM_OP_COUNT] = {
     [DOLVM_OP_CMP_JMP_IF_CR] = 2,
     [DOLVM_OP_CMP_JMP_IF_CR_CHARGE] = 2,
     [DOLVM_OP_CMP_JMP_IF_CR_GUARD] = 3,
+    [DOLVM_OP_HLE] = 2,
 };
 
 u32 dolvm_op_words(u32 op) {
@@ -189,6 +191,11 @@ static const char* const g_op_names[DOLVM_OP_COUNT] = {
     [DOLVM_OP_CMP_JMP_IF_CR] = "cmp.jmp.if.cr",
     [DOLVM_OP_CMP_JMP_IF_CR_CHARGE] = "cmp.jmp.if.cr.charge",
     [DOLVM_OP_CMP_JMP_IF_CR_GUARD] = "cmp.jmp.if.cr.guard",
+    [DOLVM_OP_ROTL32I_AND] = "rotl32i.and",
+    [DOLVM_OP_SHL32I_AND] = "shl32i.and",
+    [DOLVM_OP_LSHR32I_AND] = "lshr32i.and",
+    [DOLVM_OP_ASHR32I_AND] = "ashr32i.and",
+    [DOLVM_OP_HLE] = "hle",
 };
 
 const char* dolvm_op_name(u32 op) {
@@ -288,6 +295,14 @@ static bool verify_code(const DolVMModule* module, char* error, size_t size) {
             ((u32)inst->a | (u32)inst->b << 8) >= module->region_count)
             return fail(error, size, "dolvm: call names region %u of %u",
                         (u32)inst->a | (u32)inst->b << 8, module->region_count);
+        if (inst->op == DOLVM_OP_HLE &&
+            (inst->a == DOLVM_HLE_NONE || inst->a >= DOLVM_HLE_COUNT))
+            return fail(error, size, "dolvm: unknown hle helper %u at %u",
+                        inst->a, index);
+        if (inst->op == DOLVM_OP_HLE &&
+            ((u32)inst->b | (u32)inst->c << 8) >= module->region_count)
+            return fail(error, size, "dolvm: hle names region %u of %u",
+                        (u32)inst->b | (u32)inst->c << 8, module->region_count);
         if ((inst->op == DOLVM_OP_JMP_IF_CR ||
              inst->op == DOLVM_OP_JMP_IF_CR_CHARGE ||
              inst->op == DOLVM_OP_JMP_IF_CR_GUARD) && inst->a >= 32u)
@@ -430,6 +445,7 @@ static void build_lookup(DolVMModule* module) {
 
 bool dolvm_module_open(DolVMModule* module, const void* image, size_t size,
                        char* error, size_t error_size) {
+    dolvm_hle_sites_reset();
     memset(module, 0, sizeof(*module));
     if (!image || size < sizeof(DolVMHeader))
         return fail(error, error_size, "dolvm: image is too small");
@@ -544,6 +560,7 @@ bool dolvm_module_load_file(DolVMModule* module, const char* path, char* error,
 }
 
 void dolvm_module_close(DolVMModule* module) {
+    dolvm_hle_sites_reset();
     if (!module)
         return;
     free(module->lookup);

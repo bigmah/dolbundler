@@ -1,5 +1,6 @@
 #include "ir/dolir_builder.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -281,8 +282,13 @@ u32 dolir_instruction_cycle_cost(const PPCInst* inst) {
     if (inst->embedded_data)
         return 0;
     switch (inst->op) {
-    case PPC_OP_UNKNOWN: case PPC_OP_DCBST: case PPC_OP_DCBF:
-    case PPC_OP_DCBI: case PPC_OP_ICBI: return 0;
+    case PPC_OP_UNKNOWN: return 0;
+    // Match Dolphin's PPCTables costs. These instructions lower to a direct
+    // cache-control hook, not instruction fallback, so nobody else charges
+    // them. Treating them as zero lets tight SDK cache-range loops execute
+    // several times too many iterations in one timing slice.
+    case PPC_OP_DCBST: case PPC_OP_DCBF: case PPC_OP_DCBI: return 5;
+    case PPC_OP_ICBI: return 4;
     case PPC_OP_MULLI: return 3;
     case PPC_OP_SC: case PPC_OP_RFI: case PPC_OP_TW: return 2;
     case PPC_OP_LMW: case PPC_OP_STMW: return 11;
@@ -1379,6 +1385,32 @@ static bool lower_control(Builder* b, u32 index, u32 count) {
     }
 }
 
+// True when DOLVM_FALLBACK_OPS names this opcode, comma separated.
+static bool dolir_op_forced_fallback(PPCOpcode op) {
+    // Asked once per guest instruction, so the environment is read once.
+    static const char* list;
+    static bool looked_up;
+    if (!looked_up) {
+        list = getenv("DOLVM_FALLBACK_OPS");
+        looked_up = true;
+    }
+    if (!list || !*list)
+        return false;
+    const char* name = ppc_op_name(op);
+    if (!name)
+        return false;
+    const size_t len = strlen(name);
+    for (const char* p = list; *p;) {
+        const char* end = p;
+        while (*end && *end != ',')
+            end++;
+        if ((size_t)(end - p) == len && memcmp(p, name, len) == 0)
+            return true;
+        p = *end ? end + 1 : end;
+    }
+    return false;
+}
+
 bool dolir_build_chunk(DolIRModule* module, const PPCInst* insts, u32 count,
                        u32 guest_start) {
     if (!module || !insts || !count)
@@ -1396,6 +1428,16 @@ bool dolir_build_chunk(DolIRModule* module, const PPCInst* insts, u32 count,
     for (u32 n = 0; n < count; n++) {
         Builder b = {function, &function->blocks[n], &insts[n]};
         b.block->cycle_cost = dolir_instruction_cycle_cost(b.inst);
+        // Bisect switch: DOLVM_FALLBACK_OPS=ps_muls0,psq_lu forces those opcodes
+        // down the same path an unlowered opcode takes, which is the reference
+        // interpreter. Naming one opcode at a time is how a miscompile in a
+        // function of 147 instructions gets attributed to an instruction.
+        if (dolir_op_forced_fallback(b.inst->op)) {
+            b.block->terminator.kind = DOLIR_TERM_FALLBACK;
+            b.block->terminator.guest_pc = b.inst->address;
+            b.block->terminator.raw = b.inst->raw;
+            continue;
+        }
         if (b.inst->embedded_data) {
             b.block->terminator.kind = DOLIR_TERM_FALLBACK;
             b.block->terminator.guest_pc = b.inst->address;

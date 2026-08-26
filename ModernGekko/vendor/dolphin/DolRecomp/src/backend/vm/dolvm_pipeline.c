@@ -5,12 +5,27 @@
 //
 // There is no chunking pressure here of the kind the C backend has. Chunks
 // exist so a C compiler is not handed a million-line function; the bytecode
-// emitter has no such limit, and larger regions are strictly better for the
-// interpreter, because an indirect branch that lands inside the region it
-// started in is resolved without a chassis round trip. The remaining reason to
-// chunk at all is optimizer working set, so regions are large but bounded.
+// emitter has no such limit, and for the interpreter alone larger regions are
+// better, because a call that stays inside its own region is lowered to a jump
+// while one that leaves is lowered to a gated CALL -- a dispatch the jump does
+// not pay.
+//
+// What decides the size is not that, though. A region is also the unit the
+// chassis verifies guest RAM against: `dolir_build_chunk` never merges blocks
+// across one, so a region is the smallest span that can be taken away from the
+// module when the guest rewrites an instruction. Games do rewrite one -- the
+// SDK's exception setup patches its own handler template during boot -- and at
+// 65536 instructions that single changed word sent a quarter of a megabyte of
+// hot code to the chassis's interpreter. On a host with a fallback JIT that is
+// invisible; on iOS, where there is none, Super Mario Strikers ran at 0.17x
+// against 1.05x with the hole cut to 16 KB.
+//
+// 4096 instructions is where those two pull even: the blast radius is 64 times
+// smaller, and the extra gated calls cost 0.6-2.3% in the heavy scenes of the
+// titles that never lose a region at all.
 
 #include "backend/vm/dolvm_emit.h"
+#include "backend/vm/dolvm_hle_match.h"
 #include "backend/vm/dolvm_pipeline.h"
 #include "analysis/embedded_data.h"
 #include "analysis/smc.h"
@@ -19,7 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DOLVM_DEFAULT_CHUNK_INSTRUCTIONS 65536u
+#define DOLVM_DEFAULT_CHUNK_INSTRUCTIONS 4096u
 
 static u32 chunk_instructions(void) {
     const char* configured = getenv("DOLRECOMP_VM_CHUNK");
@@ -51,6 +66,14 @@ static bool direct_calls_enabled(void) {
 // a claim about what homing is worth honest.
 static bool home_state_enabled(void) {
     const char* configured = getenv("DOLRECOMP_VM_HOME_STATE");
+    return !configured || configured[0] != '0';
+}
+
+// On unless asked otherwise. A module lowered without sites simply interprets
+// everything, which is what `0` is for: the same title both ways is the only
+// honest measurement of what a helper is worth.
+static bool hle_enabled(void) {
+    const char* configured = getenv("DOLRECOMP_VM_HLE");
     return !configured || configured[0] != '0';
 }
 
@@ -237,10 +260,22 @@ int emit_code_sections_vm(const LoadedCodeSection* sections, u32 section_count,
     text.sections = sections;
     text.section_count = section_count;
 
+    DolVMHleSite* hle_sites = NULL;
+    u32 hle_count = 0;
+    if (hle_enabled()) {
+        hle_count = dolvm_hle_match_sections(sections, section_count,
+                                             &hle_sites);
+        for (u32 i = 0; i < hle_count; i++)
+            printf("dolvm: %s proved at 0x%08X\n",
+                   dolvm_hle_name(hle_sites[i].id), hle_sites[i].pc);
+    }
+
     DolVMEmitOptions options;
     memset(&options, 0, sizeof(options));
     options.direct_calls = direct_calls_enabled();
     options.home_state = home_state_enabled();
+    options.hle_sites = hle_sites;
+    options.hle_count = hle_count;
     options.entry_point = entry_point;
     options.game_id = game_id;
     options.smc_ranges = smc_ranges;
@@ -255,12 +290,17 @@ int emit_code_sections_vm(const LoadedCodeSection* sections, u32 section_count,
     bool ok = dolvm_build_module(&ir, &options, &image, &size, &stats, stderr);
     dolir_module_free(&ir);
     free(smc_ranges);
+    free(hle_sites);
     if (!ok) {
         fprintf(stderr, "error: bytecode lowering failed\n");
         return 0;
     }
 
     dolvm_stats_report(&stats, "dolvm", stdout);
+    extern u32 g_dolvm_stub_bytes;
+    printf("dolvm: %u bytes of entry stubs (%.1f%%), laid out after every body\n",
+           g_dolvm_stub_bytes,
+           size ? 100.0 * (double)g_dolvm_stub_bytes / (double)size : 0.0);
     printf("dolvm: %zu bytes of module%s\n", size,
            options.direct_calls ? ", intra-module calls resolved inline" : "");
     if (smc_count)

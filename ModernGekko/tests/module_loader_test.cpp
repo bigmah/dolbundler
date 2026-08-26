@@ -1,4 +1,5 @@
 #include "moderngekko/module_loader.hpp"
+#include "core/native_state_layout.h"
 
 #include <cstdint>
 
@@ -11,6 +12,9 @@ int Dispatch(CPUState*, std::uint32_t)
 
 constexpr ModernGekkoRange ranges[] = {{0x80001000u, 0x80001020u}};
 constexpr std::uint64_t hashes[] = {1u};
+const ModernGekkoNativeMetadata metadata = {
+    "test", "test-target", "test-toolchain", "test-codegen", "test-build",
+    dolnative_state_layout_hash()};
 const ModernGekkoModuleDesc attached_descriptor = {
     MODERNGEKKO_MODULE_ABI_VERSION,
     MODERNGEKKO_CPU_ABI_VERSION,
@@ -26,6 +30,10 @@ const ModernGekkoModuleDesc attached_descriptor = {
     ranges,
     1u,
     hashes,
+    nullptr,
+    0u,
+    &metadata,
+    nullptr,
 };
 }
 
@@ -35,6 +43,7 @@ int main()
   ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION,
       sizeof(CPUState),
+      dolnative_state_layout_hash(),
       "TEST01",
   };
 

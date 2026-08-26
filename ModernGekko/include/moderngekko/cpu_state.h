@@ -77,6 +77,12 @@ struct CPUState
     PPCSPRRead spr_read;
     PPCSPRWrite spr_write;
     PPCCacheControl cache_control;
+    /* The Gekko's locked cache at 0xE0000000. Mirrors GXRuntime's field of the
+     * same name -- this header exists so the C++ side can size CPUState without
+     * including GXRuntime's, and the chassis rejects a module whose descriptor
+     * disagrees about that size, so the two have to be edited together. */
+    uint8_t* l1cache;
+    uint32_t l1cache_size;
 };
 
 #ifdef __cplusplus

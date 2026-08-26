@@ -15,6 +15,7 @@
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h"
+#include "Core/State.h"
 #include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
 #include "UICommon/UICommon.h"
@@ -25,6 +26,7 @@
 #include "moderngekko/dolvm_module.hpp"
 #include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
+#include "core/native_state_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -33,15 +35,27 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
+
+// The interpreter's bench raises this once it has charged past
+// DOLVM_BENCH_SKIP. Declared rather than included: dolvm_bridge.h is the one
+// header in the tree that speaks DolRecomp's CPUState, and this translation
+// unit already has the chassis's.
+extern "C" int dolvm_bridge_bench_at_skip(void);
 
 namespace {
 static_assert(sizeof(ModernGekkoModuleDesc) == sizeof(StaticRecompModuleDesc));
 static_assert(offsetof(ModernGekkoModuleDesc, chunk_hashes) ==
               offsetof(StaticRecompModuleDesc, chunk_hashes));
+static_assert(offsetof(ModernGekkoModuleDesc, native_metadata) ==
+              offsetof(StaticRecompModuleDesc, native_metadata));
+static_assert(offsetof(ModernGekkoModuleDesc, publish_gate) ==
+              offsetof(StaticRecompModuleDesc, publish_gate));
 std::mutex s_runtime_mutex;
 bool s_runtime_active = false;
 Platform *s_platform = nullptr;
@@ -52,6 +66,13 @@ std::unique_ptr<BootSessionData> s_boot_session_data;
 u64 s_previous_net_wait_ns = 0;
 double s_net_wait_ms_per_second = 0.0;
 std::chrono::steady_clock::time_point s_previous_net_wait_sample;
+
+void PublishAttachedNativeGate(const StaticRecompDispatchGate* gate, void* user)
+{
+  const auto* descriptor = static_cast<const ModernGekkoModuleDesc*>(user);
+  if (descriptor && descriptor->publish_gate)
+    descriptor->publish_gate(gate);
+}
 
 std::string FormatWindowTitle(const std::string &title, double fps) {
   if (!std::isfinite(fps) || fps < 0.0)
@@ -200,12 +221,15 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
         RuntimeError{RuntimeErrorCode::AlreadyActive,
                      "only one ModernGekko runtime may be active per process"}};
 
-  GameInspectResult inspected = InspectGame(config.game_root);
+  // Skipping the assets hash is most of a phone's launch time; the runtime
+  // never reads it.
+  GameInspectResult inspected = InspectGame(config.game_root, /*hash_assets=*/false);
   if (!inspected)
     return {{}, RuntimeError{RuntimeErrorCode::InvalidGame, inspected.error}};
 
   const ModernGekkoModuleRequirements requirements = {
       MODERNGEKKO_CPU_ABI_VERSION, static_cast<std::uint32_t>(sizeof(CPUState)),
+      dolnative_state_layout_hash(),
       inspected.metadata->disc_id.c_str()};
   ModuleLibrary validation_library;
   ModuleLoadResult module_result{};
@@ -269,6 +293,10 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   if (!s_external_ui_common) {
     UICommon::SetUserDirectory(impl->config.user_directory.string());
     UICommon::Init();
+    // Dolphin's frontends make the user tree; without this there is no
+    // Cache/ directory, every shader-cache open fails silently, and every
+    // launch of every game recompiles every pipeline from scratch.
+    UICommon::CreateDirectories();
     impl->ui_initialized = true;
   }
   Config::SetBase(Config::MAIN_FULLSCREEN, impl->config.fullscreen);
@@ -309,6 +337,13 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->platform->SetTitle(impl->title);
 
   Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::StaticRecomp);
+  if (impl->config.cpu_thread)
+    Config::SetBase(Config::MAIN_CPU_THREAD, *impl->config.cpu_thread);
+  // Two builds of the same scene only line up if the guest clock does. With the
+  // limiter off, a faster build is somewhere else in an attract loop by the time
+  // a screenshot lands, and the two pictures are not of the same thing.
+  if (const char* speed = std::getenv("MODERNGEKKO_EMULATION_SPEED"))
+    Config::SetBase(Config::MAIN_EMULATION_SPEED, (float)std::atof(speed));
   if (!impl->config.graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
   else if (impl->config.headless)
@@ -316,6 +351,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   if (impl->config.graphics.internal_resolution_scale)
     Config::SetBase(Config::GFX_EFB_SCALE,
                     *impl->config.graphics.internal_resolution_scale);
+  if (impl->config.graphics.gpu_texture_decoding)
+    Config::SetBase(Config::GFX_ENABLE_GPU_TEXTURE_DECODING,
+                    *impl->config.graphics.gpu_texture_decoding);
   Config::SetBase(Config::GFX_SHADER_CACHE, true);
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
                   ShaderCompilationMode::AsynchronousUberShaders);
@@ -346,9 +384,17 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     recomp_source =
         StaticRecompModuleSource::Dynamic(impl->config.module.path.string());
   else if (impl->config.module.kind == ModuleSource::Kind::AttachedDescriptor)
+  {
     recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(
             impl->config.module.descriptor));
+    if (impl->config.module.descriptor->publish_gate)
+    {
+      recomp_source.publish_gate = &PublishAttachedNativeGate;
+      recomp_source.publish_gate_user =
+          const_cast<ModernGekkoModuleDesc*>(impl->config.module.descriptor);
+    }
+  }
   else if (impl->config.module.kind == ModuleSource::Kind::BytecodePath) {
     recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(
@@ -439,6 +485,55 @@ RuntimeRunResult Runtime::Run() {
                          "Dolphin could not boot sys/main.dol"}};
   }
   m_impl->booted = true;
+  // Comparing two builds means measuring the same scene in both, and a game
+  // does not stand still: an attract loop that alternates menus and gameplay
+  // differs by 30% in interpretation cost between the two. The interpreter's
+  // bench raises a flag once it has charged past DOLVM_BENCH_SKIP, so a state
+  // written at that moment is a fixed guest instant rather than a wall one --
+  // which turns a two-minute warm-up per measurement into a load. Off unless
+  // MODERNGEKKO_SAVE_STATE_AT_SKIP names a file to write.
+  std::jthread bench_state_thread;
+  if (const char* bench_state = std::getenv("MODERNGEKKO_SAVE_STATE_AT_SKIP")) {
+    bench_state_thread =
+        std::jthread([path = std::string(bench_state)](std::stop_token stop) {
+          while (!stop.stop_requested()) {
+            if (dolvm_bridge_bench_at_skip()) {
+              State::SaveAs(Core::System::GetInstance(), path);
+              std::fprintf(stderr, "[dolvm-bench] savestate written to %s\n",
+                           path.c_str());
+              return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          }
+        });
+  }
+  // Wall-clock sibling of the above, for scenes that no bench window names:
+  // "boot, wait, and write a state" is how a menu or an attract-mode scene
+  // becomes reloadable. Chasing a miscompile means running the same scene
+  // dozens of times, and a two-minute boot per attempt is the difference
+  // between bisecting a function and giving up on it.
+  // MODERNGEKKO_SAVE_STATE_AFTER=<seconds>:<path>.
+  std::jthread timed_state_thread;
+  if (const char* timed = std::getenv("MODERNGEKKO_SAVE_STATE_AFTER")) {
+    const std::string spec(timed);
+    const size_t colon = spec.find(':');
+    if (colon != std::string::npos) {
+      const int delay = std::atoi(spec.substr(0, colon).c_str());
+      std::string path = spec.substr(colon + 1);
+      if (delay > 0 && !path.empty()) {
+        timed_state_thread = std::jthread(
+            [delay, path = std::move(path)](std::stop_token stop) {
+              for (int i = 0; i < delay * 10 && !stop.stop_requested(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+              if (stop.stop_requested())
+                return;
+              State::SaveAs(Core::System::GetInstance(), path);
+              std::fprintf(stderr, "[state] savestate written to %s\n",
+                           path.c_str());
+            });
+      }
+    }
+  }
   std::jthread title_thread;
   if (!m_impl->config.headless && m_impl->config.show_fps_in_title) {
     title_thread = std::jthread([](std::stop_token stop_token) {
@@ -450,6 +545,8 @@ RuntimeRunResult Runtime::Run() {
     });
   }
   m_impl->platform->MainLoop();
+  bench_state_thread.request_stop();
+  timed_state_thread.request_stop();
   title_thread.request_stop();
   if (title_thread.joinable())
     title_thread.join();

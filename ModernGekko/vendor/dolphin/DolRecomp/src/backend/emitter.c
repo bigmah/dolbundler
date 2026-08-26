@@ -323,6 +323,12 @@ void emit_set_chunk_table(const u32* starts, u32 count) {
     g_chunk_count = count ? count : 0;
 }
 
+static bool g_hle_outcalls;
+
+void emit_set_hle_outcalls(bool enabled) {
+    g_hle_outcalls = enabled;
+}
+
 // The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
 // the text sections but the first one does not start on the common stride, so
 // this binary-searches rather than dividing.
@@ -390,6 +396,14 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
                 fprintf(out, "            }\n");
             }
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
+        } else if (g_hle_outcalls &&
+                   branch_target_is_local(func_start, func_end,
+                                          inst->address + 4u)) {
+            fprintf(out,
+                    "            DOLRECOMP_OUTCALL(0x%08Xu, 0x%08Xu, "
+                    "label_%08X);\n",
+                    inst->branch_target, inst->address + 4u,
+                    inst->address + 4u);
         } else if (!emit_cross_chunk_call(out, inst, func_start, func_end)) {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "            return;\n");

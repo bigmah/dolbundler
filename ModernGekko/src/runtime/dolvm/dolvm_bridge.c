@@ -42,9 +42,21 @@ static DolVMGate s_gate;
 static const u32 s_no_pending;
 static const s32 s_no_budget;
 
+extern int g_dolvm_poll_skip_enabled;
+extern int g_dolvm_hle_enabled;
+
 int dolvm_bridge_open(const char* path, DolVMBridgeInfo* info, char* error,
                       size_t error_size)
 {
+    if (getenv("DOLVM_NO_POLL_SKIP"))
+        g_dolvm_poll_skip_enabled = 0;
+    {
+        // The A/B for what a native stand-in is worth: the same module with
+        // every HLE op declining, so the interpreted bodies under them run.
+        const char* hle = getenv("DOLVM_HLE");
+        if (hle && hle[0] == '0')
+            g_dolvm_hle_enabled = 0;
+    }
     dolvm_bridge_close();
     if (!dolvm_module_load_file(&s_module, path, error, error_size))
         return 0;
@@ -105,11 +117,25 @@ void dolvm_bridge_set_gate(const StaticRecompDispatchGate* gate)
     dolvm_module_set_gate(&s_module, &s_gate);
 }
 
+#ifdef DOLVM_SAMPLE
+// Defined below, with the sampler; declared here so shutdown can report.
+static void dolvm_sample_report(void);
+extern volatile int dolvm_sample_running(void);
+#endif
+
 void dolvm_bridge_close(void)
 {
 #ifdef DOLVM_PROFILE
     if (s_open)
         dolvm_profile_report(stderr);
+#endif
+#ifdef DOLVM_SAMPLE
+    // Without the bench there is no _exit to report from, so a clean shutdown
+    // is the moment. This is how the profile comes off a phone: the app stops
+    // the game on a timer, the chassis closes the module, and the report lands
+    // in the run log with everything else.
+    if (s_open && dolvm_sample_running())
+        dolvm_sample_report();
 #endif
     if (s_open)
         dolvm_module_close(&s_module);
@@ -129,7 +155,9 @@ void dolvm_bridge_close(void)
 // single symbol. g_dolvm_op_handlers holds each handler's entry address, which
 // is what turns a sampled pc back into an opcode.
 extern const void* g_dolvm_op_handlers[];
+#ifdef DOLVM_PROFILE
 extern u64 g_dolvm_op_counts[];
+#endif
 
 static mach_port_t s_sampled_thread;
 static u64 s_samples[512];
@@ -216,6 +244,32 @@ static void dolvm_pc_report(u64 total) {
     }
     fprintf(stderr, "[dolvm-sample] hottest program counters (offset from dolvm_dispatch):\n");
     uintptr_t base = (uintptr_t)&dolvm_dispatch;
+    // Name each hot pc with the handler it is furthest into. Tail duplication
+    // and PGO both move a handler's body away from its entry label, so this is
+    // a hint rather than an attribution -- but with 180 handlers in one
+    // function it is the difference between a number and a lead.
+    uintptr_t hbounds[512];
+    u32 hslots[512];
+    u32 hcount = 0;
+    for (u32 op = 0; op < DOLVM_OP_COUNT && hcount < 512u; op++) {
+        if (!g_dolvm_op_handlers[op])
+            continue;
+        hbounds[hcount] = (uintptr_t)g_dolvm_op_handlers[op];
+        hslots[hcount] = op;
+        hcount++;
+    }
+    for (u32 i = 1; i < hcount; i++) {
+        uintptr_t key = hbounds[i];
+        u32 slot = hslots[i];
+        u32 j = i;
+        while (j && hbounds[j - 1u] > key) {
+            hbounds[j] = hbounds[j - 1u];
+            hslots[j] = hslots[j - 1u];
+            j--;
+        }
+        hbounds[j] = key;
+        hslots[j] = slot;
+    }
     double running = 0.0;
     for (u32 i = 0; i < live && i < 120u; i++) {
         uintptr_t pc = s_pc_keys[order[i]];
@@ -228,8 +282,23 @@ static void dolvm_pc_report(u64 total) {
             name = info.dli_sname;
             off = pc - (uintptr_t)info.dli_saddr;
         }
-        fprintf(stderr, "  %5.2f%% (cum %5.2f%%)  %s+0x%lx  [dispatch%+ld]\n", share, running,
-                name, (unsigned long)off, (long)(pc - base));
+        const char* nearest = "";
+        unsigned long into = 0;
+        if (hcount && pc >= hbounds[0] && pc < hbounds[hcount - 1u] + 65536u) {
+            u32 low = 0, high = hcount;
+            while (low + 1u < high) {
+                u32 middle = low + (high - low) / 2u;
+                if (hbounds[middle] <= pc)
+                    low = middle;
+                else
+                    high = middle;
+            }
+            nearest = dolvm_op_name(hslots[low]);
+            into = (unsigned long)(pc - hbounds[low]);
+        }
+        fprintf(stderr, "  %5.2f%% (cum %5.2f%%)  %s+0x%lx  [dispatch%+ld]  %s+%lu\n",
+                share, running, name, (unsigned long)off, (long)(pc - base),
+                nearest, into);
     }
 }
 
@@ -296,6 +365,8 @@ static void* dolvm_sampler(void* unused) {
     return NULL;
 }
 
+volatile int dolvm_sample_running(void) { return s_sampling; }
+
 static void dolvm_sample_start(void) {
     s_sampled_thread = mach_thread_self();
     s_sampling = 1;
@@ -315,6 +386,7 @@ static void dolvm_sample_report(void) {
         return;
     fprintf(stderr, "[dolvm-sample] %llu samples, %.1f%% outside the dispatch loop\n",
             (unsigned long long)total, 100.0 * (double)s_samples_outside / (double)total);
+#ifdef DOLVM_PROFILE
     fprintf(stderr, "   time%%   ops%%   ns/op  opcode\n");
     u64 op_total = 0;
     for (u32 op = 0; op < DOLVM_OP_COUNT; op++)
@@ -344,14 +416,28 @@ static void dolvm_sample_report(void) {
         fprintf(stderr, "  %6.2f %6.2f %7.2f  %s\n", share, ops, ns,
                 dolvm_op_name(op));
     }
+#endif
     dolvm_pc_report(total);
 }
 #endif
+
+static volatile int s_bench_at_skip;
+
+int dolvm_bridge_bench_at_skip(void)
+{
+    return s_bench_at_skip;
+}
 
 int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
 {
     if (!s_open)
         return 0;
+#if defined(DOLVM_SAMPLE) && !defined(DOLVM_BENCH)
+    // The bench starts the sampler when its window opens; with no bench, the
+    // first dispatch is the start of everything there is to measure.
+    if (!s_sampling)
+        dolvm_sample_start();
+#endif
 #ifdef DOLVM_BENCH
     // Wall time to retire a fixed number of guest cycles. Running for a fixed
     // number of seconds instead measures whatever scene the game happened to
@@ -361,28 +447,74 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
     // every cycle the module charges -- including the ones it flushes from
     // inside a hook, which a per-dispatch difference of downcount would miss.
     {
+        // A game is not one workload. Disney skate spends its first twelve
+        // guest seconds on logos and fades, which retire far faster than the
+        // skating does, so a window that opens at the first dispatch measures
+        // the wrong scene. DOLVM_BENCH_SKIP charges past the boot before the
+        // clocks start, and DOLVM_BENCH_WINDOW reports every so many cycles --
+        // which is how the scene a window landed in gets identified at all.
         static u64 budget;
+        static u64 skip;
+        static u64 window;
+        static u64 window_mark;
         static u64 timebase_start;
+        static u64 measure_base;
         static double started;
         static double started_cpu;
-        if (!budget) {
+        static double window_at;
+        static double window_at_cpu;
+        static int configured_once;
+        static int running;
+        if (!configured_once) {
+            configured_once = 1;
             const char* configured = getenv("DOLVM_BENCH_CYCLES");
             budget = configured ? strtoull(configured, NULL, 0) : 0;
             if (!budget)
                 budget = ~0ull;
+            configured = getenv("DOLVM_BENCH_SKIP");
+            skip = configured ? strtoull(configured, NULL, 0) : 0;
+            configured = getenv("DOLVM_BENCH_WINDOW");
+            window = configured ? strtoull(configured, NULL, 0) : 0;
             timebase_start = ctx->timebase;
+        }
+        int rc = dolvm_dispatch(&s_module, ctx, address);
+        // The Gekko's timebase ticks once per twelve cycles.
+        u64 booted = (ctx->timebase - timebase_start) * 12u;
+        if (!running) {
+            if (booted < skip)
+                return rc;
+            running = 1;
+            measure_base = booted;
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             started = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
             started_cpu = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+            window_at = started;
+            window_at_cpu = started_cpu;
+            s_bench_at_skip = 1;
 #ifdef DOLVM_SAMPLE
             dolvm_sample_start();
 #endif
+            return rc;
         }
-        int rc = dolvm_dispatch(&s_module, ctx, address);
-        // The Gekko's timebase ticks once per twelve cycles.
-        u64 charged = (ctx->timebase - timebase_start) * 12u;
+        u64 charged = booted - measure_base;
+        if (window && charged - window_mark >= window && charged < budget) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double wall = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+            double cpu = (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+            double span = (double)(charged - window_mark) / 486000000.0;
+            fprintf(stderr,
+                    "[dolvm-bench] at %6.1fs guest: %.4fx wall  %.4fx cpu\n",
+                    (double)booted / 486000000.0, span / (wall - window_at),
+                    span / (cpu - window_at_cpu));
+            fflush(stderr);
+            window_at = wall;
+            window_at_cpu = cpu;
+            window_mark = charged;
+        }
         if (charged >= budget) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -414,6 +546,15 @@ int dolvm_bridge_dispatch(struct CPUState* ctx, uint32_t address)
             dolvm_sample_report();
 #endif
             fflush(stderr);
+            // Scratch: dump guest RAM at bench exit for offline inspection.
+            const char* dump = getenv("DOLVM_DUMP_RAM");
+            if (dump) {
+                FILE* f = fopen(dump, "wb");
+                if (f) {
+                    fwrite(ctx->ram, 1, ctx->ram_size, f);
+                    fclose(f);
+                }
+            }
             _exit(0);
         }
         return rc;

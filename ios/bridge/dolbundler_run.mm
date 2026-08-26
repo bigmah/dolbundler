@@ -4,6 +4,7 @@
 
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
+#include "Core/Config/MainSettings.h"  // BACKEND_NULLSOUND
 #include "Core/Core.h"
 #include "Core/HW/GCPad.h"
 #include "Core/System.h"
@@ -16,12 +17,27 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <sys/stat.h>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+#include "dolbundler_native_modules.inc"
+#endif
+
+#ifdef DOLBUNDLER_LLVM_PGO_GENERATE
+// The embedded module target supplies this definition only to instrumentation
+// builds, whose final link already pulls in compiler-rt's profile runtime.
+// Ordinary and profile-use builds compile out both the call and the symbol.
+extern "C" int __llvm_profile_write_file(void);
+#endif
 
 namespace
 {
@@ -129,6 +145,91 @@ void ForceDolphinFileLog()
   run_log("dolphin.log enabled at LDEBUG");
 }
 
+// Sample emulation speed into the run log. Off unless asked for.
+//
+// The on-screen overlay shows the same two numbers live, but a device with no
+// console attached cannot be read that way, and a phone in your hand cannot be
+// watched and benchmarked at once. This leaves a trace to pull off afterwards.
+//
+// Read `speed`, not `fps`: a GameCube game's own frame rate varies by scene --
+// 30 in one, 60 in another -- so only speed says whether emulation is keeping
+// up. See PERFORMANCE.md.
+void StartPerfLog(std::atomic<bool>* running)
+{
+  const char* wanted = getenv("DOLBUNDLER_PERF_LOG");
+  if (!wanted || wanted[0] != '1')
+    return;
+
+  std::thread([running] {
+    while (running->load())
+    {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      if (!running->load())
+        break;
+      const auto& metrics = Core::System::GetInstance().GetPerfMetrics();
+      run_log("perf: %.1f fps  %.0f%% speed  peak %.0f/%.0fms",
+              metrics.GetFPS(), metrics.GetSpeed() * 100.0,
+              DT_ms(metrics.TakeFramePeak()).count(),
+              DT_ms(metrics.TakeVBlankPeak()).count());
+    }
+  }).detach();
+}
+
+// Stop the game by itself after N seconds. Without this a scripted run can only
+// be killed, and a kill skips Core shutdown -- which is where StaticRecomp
+// prints how much of the guest ran natively versus through the chassis:
+//
+//   [staticrecomp] shutdown: native=... fallback=... hook_fb=... smc_failed=...
+//
+// Those counters are a property of the module and the game rather than of the
+// host, so they are the one performance question the simulator can answer.
+void StartRunTimer(std::atomic<bool>* running)
+{
+  const char* seconds = getenv("DOLBUNDLER_RUN_SECONDS");
+  if (!seconds)
+    return;
+  const int wanted = atoi(seconds);
+  if (wanted <= 0)
+    return;
+
+  // Optionally take a screenshot part way through. There is no way to capture a
+  // device's screen from a Mac the way `simctl io screenshot` captures the
+  // simulator's, and the simulator renders this class of game black regardless
+  // -- so without this, a rendering bug on a phone can only be described, not
+  // seen. Dolphin writes into its own screenshots directory, which is inside
+  // the app's Documents and therefore reachable with `devicectl copy from`.
+  const char* shot_at = getenv("DOLBUNDLER_SCREENSHOT_AFTER");
+  const int shot_seconds = shot_at ? atoi(shot_at) : 0;
+
+  std::thread([running, wanted, shot_seconds] {
+    for (int i = 0; i < wanted && running->load(); ++i)
+    {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (shot_seconds > 0 && i + 1 == shot_seconds && running->load())
+      {
+        run_log("screenshot requested at %ds", shot_seconds);
+        Core::SaveScreenShot();
+      }
+    }
+    if (running->load())
+    {
+      run_log("run timer expired after %ds, stopping", wanted);
+      db_request_stop();
+    }
+  }).detach();
+}
+
+void FlushLLVMProfileIfRequested()
+{
+#ifdef DOLBUNDLER_LLVM_PGO_GENERATE
+  if (!getenv("LLVM_PROFILE_FILE"))
+    return;
+
+  const int status = __llvm_profile_write_file();
+  run_log("LLVM profile flush returned %d", status);
+#endif
+}
+
 void set_err(char* err, size_t err_size, const std::string& message)
 {
   if (err && err_size)
@@ -156,21 +257,120 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   run_log("module:     %s", module_path);
   mkdir((std::string(user_dir) + "/Logs").c_str(), 0755);
   Platform::SetIOSDiagnosticLog(s_log_path.c_str());
+  // Anything the runtime writes to stderr -- the DolVM sampler's report, most
+  // of all -- goes into the same file, because stderr on a device goes nowhere
+  // a `devicectl copy from` can reach. Only when the perf log is on, so a
+  // normal run is unaffected.
+  if (const char* perf = getenv("DOLBUNDLER_PERF_LOG"))
+    if (perf[0] == '1')
+    {
+      freopen(s_log_path.c_str(), "a", stderr);
+      // stderr is unbuffered only while it is a terminal; redirected to a file
+      // it becomes fully buffered, and the last few kilobytes of a run then
+      // sit in that buffer until the process exits. Pulling the log off the
+      // device mid-run then reads a truncated one, which looks exactly like a
+      // run that stopped early -- and cost an afternoon reading a 150-second
+      // measurement as a 30-second crash.
+      setvbuf(stderr, nullptr, _IOLBF, 0);
+    }
 
   moderngekko::RuntimeConfig config;
   config.game_root = game_root;
   config.user_directory = user_dir;
-  config.module = moderngekko::ModuleSource::BytecodePath(module_path);
+  bool found_native_module = false;
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  const std::string game_id =
+      std::filesystem::path(game_root).filename().string();
+  for (const DolBundlerNativeModuleEntry& native_module : kDolBundlerNativeModules)
+  {
+    if (game_id != native_module.game_id)
+      continue;
+    config.module =
+        moderngekko::ModuleSource::AttachedDescriptor(native_module.get_module());
+    run_log("using embedded native module for %s", native_module.game_id);
+    found_native_module = true;
+    break;
+  }
+#endif
+  if (!found_native_module)
+    config.module = moderngekko::ModuleSource::BytecodePath(module_path);
   config.graphics.backend = "Metal";
+  // Metal implements Dolphin's compute-shader texture decoder. Keep texture
+  // conversion off the emulation thread, where it competes directly with the
+  // bytecode VM in this single-core configuration.
+  config.graphics.gpu_texture_decoding = true;
   // AudioCommon's own default resolves to this on iOS too, but naming it means
   // a silent game is a wrong-backend bug rather than an unnoticed fallback.
+  //
+  // Except on the simulator, which plays through the Mac's speakers while the
+  // development loop is launch-run-relaunch. Silent by default there;
+  // DOLBUNDLER_SIM_AUDIO=1 turns it back on when audio is the thing being
+  // worked on. Device builds are unaffected -- TARGET_OS_SIMULATOR is a
+  // compile-time property of a separate binary.
+#if TARGET_OS_SIMULATOR
+  const char* sim_audio = getenv("DOLBUNDLER_SIM_AUDIO");
+  config.audio.backend = (sim_audio && sim_audio[0] == '1') ? "AudioUnit" : BACKEND_NULLSOUND;
+#else
   config.audio.backend = "AudioUnit";
+#endif
+  // Two switches for isolating what the emulation thread waits on. Profiling
+  // the phone put a third of that thread's samples in __semwait_signal and
+  // swtch_pri -- blocked, not computing -- and in single-core mode the video
+  // work runs on the same thread, so audio and presentation are both
+  // candidates and neither can be told apart from the outside. Turning each
+  // off in turn on the device answers it in two runs. Off unless set, so a
+  // normal build is untouched.
+  if (const char* quiet = getenv("DOLBUNDLER_NULL_AUDIO"))
+    if (quiet[0] == '1')
+      config.audio.backend = BACKEND_NULLSOUND;
+  if (const char* blind = getenv("DOLBUNDLER_NULL_VIDEO"))
+    if (blind[0] == '1')
+      config.graphics.backend = "Null";
+
+  // The emulated GPU stays on the emulation thread. Giving it its own is worth
+  // +19% on the desktop against a real graphics backend, and **-15% on the
+  // phone**: measured in Olliewood on an iPhone 15 Pro Max, interleaved,
+  // single core holds a median 72-77% and dual core 60-62%. That agrees with
+  // the reading this project took in 2026-08-21 and disagrees with every
+  // desktop measurement, so the desktop does not predict a phone here.
+  //
+  // DOLBUNDLER_DUAL_CORE=1 turns it on, because the *why* is still open --
+  // most likely the GPU thread landing on an efficiency core while the
+  // emulation thread waits on it.
+  config.cpu_thread = false;
+  if (const char* dual = getenv("DOLBUNDLER_DUAL_CORE"))
+    if (dual[0] == '1')
+      config.cpu_thread = true;
+
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
   // A .dvm covers the whole title; letting the chassis fall back to its own
   // interpreter would silently mask a module that failed to load.
   config.allow_interpreter = false;
   config.show_fps_in_title = false;
+
+  // Test hook, off unless asked for: boot straight into a savestate.
+  //
+  // Measuring emulation speed on a phone means measuring the same scene twice,
+  // and the scenes that matter are minutes into an autoplay run -- Disney
+  // skate's attract demo is eight minutes in at the speed the phone manages,
+  // and its menus, where the speed is quite different, are everything before
+  // it. The desktop bench solved this by pinning a savestate; this is the same
+  // savestate, so the two are directly comparable.
+  //
+  // Relative paths resolve inside the app's Documents directory, which is what
+  // a state pushed over devicectl lands in.
+  if (const char* state = getenv("DOLBUNDLER_LOAD_STATE"))
+  {
+    if (state[0] != '\0')
+    {
+      std::string path = state;
+      if (path.front() != '/')
+        path = std::string(user_dir) + "/../" + path;
+      config.load_state_path = path;
+      run_log("load-state: %s", path.c_str());
+    }
+  }
 
   run_log("Runtime::Create ...");
   auto created = moderngekko::Runtime::Create(std::move(config));
@@ -191,6 +391,9 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     s_runtime = std::move(created.runtime);
   }
 
+  StartPerfLog(&s_running);
+  StartRunTimer(&s_running);
+
   // Installed before Run() so no boot state transition is missed, but it only
   // attaches the overrider once the pads actually exist.
   s_overrider_ready.store(false);
@@ -210,6 +413,7 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     s_runtime.reset();
   }
   s_running.store(false);
+  FlushLLVMProfileIfRequested();
 
   if (result.reason == moderngekko::RuntimeExitReason::BootFailed)
   {

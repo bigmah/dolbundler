@@ -115,6 +115,24 @@ ModernGekkoModuleStatus moderngekko_validate_module(
         return MODERNGEKKO_MODULE_CPU_ABI_MISMATCH;
     if (descriptor->cpu_state_size != requirements->cpu_state_size)
         return MODERNGEKKO_MODULE_CPU_STATE_SIZE_MISMATCH;
+    if (descriptor->native_metadata == NULL)
+        return MODERNGEKKO_MODULE_MISSING_NATIVE_METADATA;
+    if (descriptor->native_metadata->backend_name == NULL ||
+        descriptor->native_metadata->backend_name[0] == '\0' ||
+        descriptor->native_metadata->target_triple == NULL ||
+        descriptor->native_metadata->toolchain_version == NULL ||
+        descriptor->native_metadata->codegen_fingerprint == NULL ||
+        descriptor->native_metadata->build_id == NULL ||
+        descriptor->native_metadata->build_id[0] == '\0' ||
+        descriptor->native_metadata->cpu_state_layout_hash == 0u)
+    {
+        return MODERNGEKKO_MODULE_INVALID_NATIVE_METADATA;
+    }
+    if (descriptor->native_metadata->cpu_state_layout_hash !=
+        requirements->cpu_state_layout_hash)
+    {
+        return MODERNGEKKO_MODULE_CPU_STATE_LAYOUT_MISMATCH;
+    }
     if (memchr(descriptor->game_id, '\0', sizeof(descriptor->game_id)) == NULL ||
         descriptor->game_id[0] == '\0')
     {
@@ -161,6 +179,9 @@ const char* moderngekko_module_status_string(ModernGekkoModuleStatus status)
         "invalid chunks",
         "entry point is not covered by code ranges",
         "invalid REL module metadata",
+        "missing native-code metadata",
+        "invalid native-code metadata",
+        "CPU state layout fingerprint mismatch",
     };
 
     if ((unsigned)status >= sizeof(messages) / sizeof(messages[0]))

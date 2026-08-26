@@ -55,6 +55,13 @@ def main() -> int:
     out_path = Path(sys.argv[4])
 
     header = generated_h.read_text()
+    symbol_prefix_match = re.search(
+        r'#define DOLRECOMP_NATIVE_SYMBOL_PREFIX "([A-Za-z_][A-Za-z0-9_]*)?"',
+        header,
+    )
+    symbol_prefix = ""
+    if symbol_prefix_match:
+        symbol_prefix = symbol_prefix_match.group(1) or ""
     code_ranges = {
         (int(a, 16), int(b, 16))
         for a, b in re.findall(
@@ -79,7 +86,11 @@ def main() -> int:
     # interpreter for the session.
     func_addrs = sorted(
         int(a, 16)
-        for a in re.findall(r"void func_([0-9A-Fa-f]{8})\(CPUState\* ctx\);", header)
+        for a in re.findall(
+            rf"void {re.escape(symbol_prefix)}func_([0-9A-Fa-f]{{8}})"
+            r"\(CPUState\* ctx\);",
+            header,
+        )
     )
     if not func_addrs:
         print("error: no func_ declarations found in", generated_h, file=sys.stderr)

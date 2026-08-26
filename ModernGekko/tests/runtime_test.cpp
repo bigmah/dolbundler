@@ -4,7 +4,14 @@
 
 int main()
 {
-  static_assert(sizeof(CPUState) == 3528u);
+  // Three copies of this struct have to agree on its size: GXRuntime's, the
+  // mirror in include/moderngekko/cpu_state.h that the C++ side sizes modules
+  // against, and DolRecomp's. The chassis rejects a module whose descriptor
+  // disagrees, and it does so without a message on the bytecode path, so the
+  // symptom of editing one and not the others is a game that silently falls
+  // back to Dolphin's interpreter. Pinning the number here turns that into a
+  // build failure. Bump it deliberately, having edited all three.
+  static_assert(sizeof(CPUState) == 3544u);
 
   moderngekko::LegacyRuntime runtime(true);
   const moderngekko::ModuleLoadResult loaded =

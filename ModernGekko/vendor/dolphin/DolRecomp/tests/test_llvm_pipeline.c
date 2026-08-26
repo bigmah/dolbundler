@@ -25,12 +25,13 @@ static int make_dir(const char* path) {
 #endif
 }
 
-// The emitted object format follows the default target triple, so this cannot
-// assume ELF: a Windows host produces COFF, whose x86-64 objects start with the
-// machine type IMAGE_FILE_MACHINE_AMD64 (0x8664) stored little-endian.
+// The emitted object format follows the effective target triple.
 static int is_native_object(const u8* magic) {
 #if defined(_WIN32)
     return magic[0] == 0x64 && magic[1] == 0x86;
+#elif defined(__APPLE__)
+    return magic[0] == 0xCF && magic[1] == 0xFA && magic[2] == 0xED &&
+           magic[3] == 0xFE;
 #else
     return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
 #endif
@@ -82,6 +83,7 @@ int main(int argc, char** argv) {
     // environment, so the chunk-size override is set here rather than between
     // fork and exec.
     CHECK(_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") == 0);
+    CHECK(_putenv_s("DOLRECOMP_LLVM_SYMBOL_PREFIX", "gTEST_") == 0);
     CHECK(_spawnl(_P_WAIT, argv[1], argv[1], "--gamecube", "--backend=llvm",
                   "-j2", dol, output, NULL) == 0);
 #else
@@ -89,6 +91,7 @@ int main(int argc, char** argv) {
     CHECK(child >= 0);
     if (child == 0) {
         setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_SYMBOL_PREFIX", "gTEST_", 1);
         execl(argv[1], argv[1], "--gamecube", "--backend=llvm", "-j2", dol,
               output, NULL);
         _exit(127);
@@ -99,11 +102,16 @@ int main(int argc, char** argv) {
 #endif
     FILE* file = fopen(header, "rb");
     CHECK(file != NULL);
-    char text[4096];
+    char text[65536];
     size_t length = fread(text, 1, sizeof(text) - 1, file);
     text[length] = '\0';
     fclose(file);
     CHECK(strstr(text, "DOLRECOMP_BACKEND_LLVM") != NULL);
+    CHECK(strstr(text, "DOLRECOMP_NATIVE_STATE_LAYOUT_HASH") != NULL);
+    CHECK(strstr(text, "DOLRECOMP_NATIVE_CODEGEN_FINGERPRINT") != NULL);
+    CHECK(strstr(text, "DOLRECOMP_NATIVE_BUILD_ID") != NULL);
+    CHECK(strstr(text, "DOLRECOMP_NATIVE_SYMBOL_PREFIX \"gTEST_\"") != NULL);
+    CHECK(strstr(text, "void gTEST_func_80003100") != NULL);
     file = fopen(object, "rb");
     CHECK(file != NULL);
     u8 magic[4];

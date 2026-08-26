@@ -88,4 +88,29 @@ void fp_write_single(CPUState* cpu, u8 d, f32 rounded);
 void fp_write_double(CPUState* cpu, u8 d, f64 value);
 void ps_write_both(CPUState* cpu, u8 d, f32 ps0, f32 ps1);
 
+// The paired-single ops keep two implementations: a fast path that computes
+// both lanes straight through and checks afterwards, and the exact scalar code
+// it falls back to. The second is named here so paired_single_tests can hold
+// the two against each other -- the fast path is only allowed to exist if it
+// is bit-identical, and only a differential test can say that.
+void ppc_fadds_exact(CPUState* cpu, u8 d, u8 a, u8 b);
+void ppc_fsubs_exact(CPUState* cpu, u8 d, u8 a, u8 b);
+void ppc_fmuls_exact(CPUState* cpu, u8 d, u8 a, u8 c);
+void ppc_fadd_exact(CPUState* cpu, u8 d, u8 a, u8 b);
+void ppc_fsub_exact(CPUState* cpu, u8 d, u8 a, u8 b);
+void ppc_fmul_exact(CPUState* cpu, u8 d, u8 a, u8 c);
+void ppc_fmadd_op_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool single,
+                        bool subtract, bool negative);
+void ppc_ps_add_op_exact(CPUState* cpu, u8 d, u8 a, u8 b);
+void ppc_ps_sub_op_exact(CPUState* cpu, u8 d, u8 a, u8 b);
+void ppc_ps_mul_op_exact(CPUState* cpu, u8 d, u8 a, u8 c);
+void ppc_ps_madd_op_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool subtract,
+                          bool negative);
+void ppc_ps_madds0_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b);
+void ppc_ps_madds1_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b);
+void ppc_ps_sum0_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b);
+void ppc_ps_sum1_exact(CPUState* cpu, u8 d, u8 a, u8 c, u8 b);
+void ppc_ps_muls0_exact(CPUState* cpu, u8 d, u8 a, u8 c);
+void ppc_ps_muls1_exact(CPUState* cpu, u8 d, u8 a, u8 c);
+
 #endif /* GXRUNTIME_CPU_INTERPRETER_PRIVATE_H */

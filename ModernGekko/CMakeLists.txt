@@ -164,6 +164,7 @@ add_library(ModernGekko::ABI ALIAS moderngekko_abi)
 target_include_directories(moderngekko_abi
     INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include>"
         "$<INSTALL_INTERFACE:include>"
 )
 
@@ -205,6 +206,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         src/runtime/dolvm/dolvm_bridge.c
         vendor/dolphin/DolRecomp/src/vm/dolvm_module.c
         vendor/dolphin/DolRecomp/src/vm/dolvm_interp.c
+        vendor/dolphin/DolRecomp/src/vm/dolvm_hle_native.c
         vendor/dolphin/GXRuntime/src/core/cpu.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter_table.c
@@ -320,9 +322,15 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
                 "building the interpreter without it")
         endif()
     endif()
+    # Sampling deliberately does *not* turn the opcode counters on. Counting is
+    # two global increments per opcode, which is enough to make every handler's
+    # epilogue identical again -- LLVM's tail merger then folds them into one
+    # shared indirect branch, and the profile that comes back describes a build
+    # nobody ships. Turn MODERNGEKKO_DOLVM_PROFILE on as well when the executed
+    # mix is what is wanted; leave it off when the question is where time goes.
     if(MODERNGEKKO_DOLVM_SAMPLE)
         target_compile_definitions(moderngekko_dolvm PRIVATE
-            DOLVM_BENCH=1 DOLVM_PROFILE=1 DOLVM_SAMPLE=1)
+            DOLVM_BENCH=1 DOLVM_SAMPLE=1)
     endif()
     if(NOT WIN32)
         target_link_libraries(moderngekko_dolvm PRIVATE m)
@@ -817,6 +825,22 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     target_compile_features(moderngekko_frontend_config_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.frontend_config COMMAND moderngekko_frontend_config_test)
+
+    # The paired-single fast path is only allowed to exist if it is
+    # bit-identical to the exact code it falls back to, and only a differential
+    # test can say that. It links the interpreter's float sources directly
+    # rather than the whole runtime: what is under test is one file.
+    add_executable(moderngekko_paired_single_test
+        vendor/dolphin/GXRuntime/tests/paired_single_tests.c
+        vendor/dolphin/GXRuntime/src/core/cpu_interpreter_float.c
+        vendor/dolphin/GXRuntime/src/core/cpu_interpreter_table.c
+        vendor/dolphin/GXRuntime/src/core/cpu_exception.c
+        vendor/dolphin/GXRuntime/src/core/cpu.c)
+    target_include_directories(moderngekko_paired_single_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/src")
+    add_test(NAME moderngekko.paired_single
+             COMMAND moderngekko_paired_single_test)
 
     # Header-only, so the test needs no companion translation unit.
     add_executable(moderngekko_launcher_savestates_test

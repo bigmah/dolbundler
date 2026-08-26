@@ -321,10 +321,27 @@ void StaticRecompCore::VerifyChunk(u32 index)
   {
     m_chunk_state[index] = CHUNK_FAILED;
     ++m_failed_chunks;
-    std::fprintf(stderr,
-                 "[staticrecomp] SMC: chunk [0x%08X,0x%08X) hash mismatch; interpreter until "
-                 "next invalidation (%u failed)\n",
-                 chunk.start, chunk.end, m_failed_chunks);
+    // A failed chunk is a chunk the module stops covering, and on a host with
+    // no fallback JIT that is Dolphin's interpreter for every instruction in
+    // it -- which is worth reporting in guest bytes, because the number is the
+    // difference between "a game is a little slow" and "a game is unplayable".
+    // The range the guest last invalidated here is where it rewrote something.
+    if (!m_chunk_reported[index])
+    {
+      m_chunk_reported[index] = 1;
+      m_smc_lost_bytes += length;
+      const LastInvalidation& patched = m_chunk_last_invalidate[index];
+      std::fprintf(stderr,
+                   "[staticrecomp] SMC: chunk [0x%08X,0x%08X) hash mismatch; %u bytes of guest "
+                   "code left to the interpreter",
+                   chunk.start, chunk.end, length);
+      if (patched.length != 0)
+      {
+        std::fprintf(stderr, "; the guest last rewrote [0x%08X,0x%08X)", patched.address,
+                     patched.address + patched.length);
+      }
+      std::fprintf(stderr, "\n");
+    }
     WARN_LOG_FMT(POWERPC,
                  "StaticRecomp: chunk [0x{:08X},0x{:08X}) failed verification (guest code "
                  "differs from module); interpreter until next invalidation",
@@ -339,6 +356,11 @@ void StaticRecompCore::OnICacheInvalidate(u32 address, u32 length)
   {
     m_fallback_jit->GetBlockCache()->InvalidateICache(address, length, false);
   }
+
+  // The guest invalidating over low RAM is how new vector stubs arrive; the
+  // address may be physical or through the cached mirror.
+  if (length != 0 && (address & 0x3FFFFFFFu) < 0x1800u)
+    ResetVectorStubs();
 
   if (!m_module_active || length == 0)
     return;
@@ -364,6 +386,11 @@ void StaticRecompCore::OnICacheInvalidate(u32 address, u32 length)
     const auto& chunk = m_module->chunk_ranges[i];
     if (chunk.start > last)
       break;
+
+    // Recorded whatever the chunk's state is: the first verification of a
+    // chunk the guest patched during boot happens after the invalidation, so
+    // waiting for a state change would lose exactly the case worth naming.
+    m_chunk_last_invalidate[i] = {address, length};
 
     if (m_chunk_state[i] != CHUNK_UNVERIFIED)
     {

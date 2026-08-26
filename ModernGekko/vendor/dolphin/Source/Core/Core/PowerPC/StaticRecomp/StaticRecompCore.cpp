@@ -108,6 +108,8 @@ bool RelModulesValid(const StaticRecompModuleDesc& desc)
 }
 }  // namespace
 
+void StaticRecompNativeSamplerStopAndReport();
+
 bool StaticRecompCore::IsModuleActive() const
 {
   return m_module_active;
@@ -148,6 +150,18 @@ void StaticRecompCore::Init()
   g_static_recomp_core = this;
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
+  const char* poll_skip = std::getenv("STATICRECOMP_POLL_SKIP");
+  m_poll_skip_enabled = !poll_skip || poll_skip[0] != '0';
+  m_poll_next_site = 0;
+  m_poll_run = 0;
+  m_poll_run_live = false;
+  m_poll_reads = 0;
+  m_poll_yields = 0;
+  for (PollSite& site : m_poll_sites)
+    site = {};
+  const char* vector_hle = std::getenv("DOLVM_VECTOR_HLE");
+  m_vector_stubs_enabled = !vector_hle || std::strcmp(vector_hle, "0") != 0;
+  ResetVectorStubs();
   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");
   std::istringstream fallback_ranges(fallback_override ? fallback_override :
                                                          Config::Get(Config::MAIN_STATICRECOMP_FALLBACK_RANGES));
@@ -188,10 +202,20 @@ void StaticRecompCore::Init()
   // works if every dispatch is one the chassis made.
   PublishGate(m_module != nullptr && !m_lockstep_verifier->IsEnabled());
 
+  // Code the module does not cover goes to a JIT on a desktop and to Dolphin's
+  // plain interpreter on iOS, where there is no JIT to have. That difference is
+  // invisible in every desktop measurement -- the fallback counter only counts
+  // interpreted steps, so a desktop run reports zero fallback while a phone
+  // running the same scene from the same savestate reports 173 million. Setting
+  // MODERNGEKKO_NO_FALLBACK_JIT reproduces the phone's CPU path here, which is
+  // the only way to work on module coverage without a device in hand.
+  const bool no_fallback_jit = getenv("MODERNGEKKO_NO_FALLBACK_JIT") != nullptr;
 #ifdef _M_ARM_64
-  m_fallback_jit = std::make_unique<JitArm64>(m_system);
+  if (!no_fallback_jit)
+    m_fallback_jit = std::make_unique<JitArm64>(m_system);
 #elif defined(_M_X86_64)
-  m_fallback_jit = std::make_unique<Jit64>(m_system);
+  if (!no_fallback_jit)
+    m_fallback_jit = std::make_unique<Jit64>(m_system);
 #endif
   if (m_fallback_jit)
   {
@@ -203,16 +227,21 @@ void StaticRecompCore::Init()
 
 void StaticRecompCore::Shutdown()
 {
+  StaticRecompNativeSamplerStopAndReport();
   PublishGate(false);
   g_static_recomp_core = nullptr;
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
-               "smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu cycles=%llu\n",
+               "vector_hle=%llu smc_failed=%u smc_lost=%lluB verifications=%llu "
+               "reverify_events=%llu bursts=%llu cycles=%llu poll_reads=%llu poll_yields=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
-               (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
-               (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
-               (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
+               (unsigned long long)m_hook_fallback_instructions,
+               (unsigned long long)m_vector_stub_hits, m_failed_chunks,
+               (unsigned long long)m_smc_lost_bytes, (unsigned long long)m_verifications,
+               (unsigned long long)m_reverify_events, (unsigned long long)m_bursts,
+               (unsigned long long)m_charged_cycles, (unsigned long long)m_poll_reads,
+               (unsigned long long)m_poll_yields);
   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
                                                     m_dispatch_samples.end());
   std::sort(dispatch_samples.begin(), dispatch_samples.end(),
@@ -314,6 +343,8 @@ void StaticRecompCore::LoadModule()
   m_effective_chunk_hashes.assign(desc->chunk_hashes,
                                   desc->chunk_hashes + desc->num_chunk_ranges);
   m_chunk_rel_sections.assign(desc->num_chunk_ranges, -1);
+  m_chunk_last_invalidate.assign(desc->num_chunk_ranges, LastInvalidation{});
+  m_chunk_reported.assign(desc->num_chunk_ranges, 0);
   for (u32 chunk_index = 0; chunk_index < desc->num_chunk_ranges; ++chunk_index)
   {
     const StaticRecompRange& chunk = desc->chunk_ranges[chunk_index];
@@ -343,6 +374,17 @@ void StaticRecompCore::LoadModule()
       ChunkContainsHostCall(i);
   }
 
+  if (desc->native_metadata)
+  {
+    const StaticRecompNativeMetadata& metadata = *desc->native_metadata;
+    std::fprintf(stderr,
+                 "[staticrecomp] module identity: backend=%s target=%s toolchain=%s "
+                 "build=%s layout=%016llx codegen=%s\n",
+                 metadata.backend_name, metadata.target_triple, metadata.toolchain_version,
+                 metadata.build_id,
+                 static_cast<unsigned long long>(metadata.cpu_state_layout_hash),
+                 metadata.codegen_fingerprint);
+  }
   std::fprintf(stderr, "[staticrecomp] module loaded: %s entry=0x%08X\n", path.c_str(),
                desc->entry_point);
   NOTICE_LOG_FMT(POWERPC,
@@ -356,6 +398,9 @@ void StaticRecompCore::ClearCache()
 {
   if (m_fallback_jit)
     m_fallback_jit->ClearCache();
+
+  // Savestate loads land here, and a loaded state can hold different vectors.
+  ResetVectorStubs();
 
   if (!m_module)
     return;

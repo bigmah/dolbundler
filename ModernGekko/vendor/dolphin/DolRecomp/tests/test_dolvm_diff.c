@@ -309,6 +309,20 @@ static void compare_run(const DolVMModule* module, CPUState* cpu, u8* window,
 }
 
 int main(int argc, char** argv) {
+    // DOLVM_POISON_REGS=1 fills the bytecode register file with an even
+    // pattern at every dispatch, so any read of a register the stream never
+    // wrote is deterministic and wrong instead of quietly plausible.
+    {
+        extern int g_dolvm_poison_registers;
+        extern int g_dolvm_poison_byte;
+        const char* poison = getenv("DOLVM_POISON_REGS");
+        if (poison && *poison && *poison != '0')
+            g_dolvm_poison_registers = 1;
+        const char* byte = getenv("DOLVM_POISON_BYTE");
+        if (byte && *byte)
+            g_dolvm_poison_byte = (int)strtoul(byte, NULL, 0) & 0xFF;
+    }
+
     // The corpus runs twice in CI: once against the homed registers, which is
     // how a shipped module is lowered, and once with them off, because the
     // plain state path is still what every non-homed slot uses and a change

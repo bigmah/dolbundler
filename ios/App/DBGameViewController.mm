@@ -11,6 +11,26 @@
 
 #include "dolbundler_run.h"
 
+namespace
+{
+// A GameCube's displayed image is at most 480 pixels tall. Keep the wide
+// iPhone surface's aspect ratio, but do not spend GPU time upscaling that image
+// to the screen's native pixel density before Core Animation displays it.
+constexpr CGFloat kGameCubeOutputShortSide = 480.0;
+
+CGFloat GameDrawableScale(CGSize bounds)
+{
+  const CGFloat nativeScale = UIScreen.mainScreen.nativeScale;
+  if (UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPhone)
+    return nativeScale;
+
+  const CGFloat shortSide = MIN(bounds.width, bounds.height);
+  if (shortSide <= 0)
+    return nativeScale;
+  return MIN(nativeScale, kGameCubeOutputShortSide / shortSide);
+}
+}  // namespace
+
 @implementation DBMetalView
 + (Class)layerClass
 {
@@ -166,7 +186,7 @@
                                 CGRectGetMidY(self.view.bounds) + 28);
 
   CAMetalLayer* layer = (CAMetalLayer*)_metalView.layer;
-  layer.contentsScale = UIScreen.mainScreen.nativeScale;
+  layer.contentsScale = GameDrawableScale(_metalView.bounds.size);
   layer.drawableSize = CGSizeMake(CGRectGetWidth(_metalView.bounds) * layer.contentsScale,
                                   CGRectGetHeight(_metalView.bounds) * layer.contentsScale);
 }

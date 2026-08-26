@@ -28,6 +28,58 @@ Device Management**.
 Requirements: Xcode 15+, an iOS 17+ device with an A-series chip. Built and
 tested against an iPhone 15 Pro Max.
 
+### Developer-only LLVM AOT build
+
+The normal app remains the DolVM build described below. For a private,
+pre-signed native experiment, build the host recompiler with the pinned LLVM
+20 wrapper, emit iPhoneOS objects on the Mac, and embed them before Xcode signs
+the app:
+
+```sh
+./ios/build-dolrecomp-llvm20.sh
+
+export DOLRECOMP_LLVM_TARGET=arm64-apple-ios17.0
+export DOLRECOMP_LLVM_CPU=apple-a16
+export DOLRECOMP_LLVM_CACHE=/tmp/dolbundler-gexe52-llvm-cache
+
+build-dolrecomp-llvm20/dolrecomp \
+  --gamecube --backend llvm --game-id GEXE52 \
+  /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios
+cp /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios/generated/main.dol
+
+export DOLBUNDLER_NATIVE_GAME_ID=GEXE52
+export DOLBUNDLER_NATIVE_GENERATED_DIR=/tmp/gexe52-llvm-ios/generated
+export DOLBUNDLER_TEAM=<your Apple Developer team ID>
+./ios/build.sh --install
+```
+
+Several AOT titles can coexist in one signed app. Give each generated module a
+unique C-identifier prefix while recompiling, then pass all `GAME_ID=directory`
+pairs to the iOS build:
+
+```sh
+export DOLRECOMP_LLVM_SYMBOL_PREFIX=gG4QE01_
+build-dolrecomp-llvm20/dolrecomp \
+  --gamecube --backend llvm --game-id G4QE01 \
+  /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios
+cp /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios/generated/main.dol
+
+export DOLBUNDLER_NATIVE_MODULES='GEXE52=/tmp/gexe52-llvm-ios/generated;G4QE01=/tmp/g4qe01-llvm-ios/generated'
+./ios/build.sh --install
+```
+
+The app selects the embedded descriptor whose disc ID matches the library
+entry. The older `DOLBUNDLER_NATIVE_GAME_ID` and
+`DOLBUNDLER_NATIVE_GENERATED_DIR` variables remain available for a one-title
+build.
+
+The wrapper rejects an unversioned or non-20 LLVM and keeps the host tool out
+of `build-ios`. The module configure step validates its target, minimum OS,
+CPUState layout, and complete undefined-symbol inventory; the final app link
+uses `-undefined error` and writes a native link map. Generated game code stays
+outside the repository. No compiler is linked into the phone app, and no
+object is added or changed after signing.
+
 ## Getting a disc onto the device
 
 Either tap **+** in the app and pick an `.iso`, or drop one into the DolBundler
@@ -115,6 +167,23 @@ SDL3 builds for iOS and handles MFi and Bluetooth pads. The on-screen pad feeds
 carries no Android dependencies. The overlay hides itself whenever a real
 controller is connected.
 
+**Dolphin's `Sys` folder rides inside the app.** The desktop build copies
+`Data/Sys` next to `moderngekko-run`; `ios/CMakeLists.txt` copies the same tree
+to `DolBundler.app/Sys`. Flat, not `Contents/Resources/Sys`: an iOS bundle has
+no `Contents`, and ModernGekko forces `LINUX_LOCAL_DEV`, which is what makes
+Dolphin's `SYSDATA_DIR` a plain `Sys` — so `GetSysDirectory()` comes out as
+`GetBundleDirectory() + "/Sys/"`, which is exactly where an iOS resource
+belongs.
+
+It is load-bearing, and the way it fails is worth knowing. `Sys/GC/
+font_western.bin` is the GameCube's ROM font: a game asks the IPL for it and
+draws its system text with it, so with the file absent `CEXIIPL` hands back a
+page of zeroes and the game draws every glyph as nothing. Star Fox Assault's
+menus are drawn that way, which is how the missing folder was found — the
+memory card prompt came up as an empty box with a highlighted button and no
+words anywhere. Dolphin says so, but only through a `PanicAlert`, which on a
+phone goes nowhere anyone will look.
+
 ## Audio
 
 `AudioCommon/IOSSoundStream.mm` outputs through a RemoteIO audio unit at 48 kHz
@@ -168,6 +237,12 @@ xcodebuild -project build-sim/DolBundlerIOS.xcodeproj -target DolBundler \
   -configuration Release -sdk iphonesimulator -arch arm64 CODE_SIGNING_ALLOWED=NO build
 ```
 
+A simulator build is silent: it would otherwise play through the Mac's
+speakers, and the loop here is launch-run-relaunch. `DOLBUNDLER_SIM_AUDIO=1`
+turns the sound back on when audio is the thing being worked on. Device builds
+are unaffected -- the switch is `TARGET_OS_SIMULATOR`, a compile-time property
+of a separate binary.
+
 There is no way to script a tap, so `DOLBUNDLER_AUTOPLAY=<disc id>` starts a
 game directly. It works on both:
 
@@ -187,13 +262,22 @@ straight away whether the interpreter or the module is at fault.
 
 **Speed is the real constraint, not the port.** Measured on an M4 Pro (cpu
 time over each title's first six billion guest cycles), DolVM runs Mario Party
-4 at 2.94× realtime, the SpongeBob movie game at 1.81×, and Melee at 1.39×.
-An A17 Pro core has roughly three quarters of that single-thread throughput
-and throttles under sustained load, so expect Melee-class titles to sit near
-full speed on a 15 Pro and lighter ones comfortably above it. Nothing about the
-iOS port changes that; it is a property of the interpreter, and
-`ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says where the time
-goes and what each change bought.
+4 at 3.80× realtime, the SpongeBob movie game at 12.36×, Disney's Extreme Skate
+Adventure at 1.43× and Melee at 1.41×. An A17 Pro core has roughly three
+quarters of that single-thread throughput and throttles under sustained load.
+
+Those are boot windows, and how much of a boot is spent waiting on hardware
+varies enormously by title -- which is also where most of the 2026-08-22 gain
+came from. Over a fixed *gameplay* window Disney skate went from 1.055× to
+2.92×, because the game's idle thread polls the command processor's status
+register for 45% of every frame and the interpreter now recognises that as a
+wait. `ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says how, where
+the rest of the time goes, and what each change bought.
+
+[`PERFORMANCE.md`](PERFORMANCE.md) is the device-side companion to that: how to
+measure emulation speed on a phone without a console attached, and what a
+week's worth of measuring found -- including which plausible-sounding fixes
+(dual core, the DSP, graphics settings) are already done or worth nothing.
 
 Three things in the build matter for it and are easy to lose: the interpreter
 is compiled with one indirect branch per handler (`-mllvm -tail-dup-*-size`),

@@ -29,12 +29,14 @@ class FunctionEmitter final {
 public:
   FunctionEmitter(llvm::LLVMContext &context, llvm::Module &module,
                   const DolIRFunction &source,
-                  const DolLLVMFunctionRange *ranges, u32 range_count);
+                  const DolLLVMFunctionRange *ranges, u32 range_count,
+                  bool gamecube, llvm::StringRef symbol_prefix = {});
 
   bool emit(llvm::raw_ostream &diagnostics);
 
 private:
   std::string blockName(u32 index) const;
+  std::string symbolName(llvm::StringRef name) const;
   llvm::Type *type(DolIRType type);
   std::size_t stateOffset(DolIRStateSlot slot) const;
   llvm::Value *bytePtr(std::size_t offset);
@@ -116,6 +118,20 @@ private:
   llvm::Value *guard_cycles_ = nullptr;
   // Termination backstop for zero-cycle loops.
   llvm::Value *guard_steps_ = nullptr;
+  // Stable for the duration of one generated-body invocation. Snapshotting
+  // these at entry prevents opaque runtime hooks from forcing a CPUState
+  // reload before every guest RAM access.
+  llvm::Value *ram_ = nullptr;
+  llvm::Value *ram_size_ = nullptr;
+  llvm::Value *exram_ = nullptr;
+  llvm::Value *exram_size_ = nullptr;
+  llvm::Value *journal_ = nullptr;
+  llvm::Value *journal_user_ = nullptr;
+  llvm::Value *gate_chunk_open_ = nullptr;
+  llvm::Value *gate_budget_ = nullptr;
+  llvm::Value *gate_pending_ = nullptr;
+  llvm::Value *gate_pending_sync_ = nullptr;
+  llvm::Value *gate_pending_async_ = nullptr;
   std::array<llvm::AllocaInst *, DOLIR_STATE_COUNT> state_{};
   std::array<bool, DOLIR_STATE_COUNT> used_{};
   std::array<bool, DOLIR_STATE_COUNT> dirty_{};
@@ -125,6 +141,8 @@ private:
   std::vector<u32> continuations_;
   const DolLLVMFunctionRange *ranges_ = nullptr;
   u32 range_count_ = 0;
+  bool gamecube_ = false;
+  std::string symbol_prefix_;
   u32 current_pc_ = 0;
 };
 

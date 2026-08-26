@@ -20,13 +20,17 @@ typedef enum ModernGekkoModuleStatus
     MODERNGEKKO_MODULE_INVALID_SMC_RANGES,
     MODERNGEKKO_MODULE_INVALID_CHUNKS,
     MODERNGEKKO_MODULE_ENTRY_POINT_UNCOVERED,
-    MODERNGEKKO_MODULE_INVALID_REL_MODULES
+    MODERNGEKKO_MODULE_INVALID_REL_MODULES,
+    MODERNGEKKO_MODULE_MISSING_NATIVE_METADATA,
+    MODERNGEKKO_MODULE_INVALID_NATIVE_METADATA,
+    MODERNGEKKO_MODULE_CPU_STATE_LAYOUT_MISMATCH
 } ModernGekkoModuleStatus;
 
 typedef struct ModernGekkoModuleRequirements
 {
     uint32_t cpu_abi_version;
     uint32_t cpu_state_size;
+    uint64_t cpu_state_layout_hash;
     const char* game_id;
 } ModernGekkoModuleRequirements;
 

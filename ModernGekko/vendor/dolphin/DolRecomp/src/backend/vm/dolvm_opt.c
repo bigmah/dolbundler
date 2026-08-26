@@ -1351,9 +1351,13 @@ bool dolvm_optimize_function(DolIRFunction* function, DolVMLayout* layout,
     opt.def_index = (u32*)calloc(values, sizeof(*opt.def_index));
     opt.last_use = (u32*)calloc(values, sizeof(*opt.last_use));
     stamp_operand_widths(function);
-    fuse_cr_fields(function, stats);
-    if (!merge_blocks(&opt)) {
-        goto fail;
+    // Per-pass off switches, so a miscompile can be attributed to a pass by
+    // rebuilding the module rather than by reading the pass.
+    if (!getenv("DOLVM_NO_CR_FUSION"))
+        fuse_cr_fields(function, stats);
+    if (!getenv("DOLVM_NO_MERGE_BLOCKS")) {
+        if (!merge_blocks(&opt))
+            goto fail;
     }
     for (u32 b = 0; b < function->block_count; b++)
         if (function->blocks[b].instruction_count > largest)

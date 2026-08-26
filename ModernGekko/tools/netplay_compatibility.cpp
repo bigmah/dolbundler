@@ -5,6 +5,7 @@
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
+#include "core/native_state_layout.h"
 
 #include <array>
 #include <cstdint>
@@ -106,6 +107,13 @@ std::string DescriptorFingerprint(const ModernGekkoModuleDesc &descriptor) {
       HashU32(*context, section.size);
     }
   }
+  const ModernGekkoNativeMetadata &metadata = *descriptor.native_metadata;
+  HashString(*context, metadata.backend_name);
+  HashString(*context, metadata.target_triple);
+  HashString(*context, metadata.toolchain_version);
+  HashString(*context, metadata.codegen_fingerprint);
+  HashString(*context, metadata.build_id);
+  HashU64(*context, metadata.cpu_state_layout_hash);
   return Common::SHA1::DigestToString(context->Finish());
 }
 
@@ -123,7 +131,8 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
   if (config.module.kind != ModuleSource::Kind::None) {
     const ModernGekkoModuleRequirements requirements = {
         MODERNGEKKO_CPU_ABI_VERSION,
-        static_cast<std::uint32_t>(sizeof(CPUState)), game.disc_id.c_str()};
+        static_cast<std::uint32_t>(sizeof(CPUState)),
+        dolnative_state_layout_hash(), game.disc_id.c_str()};
     auto library = std::make_unique<ModuleLibrary>();
     ModuleLoadResult loaded;
     if (config.module.kind == ModuleSource::Kind::DynamicPath) {
@@ -141,7 +150,7 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
       module = "rejected";
     }
   }
-  return "moderngekko-netplay-8|" + Common::GetScmRevGitStr() + "|" +
+  return "moderngekko-netplay-9|" + Common::GetScmRevGitStr() + "|" +
          game.disc_id + "|" + game.dol_sha256 + "|" + game.rel_sha256 + "|" +
          game.assets_sha256 + "|" +
          std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|" +

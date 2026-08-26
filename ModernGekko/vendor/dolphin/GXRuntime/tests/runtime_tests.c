@@ -2269,6 +2269,16 @@ static void test_native_system_helpers(void) {
     assert((cpu.fpscr & 0x0001F000u) == 0x00014000u);
     assert(((cpu.cr >> 20) & 0xFu) == 0x4u);
 
+    f64 fused;
+    cpu.fpscr = 0x00040000u;
+    assert(ppc_fma(&cpu, 1.0, 1.0, 0x1p-25, true, false, false, &fused));
+    assert(fused == 1.0);
+    assert((cpu.fpscr & 0x00020000u) != 0);
+    assert((cpu.fpscr & 0x00040000u) == 0);
+    cpu.fpscr |= 0x00060000u;
+    assert(ppc_fma(&cpu, 1.0, 1.0, 0.0, true, false, false, &fused));
+    assert((cpu.fpscr & 0x00060000u) == 0);
+
     cpu.lr = 0x12345678u;
     assert(ppc_mfspr(&cpu, 8, 0x80001000u) == cpu.lr);
     g_spr_reads = 0;

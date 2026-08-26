@@ -12,6 +12,7 @@
 #include "Core/HW/SystemTimers.h"
 #include "Common/Logging/Log.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace
@@ -24,6 +25,78 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
   return core->m_module_source.host_call &&
          core->m_module_source.host_call(cpu, address, core->m_module_source.host_call_user);
+}
+
+void StaticRecompCore::ResetExternalPollRun()
+{
+  m_poll_run = 0;
+  m_poll_run_live = false;
+}
+
+void StaticRecompCore::TrackExternalRead(u32 pc, u32 address, u64 value)
+{
+  if (!m_poll_skip_enabled || m_lockstep_verifier->IsEnabled())
+    return;
+
+  ++m_poll_reads;
+  if (m_poll_run_live && m_poll_pc == pc && m_poll_address == address && m_poll_value == value)
+  {
+    if (m_poll_run < POLL_SPIN_READS)
+      ++m_poll_run;
+  }
+  else
+  {
+    bool known = false;
+    for (const PollSite& site : m_poll_sites)
+    {
+      if (site.live && site.pc == pc && site.address == address && site.value == value)
+      {
+        known = true;
+        break;
+      }
+    }
+    m_poll_pc = pc;
+    m_poll_address = address;
+    m_poll_value = value;
+    m_poll_run = known ? POLL_SPIN_READS : 1;
+    m_poll_run_live = true;
+  }
+
+  if (m_poll_run < POLL_SPIN_READS)
+    return;
+
+  bool remembered = false;
+  for (PollSite& site : m_poll_sites)
+  {
+    if (site.live && site.pc == pc && site.address == address)
+    {
+      site.value = value;
+      remembered = true;
+      break;
+    }
+  }
+  if (!remembered)
+  {
+    PollSite& site = m_poll_sites[m_poll_next_site++ % POLL_SITE_COUNT];
+    site = {pc, address, value, true};
+  }
+
+  // FlushGuestCharge() ran before the hardware read, so Dolphin's downcount is
+  // the live remainder of this timing slice and m_guest.downcount is an empty
+  // charge accumulator. Charge that whole remainder into the guest accumulator;
+  // the next generated loop guard observes it, side-exits at the loop head, and
+  // FlushGuestCharge() advances both CoreTiming and the guest timebase by exactly
+  // the skipped interval. Merely zeroing Dolphin's downcount would yield without
+  // advancing the guest timebase and make the game run ahead of its own clock.
+  auto& ppc = m_system.GetPPCState();
+  if (ppc.downcount > 0)
+    m_guest.downcount = std::min(m_guest.downcount, -static_cast<s64>(ppc.downcount));
+  ++m_poll_yields;
+
+  // A remembered site should fire on the first read of the next native burst.
+  // Clear the current run so that read takes the remembered-site path instead
+  // of rebuilding the threshold from one.
+  ResetExternalPollRun();
 }
 
 u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
@@ -60,12 +133,14 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
   {
     core->m_lockstep_verifier->m_journal.native_reads.push_back({ea, static_cast<u32>(value), size});
   }
+  core->TrackExternalRead(cpu->pc, ea, value);
   return value;
 }
 
 void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->ResetExternalPollRun();
   core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   if (ea == 0)
@@ -153,6 +228,7 @@ void StaticRecompCore::HookExternalWrite32(CPUState* cpu, u32 ea, u32 value, u8 
 {
   // ecowx external-control write; see HookExternalRead32.
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->ResetExternalPollRun();
   core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
   core->PropagateGuestMSR();

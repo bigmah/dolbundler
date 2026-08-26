@@ -20,6 +20,11 @@ typedef struct {
     const char* ir_path;
     const DolLLVMFunctionRange* function_ranges;
     u32 function_range_count;
+    int gamecube;
+    // Optional C identifier prefix for every module-private generated symbol.
+    // This lets multiple games whose guest address ranges overlap coexist in
+    // one statically linked iOS executable.
+    const char* symbol_prefix;
 } DolLLVMOptions;
 
 bool dolllvm_emit_object(const DolIRModule* module, const char* object_path,
@@ -28,8 +33,14 @@ bool dolllvm_emit_object(const DolIRModule* module, const char* object_path,
 // Resolve an optional target to the triple used for emission.
 bool dolllvm_effective_triple(const char* requested, char* out, size_t size);
 
-// Validate an object's magic against the effective target triple.
+// Validate an object's complete identity against the effective target triple.
+// Mach-O validation includes architecture, MH_OBJECT, platform, and min OS.
 bool dolllvm_object_matches_triple(const char* path, const char* requested);
+
+// Immutable toolchain/target metadata used by generated module descriptors.
+const char* dolllvm_version(void);
+bool dolllvm_target_cpu(const char* requested, char* out, size_t size);
+bool dolllvm_target_features(const char* requested, char* out, size_t size);
 
 // Profile-guided optimization for the LLVM backend.
 //
@@ -74,13 +85,13 @@ int dolllvm_pgo_mode(void);
 // half never had one at all.
 //
 // The gate is a POSITIVE check rather than a warning scrape: after
-// PGOInstrumentationUse has run -- observed through a pass-instrumentation
-// callback, so nothing about the pipeline moves -- every defined function that
-// matched its profile record carries entry-count metadata, and every function
-// that did not carries none. On a profile collected from this same module that
-// second set is empty, because IR instrumentation records EVERY function at
-// gen time, whether or not the scene ever executed it. So a non-zero count
-// means the profile and the DOL have diverged, not that the scene was narrow.
+// PGOInstrumentationUse and the normal optimizer have run, every final defined
+// function that matched its profile record carries entry-count metadata, and
+// every function that did not carries none. On a profile collected from this
+// same module that second set is empty, because IR instrumentation records
+// EVERY function at gen time, whether or not the scene ever executed it. So a
+// non-zero count means the profile and the DOL have diverged, not that the scene
+// was narrow.
 //
 //   DOLRECOMP_LLVM_PGO_STALE=error   fail the emit (the default)
 //   DOLRECOMP_LLVM_PGO_STALE=warn    report and keep building
@@ -97,7 +108,7 @@ int dolllvm_pgo_stale_policy(void);
 // LLVM version, target CPU and feature string, relocation and code model, and
 // the pass pipeline. Hash this alongside the instruction words, or a codegen
 // change silently reuses objects built with the old settings.
-bool dolllvm_codegen_fingerprint(char* out, size_t size);
+bool dolllvm_codegen_fingerprint(const char* requested, char* out, size_t size);
 
 #ifdef __cplusplus
 }

@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
+
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 #include "Core/System.h"
 #include "Common/Logging/Log.h"
+
+// The bytecode interpreter is linked in, so its journal hook is a plain symbol.
+extern "C" void ppc_set_mem_write_journal(void (*fn)(u32, u32, void*), void* user);
 
 #include <cstdlib>
 #include <cstdio>
@@ -56,6 +60,12 @@ void StaticRecompLockstepVerifier::Init()
     return;
   }
   m_set_mem_journal = reinterpret_cast<SetMemJournalFn>(m_core.m_library.GetSymbolAddress("ppc_set_mem_write_journal"));
+  // A bytecode module is not a shared library -- its instructions are executed
+  // by an interpreter linked into this binary, so the journal hook it would
+  // export lives in this process already. Without this, lockstep is available
+  // only on the backend that needs it least.
+  if (!m_set_mem_journal)
+    m_set_mem_journal = &ppc_set_mem_write_journal;
   if (!m_set_mem_journal)
   {
     std::fprintf(stderr, "[lockstep] module lacks ppc_set_mem_write_journal export; "
@@ -120,6 +130,11 @@ bool StaticRecompLockstepVerifier::LockstepWindowOpen() const
 void StaticRecompLockstepVerifier::Prepare(const CPUState& guest)
 {
   m_ls_entry = guest.pc;
+  // Hooks such as dcbz flush the charge accumulated so far into the chassis
+  // before returning to the same native dispatch. Remember the lifetime
+  // counter here so the shadow run can include those mid-dispatch flushes as
+  // well as the charge still resident in guest.downcount at Verify().
+  m_ls_charged_cycles_start = m_core.m_charged_cycles;
   m_ls_snapshot = guest;
   m_journal.Clear();
   m_ls_fallback_seen = false;

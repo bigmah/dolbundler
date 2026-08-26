@@ -57,6 +57,26 @@ typedef struct {
     u32 code_count;
     u32 code_capacity;
 
+    // Entry stubs, kept apart from the bodies until the whole module is laid
+    // out. A stub rebuilds the values a mid-block entry needs and jumps in; it
+    // runs only when the chassis dispatches into the middle of a block, which
+    // is a few hundred thousand times against six billion executed opcodes.
+    // Emitting one after each block put that cold code *inside* the hot
+    // instruction stream, interrupting it every few cache lines -- 8-9% of the
+    // module, and the machine this has to run well on has about a fifth of the
+    // memory bandwidth of the one it is developed on. Bodies first, stubs
+    // after, and the entry map is fixed up once the split point is known.
+    DolVMInst* stub_code;
+    u32 stub_count;
+    u32 stub_capacity;
+    bool stub_mode;
+    u32* stub_fixups;       // entry-map indices whose offset is a stub offset
+    u32 stub_fixup_count;
+    u32 stub_fixup_capacity;
+    u32* code_fixups;       // code indices patched with a stub offset
+    u32 code_fixup_count;
+    u32 code_fixup_capacity;
+
     u64* constants;
     u32 constant_count;
     u32 constant_capacity;
@@ -77,6 +97,10 @@ typedef struct {
     // Lower against the homed registers: guest registers, LR and CTR live in
     // the register file for the length of a dispatch.
     bool homed;
+    // Proved SDK routines, sorted by pc; emit_block opens a block that starts
+    // at one with DOLVM_OP_HLE.
+    const DolVMHleSite* hle_sites;
+    u32 hle_count;
     FILE* diagnostics;
     bool failed;
 } Builder;
@@ -107,6 +131,9 @@ typedef struct {
     u8* home_write;         // state write: 1 = the producer wrote it, 2 = copy
     u8* home_dest;          // instruction index: home to compute straight into
     u8* supervisor;         // instruction index: the privilege test folded in
+    u8* shift_fused;        // AND index: the fused opcode the shift before it
+                            // collapsed into, or 0
+    u8* shift_amount;       // AND index: that shift's constant amount
     u32* mem_write;         // for a fused load, the state write folded into it
     // Slot offsets decided during analysis. Like the CR forms, they cannot be
     // recomputed at lowering: choosing to fuse is what drops the use counts the
@@ -192,7 +219,24 @@ typedef enum {
         }                                                                     \
     } while (0)
 
+// Marks an offset as relative to the stub buffer rather than to the bodies.
+// Emit-time only: every one is resolved and cleared before the module is
+// written, and a module never contains it. Bit 30 is free -- the offset field
+// is 31 bits and the largest module here is a couple of million instructions.
+#define DOLVM_STUB_MARK 0x40000000u
+
 static bool emit_raw(Builder* builder, u8 op, u8 a, u8 b, u8 c, u32 imm) {
+    if (builder->stub_mode) {
+        GROW(builder->stub_code, builder->stub_count, builder->stub_capacity,
+             DolVMInst);
+        DolVMInst* stub = &builder->stub_code[builder->stub_count++];
+        stub->op = op;
+        stub->a = a;
+        stub->b = b;
+        stub->c = c;
+        stub->imm = imm;
+        return true;
+    }
     GROW(builder->code, builder->code_count, builder->code_capacity, DolVMInst);
     DolVMInst* inst = &builder->code[builder->code_count++];
     inst->op = op;
@@ -204,6 +248,13 @@ static bool emit_raw(Builder* builder, u8 op, u8 a, u8 b, u8 c, u32 imm) {
 }
 
 static bool emit_payload(Builder* builder, u64 payload) {
+    if (builder->stub_mode) {
+        GROW(builder->stub_code, builder->stub_count, builder->stub_capacity,
+             DolVMInst);
+        memcpy(&builder->stub_code[builder->stub_count++], &payload,
+               sizeof(payload));
+        return true;
+    }
     GROW(builder->code, builder->code_count, builder->code_capacity, DolVMInst);
     memcpy(&builder->code[builder->code_count++], &payload, sizeof(payload));
     return true;
@@ -372,6 +423,140 @@ static bool assign_result(FunctionEmitter* fn, DolIRValue value,
     return true;
 }
 
+// Copy coalescing for the paired-single lane operations.
+//
+// A v2f64 lives in two registers, and building, extracting or shuffling one
+// used to mean allocating a fresh pair and moving the lanes into it. On a title
+// that lives in paired singles those moves are the single hottest thing the
+// interpreter does -- 7.5% of Star Fox Assault's run time, 6% of every opcode
+// Melee executes -- and they move nothing: the value is already in a register.
+//
+// So when every lane the result wants is in a register that dies right here,
+// the result simply *is* those registers. Four conditions make that safe, and
+// all four are checked rather than assumed:
+//
+//   - each source lane's last use is this instruction, so nothing reads it
+//     afterwards under its own name;
+//   - the two lanes are in *different* registers, or the result's halves would
+//     alias and writing one would change the other;
+//   - neither is a home, which outlives any value sitting in it and belongs to
+//     a guest register rather than to this block;
+//   - the result is not itself being computed straight into a home.
+//
+// A source register the result does not take is released as usual. The
+// operands are marked retired so the normal retirement pass leaves the
+// registers alone -- they have an owner now.
+// Emitter-side off switches, for bisecting a miscompile. A wrong picture from a
+// module can only be attributed by rebuilding the module with one transform
+// removed, and rebuilding the recompiler for each attempt is far slower than
+// rebuilding the bytecode, so the switches live here rather than in git history.
+static int dolvm_opt_off(const char* name) {
+    // Read once per name: this is asked per instruction, and getenv is a linear
+    // scan of the environment.
+    static const char* names[8];
+    static int values[8];
+    static u32 count = 0;
+    for (u32 i = 0; i < count; i++)
+        if (names[i] == name)
+            return values[i];
+    const char* v = getenv(name);
+    const int on = v && *v && *v != '0';
+    if (count < 8u) {
+        names[count] = name;
+        values[count] = on;
+        count++;
+    }
+    return on;
+}
+
+static bool try_coalesce_lanes(FunctionEmitter* fn, const DolIRInstruction* inst,
+                               u32 index) {
+    if (dolvm_opt_off("DOLVM_NO_LANE_COALESCE"))
+        return false;
+    if (!inst->result || fn->home_dest[index] != DOLVM_NO_REG ||
+        fn->home_read[index] == 1u)
+        return false;
+
+    const u32 dies = index + 1u;
+    // Every source has to be an ordinary block-local register that dies here.
+    for (u32 o = 0; o < inst->operand_count; o++) {
+        DolIRValue v = inst->operands[o];
+        if (!v || fn->retired[v] || fn->last_use[v] != dies ||
+            fn->reg[v] >= DOLVM_USABLE_REGISTERS)
+            return false;
+        if (fn->reg_hi[v] != DOLVM_NO_REG &&
+            fn->reg_hi[v] >= DOLVM_USABLE_REGISTERS)
+            return false;
+    }
+
+    u8 low, high = DOLVM_NO_REG, spare = DOLVM_NO_REG;
+    switch (inst->op) {
+    case DOLIR_OP_VECTOR_BUILD:
+        if (inst->operand_count != 2 || inst->operands[0] == inst->operands[1])
+            return false;
+        low = fn->reg[inst->operands[0]];
+        high = fn->reg[inst->operands[1]];
+        break;
+    case DOLIR_OP_VECTOR_EXTRACT: {
+        if (inst->operand_count != 1)
+            return false;
+        DolIRValue src = inst->operands[0];
+        low = inst->aux ? fn->reg_hi[src] : fn->reg[src];
+        spare = inst->aux ? fn->reg[src] : fn->reg_hi[src];
+        if (low == DOLVM_NO_REG)
+            return false;
+        break;
+    }
+    case DOLIR_OP_VECTOR_SHUFFLE: {
+        u32 lanes[2] = {inst->aux & 0xFFu, (inst->aux >> 8) & 0xFFu};
+        u8 pick[2];
+        for (u32 lane = 0; lane < 2; lane++) {
+            DolIRValue source =
+                lanes[lane] < 2 ? inst->operands[0] : inst->operands[1];
+            if (!source)
+                return false;
+            pick[lane] = (lanes[lane] & 1u) ? fn->reg_hi[source]
+                                            : fn->reg[source];
+            if (pick[lane] == DOLVM_NO_REG)
+                return false;
+        }
+        if (pick[0] == pick[1])
+            return false;
+        low = pick[0];
+        high = pick[1];
+        break;
+    }
+    default:
+        return false;
+    }
+    if (low == DOLVM_NO_REG || (vector_type(inst->type) && high == DOLVM_NO_REG))
+        return false;
+
+    fn->reg[inst->result] = low;
+    fn->reg_hi[inst->result] = vector_type(inst->type) ? high : DOLVM_NO_REG;
+    for (u32 o = 0; o < inst->operand_count; o++)
+        if (inst->operands[o])
+            fn->retired[inst->operands[o]] = 1;
+    // A half of a pair the result did not take has no owner left.
+    if (spare != DOLVM_NO_REG && spare != low)
+        release_register(fn, spare);
+    // A shuffle that reads two pairs and keeps one lane from each leaves the
+    // other two lanes ownerless.
+    if (inst->op == DOLIR_OP_VECTOR_SHUFFLE) {
+        for (u32 o = 0; o < inst->operand_count; o++) {
+            DolIRValue v = inst->operands[o];
+            if (!v)
+                continue;
+            if (fn->reg[v] != low && fn->reg[v] != high)
+                release_register(fn, fn->reg[v]);
+            if (fn->reg_hi[v] != DOLVM_NO_REG && fn->reg_hi[v] != low &&
+                fn->reg_hi[v] != high)
+                release_register(fn, fn->reg_hi[v]);
+        }
+    }
+    return true;
+}
+
 static DolIRValue effective_operand(FunctionEmitter* fn,
                                     const DolIRBlock* block,
                                     const DolIRInstruction* inst, u32 slot);
@@ -427,6 +612,13 @@ static DolIRValue effective_operand(FunctionEmitter* fn,
         return 0;
     if (fn->mem_fused[index] == 2u && slot == 1u)
         return 0;
+    // A shift folded into the mask that consumed it: the mask reads what the
+    // shift read, not what it wrote.
+    if (fn->shift_fused[index] && slot == 0u) {
+        u32 def = fn->def_index[value];
+        if (def < block->instruction_count && fn->folded[def])
+            return block->instructions[def].operands[0];
+    }
     if (slot != 0)
         return value;
     if (inst->op != DOLIR_OP_GUEST_LOAD && inst->op != DOLIR_OP_GUEST_STORE)
@@ -940,6 +1132,8 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
         fn->cr_form[i] = CR_FIELD_REGS;
         fn->mem_fused[i] = 0;
         fn->supervisor[i] = 0;
+        fn->shift_fused[i] = 0;
+        fn->shift_amount[i] = 0;
     }
 
     // A first, literal count decides which address adds can fold.
@@ -1100,6 +1294,49 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
         }
     }
 
+    // A shift or rotate by a constant whose only reader is the mask that
+    // follows it. That pair is `rlwinm`, and `rlwinm` is how PowerPC extracts
+    // every bitfield there is: on this title the two opcodes were 9% of
+    // everything executed, with the second waiting on the first through the
+    // register file. Run last, so an AND some earlier fold has already claimed
+    // -- the condition-register branch's bit mask, the privilege test's, the
+    // indirect branch's alignment mask -- is left alone.
+    for (u32 i = 0; i < count; i++) {
+        if (fn->folded[i] || fn->cr_form[i] != CR_FIELD_REGS)
+            continue;
+        const DolIRInstruction* inst = &block->instructions[i];
+        if (inst->op != DOLIR_OP_AND || inst->operand_count != 2 ||
+            !inst->result)
+            continue;
+        u64 mask = 0;
+        if (!constant_in_block(fn, block, inst->operands[1], &mask) ||
+            mask > 0xFFFFFFFFull)
+            continue;
+        u32 shift_index = 0;
+        const DolIRInstruction* shift =
+            single_use_def(fn, block, inst->operands[0], &shift_index);
+        if (!shift || shift->type != DOLIR_TYPE_I32 ||
+            shift->operand_count != 2 || !shift->result)
+            continue;
+        u64 amount = 0;
+        if (!constant_in_block(fn, block, shift->operands[1], &amount) ||
+            amount > 31ull)
+            continue;
+        u8 fused;
+        switch (shift->op) {
+        case DOLIR_OP_ROTL: fused = DOLVM_OP_ROTL32I_AND; break;
+        case DOLIR_OP_SHL: fused = DOLVM_OP_SHL32I_AND; break;
+        case DOLIR_OP_LSHR: fused = DOLVM_OP_LSHR32I_AND; break;
+        case DOLIR_OP_ASHR: fused = DOLVM_OP_ASHR32I_AND; break;
+        default: continue;
+        }
+        if (dolvm_opt_off("DOLVM_NO_SHIFT_FUSION"))
+            continue;
+        fn->shift_fused[i] = fused;
+        fn->shift_amount[i] = (u8)amount;
+        fn->folded[shift_index] = 1;
+    }
+
     // Recount against what will actually be emitted, then drop whatever the
     // folding just orphaned -- typically the constant the add was carrying.
     for (u32 i = 0; i < count; i++) {
@@ -1198,6 +1435,7 @@ static void analyze_block(FunctionEmitter* fn, const DolIRBlock* block) {
             single_use_def(fn, block, block->terminator.target_value, &def_index);
         u64 mask = 0;
         if (def && def->op == DOLIR_OP_AND && def->operand_count == 2 &&
+            !fn->shift_fused[def_index] &&
             constant_in_block(fn, block, def->operands[1], &mask) &&
             mask == 0xFFFFFFFCull) {
             fn->indirect_mask = true;
@@ -1420,6 +1658,14 @@ static bool lower_instruction(FunctionEmitter* fn, const DolIRBlock* block,
         return lower_binary(fn, block, inst, ops);
     }
     case DOLIR_OP_AND: {
+        if (fn->shift_fused[index]) {
+            u32 shift_index = fn->def_index[inst->operands[0]];
+            u64 mask = 0;
+            constant_in_block(fn, block, inst->operands[1], &mask);
+            return emit_raw(builder, fn->shift_fused[index], dst,
+                            fn->reg[block->instructions[shift_index].operands[0]],
+                            fn->shift_amount[index], (u32)mask);
+        }
         OpPair ops = {DOLVM_OP_AND, DOLVM_OP_ANDI};
         return lower_binary(fn, block, inst, ops);
     }
@@ -1682,14 +1928,21 @@ static bool lower_instruction(FunctionEmitter* fn, const DolIRBlock* block,
             return emit_raw(builder, DOLVM_OP_EXACT_PAIRED, 0, 0, 0, 0) &&
                    emit_payload(builder, inst->immediate);
         case DOLIR_HELPER_PSQ_LOAD:
-        case DOLIR_HELPER_PSQ_STORE:
+        case DOLIR_HELPER_PSQ_STORE: {
+            // The call yields a success flag, and the update forms select on it
+            // to decide whether the address write-back happens, so the register
+            // holding it has to be named here even when it is absent.
+            u8 flag = (inst->result && fn->reg[inst->result] != DOLVM_NO_REG)
+                          ? fn->reg[inst->result]
+                          : DOLVM_NO_REG;
             return emit_raw(builder,
                             inst->aux == DOLIR_HELPER_PSQ_LOAD
                                 ? DOLVM_OP_PSQ_LOAD
                                 : DOLVM_OP_PSQ_STORE,
-                            dst, fn->reg[inst->operands[0]], 0,
+                            flag, fn->reg[inst->operands[0]], 0,
                             inst->guest_pc) &&
                    emit_payload(builder, inst->immediate);
+        }
         case DOLIR_HELPER_STORE_CONDITIONAL:
             return emit_raw(builder, DOLVM_OP_STWCX, 0,
                             fn->reg[inst->operands[0]],
@@ -1948,6 +2201,13 @@ static bool recipe_live_at(FunctionEmitter* fn, DolIRValue value, u32 at) {
 // are all no-ops needs no stub at all.
 static bool recipe_needs_code(FunctionEmitter* fn, const DolVMRecipe* recipe,
                               u32 at) {
+    // Off switch for the liveness filter below. Replaying every recipe the
+    // optimizer proposed is wasteful but never loses a value, so if a picture
+    // comes right with this set, the filter is dropping something that was
+    // still live at the entry.
+    if (dolvm_opt_off("DOLVM_ALL_RECIPES") && recipe->value &&
+        fn->reg[recipe->value] != DOLVM_NO_REG)
+        return true;
     if (!recipe_live_at(fn, recipe->value, at))
         return false;
     if (recipe->kind != DOLVM_RECIPE_STATE)
@@ -1976,6 +2236,12 @@ static bool emit_recipe(FunctionEmitter* fn, const DolVMRecipe* recipe) {
     u32 pool = intern_constant(builder, recipe->immediate, &ok);
     return ok && emit_raw(builder, DOLVM_OP_CONST64, reg, 0, 0, pool);
 }
+
+// How much of the emitted module is entry stubs -- cold code that only runs
+// when the chassis dispatches into the middle of a block. Reported at build
+// time because it is the part of the module that used to sit in the middle of
+// the hot instruction stream, and knowing its size is how that was found.
+u32 g_dolvm_stub_bytes;
 
 static bool emit_block(FunctionEmitter* fn, u32 block_index) {
     Builder* builder = fn->builder;
@@ -2013,6 +2279,31 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
         !emit_raw(builder, DOLVM_OP_CHARGE, 0, 0, 0, block->cycle_cost))
         return false;
 
+    // A block that opens a proved SDK routine opens with its native stand-in,
+    // placed after the charge so a branch that pays the charge itself and
+    // lands one past it (PATCH_BLOCK_BODY) lands here too. The payload tells
+    // the helper what the charge already took, so its cycle model can charge
+    // the difference.
+    if (builder->hle_count) {
+        u32 lo = 0, hi = builder->hle_count;
+        while (lo < hi) {
+            u32 mid = lo + (hi - lo) / 2u;
+            if (builder->hle_sites[mid].pc < block->guest_address)
+                lo = mid + 1u;
+            else
+                hi = mid;
+        }
+        if (lo < builder->hle_count &&
+            builder->hle_sites[lo].pc == block->guest_address) {
+            if (!emit_raw(builder, DOLVM_OP_HLE, builder->hle_sites[lo].id,
+                          (u8)(fn->region_index & 0xFFu),
+                          (u8)(fn->region_index >> 8),
+                          block->guest_address) ||
+                !emit_payload(builder, block->cycle_cost))
+                return false;
+        }
+    }
+
     for (u32 i = 0; i < count; i++) {
         DolIRInstruction* inst = &block->instructions[i];
         // A block long enough to outrun the byte-sized pc offset carried by
@@ -2026,6 +2317,10 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
         fn->inst_offset[i] = builder->code_count;
         fn->pc_base_at[i] = fn->pc_base;
         if (fn->folded[i])
+            continue;
+        // A lane operation whose sources all die here does not move anything:
+        // the result takes their registers and nothing is emitted.
+        if (inst->result && try_coalesce_lanes(fn, inst, i))
             continue;
         if (inst->result) {
             // A value that lives in a home is not allocated out of the block's
@@ -2074,18 +2369,29 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
                 wanted++;
         }
         u32 offset;
+        bool in_stub_region = false;
         if (wanted) {
-            offset = builder->code_count;
+            // Into the stub buffer, which is appended after every body in the
+            // module; the offset recorded here is relative to that buffer and
+            // is fixed up once the split point is known.
+            builder->stub_mode = true;
+            in_stub_region = true;
+            offset = builder->stub_count | DOLVM_STUB_MARK;
             for (u32 r = 0; r < entry->recipe_count; r++) {
                 const DolVMRecipe* recipe =
                     &layout->recipes[entry->recipe_start + r];
                 if (!recipe_needs_code(fn, recipe, entry->instruction))
                     continue;
-                if (!emit_recipe(fn, recipe))
+                if (!emit_recipe(fn, recipe)) {
+                    builder->stub_mode = false;
                     return false;
+                }
             }
-            if (!emit_raw(builder, DOLVM_OP_JMP, 0, 0, 0,
-                          fn->inst_offset[entry->instruction]))
+            // The jump lands in the body, whose offsets do not move.
+            bool ok = emit_raw(builder, DOLVM_OP_JMP, 0, 0, 0,
+                               fn->inst_offset[entry->instruction]);
+            builder->stub_mode = false;
+            if (!ok)
                 return false;
         } else if (entry->guest_address == block->guest_address) {
             // The head of a block enters through its prologue, so the cycle
@@ -2096,7 +2402,13 @@ static bool emit_block(FunctionEmitter* fn, u32 block_index) {
         } else {
             offset = fn->inst_offset[entry->instruction];
         }
-        DolVMEntryPoint* point = &builder->map[fn->map_base + e];
+        u32 map_index = fn->map_base + e;
+        if (in_stub_region) {
+            GROW(builder->stub_fixups, builder->stub_fixup_count,
+                 builder->stub_fixup_capacity, u32);
+            builder->stub_fixups[builder->stub_fixup_count++] = map_index;
+        }
+        DolVMEntryPoint* point = &builder->map[map_index];
         point->entry =
             offset | (entry->return_target ? DOLVM_ENTRY_RETURN_TARGET : 0u);
         point->pc_base = fn->pc_base_at[entry->instruction];
@@ -2172,10 +2484,13 @@ static bool emit_function(Builder* builder, DolIRFunction* function,
     fn.home_write = (u8*)calloc(largest ? largest : 1u, 1);
     fn.home_dest = (u8*)malloc(largest ? largest : 1u);
     fn.supervisor = (u8*)calloc(largest ? largest : 1u, 1);
+    fn.shift_fused = (u8*)calloc(largest ? largest : 1u, 1);
+    fn.shift_amount = (u8*)calloc(largest ? largest : 1u, 1);
     fn.homed = builder->homed;
     bool ok = fn.block_start && fn.reg && fn.reg_hi && fn.last_use &&
               fn.def_index && fn.use_count && fn.memory_use_count &&
               fn.retired && fn.folded && fn.cr_form && fn.mem_fused &&
+              fn.shift_fused && fn.shift_amount &&
               fn.mem_write && fn.mem_base_off && fn.mem_value_off &&
               fn.home_read && fn.home_write && fn.home_dest &&
               fn.supervisor;
@@ -2205,8 +2520,13 @@ static bool emit_function(Builder* builder, DolIRFunction* function,
             ok = false;
             break;
         }
-        builder->code[patch->code_index].imm =
-            point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        u32 target = point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        if (target & DOLVM_STUB_MARK) {
+            GROW(builder->code_fixups, builder->code_fixup_count,
+                 builder->code_fixup_capacity, u32);
+            builder->code_fixups[builder->code_fixup_count++] = patch->code_index;
+        }
+        builder->code[patch->code_index].imm = target;
     }
 
     free(fn.block_start);
@@ -2241,6 +2561,9 @@ static int compare_functions(const void* left, const void* right) {
 
 static void builder_free(Builder* builder) {
     free(builder->code);
+    free(builder->stub_code);
+    free(builder->stub_fixups);
+    free(builder->code_fixups);
     free(builder->constants);
     free(builder->regions);
     free(builder->map);
@@ -2358,6 +2681,8 @@ bool dolvm_build_module(DolIRModule* module, const DolVMEmitOptions* options,
     memset(&builder, 0, sizeof(builder));
     builder.direct_calls = options && options->direct_calls;
     builder.homed = options && options->home_state;
+    builder.hle_sites = options ? options->hle_sites : NULL;
+    builder.hle_count = options ? options->hle_count : 0;
     builder.diagnostics = diagnostics;
 
     // Regions are looked up by binary search at runtime, so they go in address
@@ -2427,10 +2752,37 @@ bool dolvm_build_module(DolIRModule* module, const DolVMEmitOptions* options,
         }
         builder.code[patch->code_index].a = (u8)(region_index & 0xFFu);
         builder.code[patch->code_index].b = (u8)(region_index >> 8);
-        builder.code[patch->code_index].imm =
-            point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        u32 landing = point->entry & DOLVM_ENTRY_OFFSET_MASK;
+        if (landing & DOLVM_STUB_MARK) {
+            GROW(builder.code_fixups, builder.code_fixup_count,
+                 builder.code_fixup_capacity, u32);
+            builder.code_fixups[builder.code_fixup_count++] = patch->code_index;
+        }
+        builder.code[patch->code_index].imm = landing;
         u64 payload = ((u64)target << 32) | point->pc_base;
         memcpy(&builder.code[patch->code_index + 1u], &payload, sizeof(payload));
+    }
+
+    // Bodies are laid out; the stubs go after all of them, and everything that
+    // named one gets its offset rebased. Nothing that names a *body* moves.
+    if (ok && !builder.failed && builder.stub_count) {
+        u32 base = builder.code_count;
+        g_dolvm_stub_bytes = builder.stub_count * (u32)sizeof(DolVMInst);
+        for (u32 i = 0; i < builder.stub_count && ok; i++) {
+            GROW(builder.code, builder.code_count, builder.code_capacity,
+                 DolVMInst);
+            builder.code[builder.code_count++] = builder.stub_code[i];
+        }
+        for (u32 i = 0; i < builder.stub_fixup_count; i++) {
+            DolVMEntryPoint* point = &builder.map[builder.stub_fixups[i]];
+            u32 flags = point->entry & DOLVM_ENTRY_RETURN_TARGET;
+            u32 offset = point->entry & DOLVM_ENTRY_OFFSET_MASK;
+            point->entry = ((offset & ~DOLVM_STUB_MARK) + base) | flags;
+        }
+        for (u32 i = 0; i < builder.code_fixup_count; i++) {
+            DolVMInst* inst = &builder.code[builder.code_fixups[i]];
+            inst->imm = (inst->imm & ~DOLVM_STUB_MARK) + base;
+        }
     }
 
     if (ok && !builder.failed)

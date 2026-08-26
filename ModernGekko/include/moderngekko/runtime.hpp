@@ -43,6 +43,7 @@ struct GraphicsSettings
 {
   std::string backend;
   std::optional<int> internal_resolution_scale;
+  std::optional<bool> gpu_texture_decoding;
 };
 
 struct AudioSettings
@@ -79,6 +80,13 @@ struct RuntimeConfig
   std::optional<std::string> window_title;
   // Boot straight into a savestate instead of from the title screen.
   std::optional<std::filesystem::path> load_state_path;
+  // Run the emulated GPU on its own thread. Unset leaves Dolphin's own default
+  // (and whatever a user's Dolphin.ini says); set forces it either way. It is
+  // off by default everywhere except Android, where upstream turns it on
+  // "because the performance boost is really needed" -- the same reason it is
+  // on for iOS here: with one thread, every texture decode and command-buffer
+  // build is time the interpreter is not running.
+  std::optional<bool> cpu_thread;
 };
 
 enum class RuntimeErrorCode

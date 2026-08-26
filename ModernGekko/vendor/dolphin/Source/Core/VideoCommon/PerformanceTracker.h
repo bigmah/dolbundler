@@ -39,6 +39,9 @@ public:
   DT GetDtAvg() const;
   DT GetDtStd() const;
   DT GetLastRawDt() const;
+  // The largest single interval since the previous call, then re-armed. An
+  // average hides a hitch; this is the hitch.
+  DT TakeDtPeak() const;
   void InvalidateLastTime();
 
 private:
@@ -51,6 +54,9 @@ private:
   // Name of log file and file stream
   std::optional<std::string> m_log_name;
   std::ofstream m_bench_file;
+
+  // Largest dt seen since TakeDtPeak() last re-armed it, in DT ticks.
+  mutable std::atomic<s64> m_dt_peak_ticks{0};
 
   // Last time Count() was called
   TimePoint m_last_time;

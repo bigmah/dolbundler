@@ -81,9 +81,14 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   {
     if (![entry.discID isEqualToString:wanted])
       continue;
-    DBGameViewController* game = [[DBGameViewController alloc] initWithGame:entry];
-    game.modalPresentationStyle = UIModalPresentationFullScreen;
-    [self presentViewController:game animated:NO completion:nil];
+    // The same two paths a tap takes. A module left over from an older
+    // bytecode format has to be rebuilt first, and that is exactly the state
+    // an autoplay run is usually launched in -- the interpreter has just
+    // changed, which is why the run is happening at all.
+    if (entry.moduleStale)
+      [self rebuildModuleThenPlay:entry];
+    else
+      [self play:entry];
     return;
   }
   NSLog(@"DOLBUNDLER_AUTOPLAY=%@ but no such game in the library", wanted);

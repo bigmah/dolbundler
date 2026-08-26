@@ -24,7 +24,7 @@ extern "C" {
 
 #ifndef MODERNGEKKO_MODULE_ABI_H
 
-#define STATICRECOMP_ABI_VERSION 3u
+#define STATICRECOMP_ABI_VERSION 4u
 
 typedef struct StaticRecompRange
 {
@@ -50,6 +50,18 @@ typedef struct StaticRecompRelModule
   const StaticRecompRelSection* sections;
   u32 num_sections;
 } StaticRecompRelModule;
+
+struct StaticRecompDispatchGate;
+
+typedef struct StaticRecompNativeMetadata
+{
+  const char* backend_name;
+  const char* target_triple;
+  const char* toolchain_version;
+  const char* codegen_fingerprint;
+  const char* build_id;
+  u64 cpu_state_layout_hash;
+} StaticRecompNativeMetadata;
 
 typedef struct StaticRecompModuleDesc
 {
@@ -88,6 +100,8 @@ typedef struct StaticRecompModuleDesc
   const u64* chunk_hashes;
   const StaticRecompRelModule* rel_modules;
   u32 num_rel_modules;
+  const StaticRecompNativeMetadata* native_metadata;
+  void (*publish_gate)(const struct StaticRecompDispatchGate* gate);
 } StaticRecompModuleDesc;
 
 // The single symbol a module must export:

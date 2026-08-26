@@ -70,8 +70,19 @@ void PerformanceTracker::UpdateStats()
   m_dt_std = std::chrono::duration_cast<DT>(DT_s(variance.PopulationStandardDeviation()));
 }
 
+DT PerformanceTracker::TakeDtPeak() const
+{
+  return DT{m_dt_peak_ticks.exchange(0, std::memory_order_relaxed)};
+}
+
 void PerformanceTracker::HandleRawDt(DT diff)
 {
+  const s64 ticks = diff.count();
+  s64 seen = m_dt_peak_ticks.load(std::memory_order_relaxed);
+  while (ticks > seen &&
+         !m_dt_peak_ticks.compare_exchange_weak(seen, ticks, std::memory_order_relaxed))
+  {
+  }
   if (m_dt_queue.size() == MAX_DT_QUEUE_SIZE)
     PopBack();
 

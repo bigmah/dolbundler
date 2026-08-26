@@ -1,15 +1,21 @@
 #include "backend/llvm/llvm_backend.h"
 #include "backend/llvm/llvm_function_emitter.h"
+#include "cpu/cpu.h"
+
+#define DOLNATIVE_WITH_DOLIR 1
+#include "core/native_state_layout.h"
 
 #include <memory>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Verifier.h>
@@ -39,8 +45,27 @@ using namespace llvm;
 
 // Shared by emission, cache hashing and resume validation.
 static std::string resolveTriple(const char *requested) {
-  return requested && requested[0] ? std::string(requested)
-                                   : llvm::sys::getDefaultTargetTriple();
+  const std::string raw = requested && requested[0]
+                              ? std::string(requested)
+                              : llvm::sys::getDefaultTargetTriple();
+  return llvm::Triple::normalize(raw);
+}
+
+static bool supportedTarget(const llvm::Triple &triple) {
+  if (triple.getArch() == llvm::Triple::x86_64)
+    return triple.isOSLinux() || triple.isOSWindows();
+  if (triple.getArch() != llvm::Triple::aarch64 ||
+      triple.getArchName() == "arm64e")
+    return false;
+  if (triple.isiOS() && !triple.isTvOS())
+    // Device and Apple-silicon simulator builds use the same generated IR and
+    // AArch64 ABI but distinct Mach-O platforms. Supporting both gives native
+    // modules a fast, symbolicated development loop while matchesMachO() below
+    // still prevents either object kind from entering the other app.
+    return !triple.getOSVersion().empty();
+  const bool isMacOS = triple.isMacOSX() ||
+                       triple.getOS() == llvm::Triple::Darwin;
+  return isMacOS && !triple.isSimulatorEnvironment();
 }
 
 // Everything below feeds both codegen and the object cache key. Changing any of
@@ -59,20 +84,19 @@ static std::string resolveTriple(const char *requested) {
 // measured the vectorizers as worth 1.37x precisely because Gekko
 // paired-singles are 2-wide f32 pairs that map onto SSE2. So a wider target is
 // a live hypothesis rather than a long shot.
-static constexpr const char *kDefaultTargetCPU = "generic";
 static constexpr const char *kDefaultTargetFeatures = "";
 
-static std::string targetCPU() {
+static std::string targetCPU(const llvm::Triple &triple) {
   const char *cpu = getenv("DOLRECOMP_LLVM_CPU");
   if (!cpu || !cpu[0])
-    return kDefaultTargetCPU;
+    return triple.isiOS() ? "apple-a16" : "generic";
   // createTargetMachine does not expand "native" itself.
   if (!strcmp(cpu, "native"))
     return llvm::sys::getHostCPUName().str();
   return cpu;
 }
 
-static std::string targetFeatures() {
+static std::string targetFeatures(const llvm::Triple &) {
   const char *features = getenv("DOLRECOMP_LLVM_FEATURES");
   return features ? features : kDefaultTargetFeatures;
 }
@@ -137,8 +161,6 @@ static const std::string &pgoProfileFingerprint() {
   return fingerprint;
 }
 
-static void reportPgoStaleSummary();
-
 // Off by default, so the default module stays byte-identical to an unprofiled
 // build and the existing object cache keeps its meaning. "use" without a
 // readable DOLRECOMP_LLVM_PROFILE is refused rather than silently degraded to
@@ -165,40 +187,9 @@ extern "C" int dolllvm_pgo_mode(void) {
     fprintf(stderr, "dolllvm: PGO use, profile %s (%s)\n",
             pgoProfilePath().c_str(), pgoProfileFingerprint().c_str());
     fflush(stderr);
-    // One summary per process, at exit, so a `warn`-policy build ends with a
-    // total rather than with thousands of individually ignorable lines.
-    atexit(reportPgoStaleSummary);
     return (int)DOLLLVM_PGO_USE;
   }();
   return mode;
-}
-
-// Process-wide tallies for the staleness gate. The job runner is threads in one
-// process (run_parallel_jobs), so these are atomic and the summary is printed
-// once, from an atexit hook registered when use mode is first resolved. Without
-// the summary a stale profile under the `warn` policy is thousands of
-// individually ignorable lines and no total.
-static std::atomic<unsigned long long> pgoMatchedFunctions{0};
-static std::atomic<unsigned long long> pgoUnmatchedFunctions{0};
-static std::atomic<unsigned long long> pgoStaleChunks{0};
-
-static void reportPgoStaleSummary() {
-  const unsigned long long matched = pgoMatchedFunctions.load();
-  const unsigned long long unmatched = pgoUnmatchedFunctions.load();
-  const unsigned long long total = matched + unmatched;
-  if (total == 0)
-    return;
-  fprintf(stderr,
-          "dolllvm: PGO profile match: %llu/%llu functions matched, %llu "
-          "unmatched across %llu stale chunks\n",
-          matched, total, unmatched, pgoStaleChunks.load());
-  if (unmatched != 0)
-    fprintf(stderr,
-            "dolllvm: PROFILE IS STALE against this DOL -- %.4f%% of emitted "
-            "functions carry no profile record. Re-collect the profile against "
-            "this binary.\n",
-            100.0 * (double)unmatched / (double)total);
-  fflush(stderr);
 }
 
 static CodeGenOptLevel codegenLevel(int level) {
@@ -211,20 +202,165 @@ static CodeGenOptLevel codegenLevel(int level) {
   return CodeGenOptLevel::Aggressive;
 }
 
+static bool needsCZeroExtend(llvm::Type *type) {
+  return type->isIntegerTy(1) || type->isIntegerTy(8);
+}
+
+// Clang's arm64 C ABI marks _Bool and unsigned char returns/parameters
+// zeroext.  The LLVM emitter creates declarations directly, so it must attach
+// the same contract explicitly rather than relying on frontend lowering that
+// never ran.  Apply it to indirect hook calls as well as named helpers.
+static void applyCABIAttributes(llvm::Module &module) {
+  for (llvm::Function &function : module) {
+    llvm::FunctionType *type = function.getFunctionType();
+    // Intrinsic signatures are LLVM IR contracts, not C ABI declarations.
+    // In particular, llvm.ctlz's i1 parameter is `immarg`; adding zeroext to
+    // it makes the module invalid once a title contains cntlzw.
+    if (!function.isIntrinsic()) {
+      if (needsCZeroExtend(type->getReturnType()))
+        function.addRetAttr(llvm::Attribute::ZExt);
+      for (unsigned index = 0; index < type->getNumParams(); ++index)
+        if (needsCZeroExtend(type->getParamType(index)))
+          function.addParamAttr(index, llvm::Attribute::ZExt);
+    }
+
+    for (llvm::BasicBlock &block : function) {
+      for (llvm::Instruction &instruction : block) {
+        auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+        if (!call)
+          continue;
+        if (llvm::Function *callee = call->getCalledFunction();
+            callee && callee->isIntrinsic())
+          continue;
+        llvm::FunctionType *callType = call->getFunctionType();
+        if (needsCZeroExtend(callType->getReturnType()))
+          call->addRetAttr(llvm::Attribute::ZExt);
+        for (unsigned index = 0; index < callType->getNumParams(); ++index)
+          if (needsCZeroExtend(callType->getParamType(index)))
+            call->addParamAttr(index, llvm::Attribute::ZExt);
+      }
+    }
+  }
+}
+
 static TargetMachine *targetMachine(const Target *target,
                                     const std::string &tripleName, int opt) {
   static thread_local std::string cachedTriple;
+  static thread_local std::string cachedCPU;
+  static thread_local std::string cachedFeatures;
   static thread_local int cachedOpt = -1;
   static thread_local std::unique_ptr<TargetMachine> cachedMachine;
-  if (!cachedMachine || cachedTriple != tripleName || cachedOpt != opt) {
+  const llvm::Triple triple(tripleName);
+  const std::string cpu = targetCPU(triple);
+  const std::string features = targetFeatures(triple);
+  if (!cachedMachine || cachedTriple != tripleName || cachedCPU != cpu ||
+      cachedFeatures != features || cachedOpt != opt) {
     TargetOptions options;
     cachedMachine.reset(target->createTargetMachine(
-        tripleName, targetCPU(), targetFeatures(), options, Reloc::PIC_,
-        std::nullopt, codegenLevel(opt)));
+        tripleName, cpu, features, options, Reloc::PIC_, CodeModel::Small,
+        codegenLevel(opt)));
     cachedTriple = tripleName;
+    cachedCPU = cpu;
+    cachedFeatures = features;
     cachedOpt = opt;
   }
   return cachedMachine.get();
+}
+
+static uint32_t readLE32(const unsigned char *bytes) {
+  return static_cast<uint32_t>(bytes[0]) |
+         static_cast<uint32_t>(bytes[1]) << 8 |
+         static_cast<uint32_t>(bytes[2]) << 16 |
+         static_cast<uint32_t>(bytes[3]) << 24;
+}
+
+static uint32_t packedVersion(const llvm::VersionTuple &version) {
+  const unsigned major = version.getMajor();
+  const unsigned minor = version.getMinor().value_or(0);
+  const unsigned patch = version.getSubminor().value_or(0);
+  if (major > 0xffffu || minor > 0xffu || patch > 0xffu)
+    return 0;
+  return major << 16 | minor << 8 | patch;
+}
+
+static llvm::VersionTuple targetMinimumVersion(const llvm::Triple &triple) {
+  if (triple.isiOS())
+    return triple.getiOSVersion();
+  if (triple.isOSDarwin()) {
+    llvm::VersionTuple version;
+    if (triple.getMacOSXVersion(version))
+      return version;
+  }
+  return triple.getMinimumSupportedOSVersion();
+}
+
+static bool readFile(const char *path, std::vector<unsigned char> *bytes) {
+  FILE *file = fopen(path, "rb");
+  if (!file)
+    return false;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return false;
+  }
+  const long length = ftell(file);
+  if (length < 0 || fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return false;
+  }
+  bytes->resize(static_cast<size_t>(length));
+  const bool ok = bytes->empty() ||
+                  fread(bytes->data(), 1, bytes->size(), file) == bytes->size();
+  fclose(file);
+  return ok;
+}
+
+static bool matchesMachO(const std::vector<unsigned char> &bytes,
+                         const llvm::Triple &triple) {
+  // mach_header_64 is eight little-endian u32s.
+  if (bytes.size() < 32 || readLE32(bytes.data()) != 0xfeedfacfu)
+    return false;
+  const uint32_t expectedCPU = triple.getArch() == llvm::Triple::aarch64
+                                   ? 0x0100000cu
+                                   : 0x01000007u;
+  if (readLE32(bytes.data() + 4) != expectedCPU ||
+      readLE32(bytes.data() + 12) != 1u) // MH_OBJECT
+    return false;
+  const uint32_t commands = readLE32(bytes.data() + 16);
+  const uint32_t commandBytes = readLE32(bytes.data() + 20);
+  if (commands > 65536u || commandBytes > bytes.size() - 32u)
+    return false;
+
+  uint32_t expectedPlatform = 0;
+  if (triple.isiOS())
+    expectedPlatform = triple.isSimulatorEnvironment() ? 7u : 2u;
+  else if (triple.isOSDarwin())
+    expectedPlatform = 1u;
+  if (!expectedPlatform)
+    return false;
+  const uint32_t expectedMinOS = packedVersion(targetMinimumVersion(triple));
+  if (!expectedMinOS)
+    return false;
+
+  size_t offset = 32;
+  bool foundBuildVersion = false;
+  for (uint32_t index = 0; index < commands; ++index) {
+    if (offset > bytes.size() - 8)
+      return false;
+    const uint32_t command = readLE32(bytes.data() + offset);
+    const uint32_t size = readLE32(bytes.data() + offset + 4);
+    if (size < 8 || size > bytes.size() - offset)
+      return false;
+    if (command == 0x32u) { // LC_BUILD_VERSION
+      if (size < 24 || foundBuildVersion)
+        return false;
+      foundBuildVersion = true;
+      if (readLE32(bytes.data() + offset + 8) != expectedPlatform ||
+          readLE32(bytes.data() + offset + 12) != expectedMinOS)
+        return false;
+    }
+    offset += size;
+  }
+  return foundBuildVersion;
 }
 
 } // namespace
@@ -236,9 +372,14 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   if (!source || !object_path || !diagnostics)
     return false;
   static bool initialized = [] {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    llvm::InitializeNativeTargetAsmParser();
+    LLVMInitializeAArch64TargetInfo();
+    LLVMInitializeAArch64Target();
+    LLVMInitializeAArch64TargetMC();
+    LLVMInitializeAArch64AsmPrinter();
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmPrinter();
     return true;
   }();
   (void)initialized;
@@ -247,11 +388,10 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   std::string tripleName =
       resolveTriple(options ? options->target_triple : nullptr);
   const llvm::Triple triple(tripleName);
-  if (triple.getArch() != llvm::Triple::x86_64 ||
-      (!triple.isOSLinux() && !triple.isOSWindows())) {
-    fprintf(
-        diagnostics,
-        "dolllvm: supported production targets are x86-64 Linux and Windows\n");
+  if (!supportedTarget(triple)) {
+    fprintf(diagnostics,
+            "dolllvm: supported targets are x86-64 Linux/Windows, arm64 "
+            "macOS, and arm64 iOS device/simulator triples with an explicit minimum OS\n");
     return false;
   }
 
@@ -278,13 +418,16 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     dolllvm::FunctionEmitter emitter(
         context, module, source->functions[i],
         options ? options->function_ranges : nullptr,
-        options ? options->function_range_count : 0);
+        options ? options->function_range_count : 0,
+        options && options->gamecube,
+        options && options->symbol_prefix ? options->symbol_prefix : "");
     if (!emitter.emit(diagnosticStream)) {
       diagnosticStream.flush();
       fprintf(diagnostics, "%s", diagnosticText.c_str());
       return false;
     }
   }
+  applyCABIAttributes(module);
   if (llvm::verifyModule(module, &diagnosticStream)) {
     diagnosticStream.flush();
     fprintf(diagnostics, "%s", diagnosticText.c_str());
@@ -305,37 +448,14 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     llvm::PassInstrumentationCallbacks callbacks;
     const int pgo = dolllvm_pgo_mode();
     const bool tracePasses = getenv("DOLRECOMP_LLVM_TRACE_PASSES") != nullptr;
-    // P002. Counted here, acted on after the pipeline has run. The callback is
-    // observational -- pass instrumentation cannot change what the passes do --
-    // so the gate costs the emitted objects nothing and the fingerprint does
-    // not move.
+    // P002. Counted after the pipeline has run. PGO entry counts survive the
+    // later optimization passes, while checking the final defined functions is
+    // less fragile than depending on pass-instrumentation callback details.
     unsigned long long matchedHere = 0;
     unsigned long long unmatchedHere = 0;
     const bool gatePgo =
         pgo == DOLLLVM_PGO_USE &&
         dolllvm_pgo_stale_policy() != DOLLLVM_PGO_STALE_OFF;
-    if (gatePgo) {
-      callbacks.registerAfterPassCallback(
-          [&matchedHere, &unmatchedHere](llvm::StringRef pass, llvm::Any ir,
-                                         const llvm::PreservedAnalyses &) {
-            if (pass != "PGOInstrumentationUse")
-              return;
-            const llvm::Module *const *mod =
-                llvm::any_cast<const llvm::Module *>(&ir);
-            if (!mod || !*mod)
-              return;
-            // Immediately after the Use pass, so the count reflects what the
-            // profile matched and not what later passes went on to create.
-            for (const llvm::Function &function : **mod) {
-              if (function.isDeclaration())
-                continue;
-              if (function.getEntryCount())
-                matchedHere++;
-              else
-                unmatchedHere++;
-            }
-          });
-    }
     if (tracePasses) {
       callbacks.registerBeforeNonSkippedPassCallback(
           [](llvm::StringRef pass, llvm::Any ir) {
@@ -357,8 +477,7 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     }
     llvm::PassBuilder passBuilder(machine, llvm::PipelineTuningOptions(),
                                   std::nullopt,
-                                  (tracePasses || gatePgo) ? &callbacks
-                                                           : nullptr);
+                                  tracePasses ? &callbacks : nullptr);
     passBuilder.registerModuleAnalyses(mam);
     passBuilder.registerCGSCCAnalyses(cgam);
     passBuilder.registerFunctionAnalyses(fam);
@@ -396,15 +515,23 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
                                                       /*IsCS=*/false));
     passes.run(module, mam);
 
+    if (gatePgo) {
+      for (const llvm::Function &function : module) {
+        if (function.isDeclaration())
+          continue;
+        if (function.getEntryCount())
+          matchedHere++;
+        else
+          unmatchedHere++;
+      }
+    }
+
     // P002. The verdict. Under `error` a stale profile stops the build here,
     // which is the point: the failure this gate exists for is a build that
     // SUCCEEDS while training on records that no longer describe it, and every
     // downstream number then belongs to a module nobody meant to measure.
     if (gatePgo) {
-      pgoMatchedFunctions += matchedHere;
-      pgoUnmatchedFunctions += unmatchedHere;
       if (unmatchedHere != 0) {
-        pgoStaleChunks++;
         fprintf(diagnostics,
                 "dolllvm: PGO profile stale for %s: %llu of %llu functions "
                 "have no profile record\n",
@@ -471,24 +598,40 @@ extern "C" bool dolllvm_effective_triple(const char *requested, char *out,
 
 extern "C" bool dolllvm_object_matches_triple(const char *path,
                                               const char *requested) {
-  FILE *file = fopen(path, "rb");
-  if (!file)
-    return false;
-  unsigned char magic[4] = {0, 0, 0, 0};
-  const size_t read = fread(magic, 1, sizeof(magic), file);
-  fclose(file);
-  if (read != sizeof(magic))
+  std::vector<unsigned char> bytes;
+  if (!readFile(path, &bytes) || bytes.size() < 4)
     return false;
 
   const llvm::Triple triple(resolveTriple(requested));
   if (triple.isOSBinFormatCOFF())
     // IMAGE_FILE_MACHINE_AMD64, little-endian, at offset 0 of a COFF object.
-    return magic[0] == 0x64 && magic[1] == 0x86;
+    return bytes[0] == 0x64 && bytes[1] == 0x86;
   if (triple.isOSBinFormatMachO())
-    return magic[0] == 0xCF && magic[1] == 0xFA && magic[2] == 0xED &&
-           magic[3] == 0xFE;
-  return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' &&
-         magic[3] == 'F';
+    return matchesMachO(bytes, triple);
+  return bytes[0] == 0x7F && bytes[1] == 'E' && bytes[2] == 'L' &&
+         bytes[3] == 'F';
+}
+
+extern "C" const char *dolllvm_version(void) { return LLVM_VERSION_STRING; }
+
+static bool copyMetadataString(const std::string &value, char *out,
+                               size_t size) {
+  if (!out || size == 0 || value.size() + 1 > size)
+    return false;
+  memcpy(out, value.c_str(), value.size() + 1);
+  return true;
+}
+
+extern "C" bool dolllvm_target_cpu(const char *requested, char *out,
+                                    size_t size) {
+  return copyMetadataString(targetCPU(llvm::Triple(resolveTriple(requested))),
+                            out, size);
+}
+
+extern "C" bool dolllvm_target_features(const char *requested, char *out,
+                                         size_t size) {
+  return copyMetadataString(
+      targetFeatures(llvm::Triple(resolveTriple(requested))), out, size);
 }
 
 // Default `error`: a stale profile is a wrong measurement, not a slow one, and
@@ -510,7 +653,8 @@ extern "C" int dolllvm_pgo_stale_policy(void) {
   return policy;
 }
 
-extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
+extern "C" bool dolllvm_codegen_fingerprint(const char *requested, char *out,
+                                             size_t size) {
   if (!out || size == 0)
     return false;
   // Every codegen-affecting input the object cache key would otherwise miss.
@@ -519,9 +663,12 @@ extern "C" bool dolllvm_codegen_fingerprint(char *out, size_t size) {
   // profile rewritten in place by a collection script makes its path a
   // non-identity. Absent entirely when PGO is off, which is what keeps the
   // default objects byte-identical and the existing cache valid.
+  const llvm::Triple triple(resolveTriple(requested));
   const std::string fingerprint =
-      std::string(LLVM_VERSION_STRING) + "|" + targetCPU() + "|" +
-      targetFeatures() + "|" + "pic|small|" + kPassPipeline +
+      std::string(LLVM_VERSION_STRING) + "|" + triple.str() + "|" +
+      targetCPU(triple) + "|" + targetFeatures(triple) + "|pic|small|minos=" +
+      targetMinimumVersion(triple).getAsString() + "|layout=" +
+      std::to_string(dolnative_state_layout_hash()) + "|" + kPassPipeline +
       (dolllvm_pgo_mode() == DOLLLVM_PGO_GEN ? "|pgo=gen" : "") +
       (dolllvm_pgo_mode() == DOLLLVM_PGO_USE
            ? "|pgo=use:" + pgoProfileFingerprint()

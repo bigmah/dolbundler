@@ -23,6 +23,13 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 // passing count == 0 restores the safe return-to-chassis form.
 void emit_set_chunk_table(const u32* starts, u32 count);
 
+// HLE generation only: lower a non-local `bl` whose continuation is local to
+// a DOLRECOMP_OUTCALL(target, return, label) macro instead of a plain leave,
+// so the stand-in build can resolve cross-pattern calls at run time. Never
+// used for whole-module output -- pattern addresses from different titles
+// overlap, so nothing may bind at build time.
+void emit_set_hle_outcalls(bool enabled);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 
