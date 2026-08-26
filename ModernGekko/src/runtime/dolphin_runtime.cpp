@@ -23,7 +23,6 @@
 #include "VideoCommon/VideoConfig.h"
 #include "dolphin_runtime_internal.hpp"
 #include "moderngekko/cpu_state.h"
-#include "moderngekko/dolvm_module.hpp"
 #include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
 #include "core/native_state_layout.h"
@@ -41,12 +40,6 @@
 #include <string>
 #include <thread>
 #include <utility>
-
-// The interpreter's bench raises this once it has charged past
-// DOLVM_BENCH_SKIP. Declared rather than included: dolvm_bridge.h is the one
-// header in the tree that speaks DolRecomp's CPUState, and this translation
-// unit already has the chassis's.
-extern "C" int dolvm_bridge_bench_at_skip(void);
 
 namespace {
 static_assert(sizeof(ModernGekkoModuleDesc) == sizeof(StaticRecompModuleDesc));
@@ -195,22 +188,6 @@ ModuleSource::AttachedDescriptor(const ModernGekkoModuleDesc *descriptor) {
   return source;
 }
 
-ModuleSource ModuleSource::BytecodePath(std::filesystem::path path) {
-  ModuleSource source;
-  source.kind = Kind::BytecodePath;
-  source.path = std::move(path);
-  return source;
-}
-
-bool ModuleSource::IsBytecodePath(const std::filesystem::path &path) {
-  return DolVMModule::IsBytecodePath(path);
-}
-
-ModuleSource ModuleSource::ForPath(std::filesystem::path path) {
-  return IsBytecodePath(path) ? BytecodePath(std::move(path))
-                              : DynamicPath(std::move(path));
-}
-
 Runtime::Runtime(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
 
 RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
@@ -233,22 +210,13 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
       inspected.metadata->disc_id.c_str()};
   ModuleLibrary validation_library;
   ModuleLoadResult module_result{};
-  std::string bytecode_error;
   if (config.module.kind == ModuleSource::Kind::DynamicPath)
     module_result =
         validation_library.Open(config.module.path.string(), requirements);
   else if (config.module.kind == ModuleSource::Kind::AttachedDescriptor)
     module_result =
         validation_library.Attach(config.module.descriptor, requirements);
-  else if (config.module.kind == ModuleSource::Kind::BytecodePath) {
-    // A bytecode module is loaded here rather than deeper in the chassis
-    // because it becomes an ordinary attached descriptor the moment it is
-    // open: from the CPU core's side there is nothing left to distinguish it.
-    if (DolVMModule::Open(config.module.path, inspected.metadata->disc_id,
-                          &bytecode_error))
-      module_result =
-          validation_library.Attach(DolVMModule::Descriptor(), requirements);
-  } else if (!config.allow_interpreter)
+  else if (!config.allow_interpreter)
     return {
         {},
         RuntimeError{
@@ -259,17 +227,13 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
       module_result.status != ModuleLoadStatus::Ok) {
     if (!config.allow_interpreter) {
       std::string message = "native module was rejected";
-      if (!bytecode_error.empty())
-        message = "bytecode module was rejected: " + bytecode_error;
-      else if (module_result.status == ModuleLoadStatus::DescriptorRejected)
+      if (module_result.status == ModuleLoadStatus::DescriptorRejected)
         message += ": " + std::string(moderngekko_module_status_string(
                               module_result.validation_status));
-      DolVMModule::Close();
       return {
           {},
           RuntimeError{RuntimeErrorCode::ModuleRejected, std::move(message)}};
     }
-    DolVMModule::Close();
     config.module = {};
   }
   validation_library.Close();
@@ -395,18 +359,6 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
           const_cast<ModernGekkoModuleDesc*>(impl->config.module.descriptor);
     }
   }
-  else if (impl->config.module.kind == ModuleSource::Kind::BytecodePath) {
-    recomp_source = StaticRecompModuleSource::Attached(
-        reinterpret_cast<const StaticRecompModuleDesc *>(
-            DolVMModule::Descriptor()));
-    // The core logs the module source by path, and an attached descriptor
-    // normally has none. This one does, and it is the useful thing to see.
-    recomp_source.path = impl->config.module.path.string();
-    // The interpreter can follow calls and returns itself, given the core's
-    // word on which chunks it would dispatch into; a native module has no
-    // such hook and keeps returning for every one.
-    recomp_source.publish_gate = &DolVMModule::PublishGate;
-  }
   if (!impl->mods->Empty()) {
     recomp_source.host_call = &ModManager::HostCall;
     recomp_source.host_call_contains = &ModManager::HostCallContains;
@@ -429,7 +381,6 @@ Runtime::~Runtime() {
     Core::Stop(Core::System::GetInstance());
     Core::Shutdown(Core::System::GetInstance());
   }
-  DolVMModule::Close();
   m_impl->state_hook = {};
   if (m_impl->controllers_initialized)
     UICommon::ShutdownControllers();
@@ -485,29 +436,6 @@ RuntimeRunResult Runtime::Run() {
                          "Dolphin could not boot sys/main.dol"}};
   }
   m_impl->booted = true;
-  // Comparing two builds means measuring the same scene in both, and a game
-  // does not stand still: an attract loop that alternates menus and gameplay
-  // differs by 30% in interpretation cost between the two. The interpreter's
-  // bench raises a flag once it has charged past DOLVM_BENCH_SKIP, so a state
-  // written at that moment is a fixed guest instant rather than a wall one --
-  // which turns a two-minute warm-up per measurement into a load. Off unless
-  // MODERNGEKKO_SAVE_STATE_AT_SKIP names a file to write.
-  std::jthread bench_state_thread;
-  if (const char* bench_state = std::getenv("MODERNGEKKO_SAVE_STATE_AT_SKIP")) {
-    bench_state_thread =
-        std::jthread([path = std::string(bench_state)](std::stop_token stop) {
-          while (!stop.stop_requested()) {
-            if (dolvm_bridge_bench_at_skip()) {
-              State::SaveAs(Core::System::GetInstance(), path);
-              std::fprintf(stderr, "[dolvm-bench] savestate written to %s\n",
-                           path.c_str());
-              return;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-          }
-        });
-  }
-  // Wall-clock sibling of the above, for scenes that no bench window names:
   // "boot, wait, and write a state" is how a menu or an attract-mode scene
   // becomes reloadable. Chasing a miscompile means running the same scene
   // dozens of times, and a two-minute boot per attempt is the difference
@@ -545,7 +473,6 @@ RuntimeRunResult Runtime::Run() {
     });
   }
   m_impl->platform->MainLoop();
-  bench_state_thread.request_stop();
   timed_state_thread.request_stop();
   title_thread.request_stop();
   if (title_thread.joinable())

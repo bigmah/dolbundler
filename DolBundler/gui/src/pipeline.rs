@@ -18,8 +18,8 @@ pub enum Msg {
     Finished(bool),
 }
 
-/// The four-step disc pipeline. `backend` is what the DOL is recompiled to:
-/// `c` for native code, `vm` for DolVM bytecode the runtime interprets.
+/// The four-step disc pipeline. `backend` is how the DOL is recompiled to
+/// native code: `c` through the host C compiler, `llvm` straight to objects.
 pub fn run(recompgc: PathBuf, image: PathBuf, backend: String, tx: UnboundedSender<Msg>) {
     run_args(
         recompgc,

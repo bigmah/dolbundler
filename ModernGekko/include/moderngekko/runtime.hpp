@@ -16,23 +16,16 @@ struct ModuleSource
   enum class Kind
   {
     None,
+    // A shared library opened at run time.
     DynamicPath,
+    // A static module already linked into this executable. The only form iOS
+    // can use: nothing is opened and nothing is mapped executable after the
+    // bundle is signed.
     AttachedDescriptor,
-    // A .dvm: the same recompilation, lowered to bytecode instead of machine
-    // code, and interpreted rather than jumped into. No shared library is
-    // opened and nothing is mapped executable.
-    BytecodePath,
   };
 
   static ModuleSource DynamicPath(std::filesystem::path path);
   static ModuleSource AttachedDescriptor(const ModernGekkoModuleDesc* descriptor);
-  static ModuleSource BytecodePath(std::filesystem::path path);
-
-  // True when `path` names a bytecode module rather than a native one.
-  static bool IsBytecodePath(const std::filesystem::path& path);
-
-  // BytecodePath for a .dvm, DynamicPath for anything else.
-  static ModuleSource ForPath(std::filesystem::path path);
 
   Kind kind = Kind::None;
   std::filesystem::path path;

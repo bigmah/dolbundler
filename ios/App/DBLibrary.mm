@@ -3,6 +3,9 @@
 #import "DBLibrary.h"
 
 #include "dolbundler_core.h"
+// For db_has_native_module(): whether a disc can be played is a property of
+// how the app was linked, not of anything the import wrote.
+#include "dolbundler_run.h"
 
 @implementation DBGameEntry
 @end
@@ -77,9 +80,8 @@
     DBGameEntry* entry = [[DBGameEntry alloc] init];
     entry.discID = discID;
     entry.gameRoot = @(game.game_root);
-    entry.modulePath = @(game.module_path);
     entry.extractedBytes = [self directorySize:entry.gameRoot];
-    entry.moduleStale = !db_module_is_current(&game);
+    entry.playable = db_has_native_module(game.disc_id) != 0;
 
     // The disc header's title is not kept anywhere after import, so it is
     // cached beside the game rather than re-read from an ISO that may be gone.
@@ -123,9 +125,6 @@ void ProgressBridge(DBStage stage, const char* detail, void* ctx)
     break;
   case DB_STAGE_EXTRACTING:
     text = @"Extracting disc";
-    break;
-  case DB_STAGE_RECOMPILING:
-    text = @"Recompiling to bytecode";
     break;
   case DB_STAGE_DONE:
     text = @"Done";
@@ -171,22 +170,6 @@ void ProgressBridge(DBStage stage, const char* detail, void* ctx)
   return nil;
 }
 
-- (BOOL)rebuildModuleForGame:(DBGameEntry*)entry
-                    progress:(void (^)(NSString*))progress
-                       error:(NSString**)error
-{
-  DBGame game;
-  db_paths_for(_libraryDirectory.UTF8String, entry.discID.UTF8String, &game);
-  snprintf(game.title, sizeof(game.title), "%s", entry.title.UTF8String);
-  char err[512] = {0};
-  const int ok = db_rebuild_module(&game, ProgressBridge, (__bridge void*)progress, err,
-                                   sizeof(err));
-  if (!ok && error)
-    *error = @(err);
-  [self reload];
-  return ok != 0;
-}
-
 - (BOOL)deleteGame:(DBGameEntry*)entry error:(NSString**)error
 {
   NSFileManager* fm = NSFileManager.defaultManager;
@@ -199,10 +182,6 @@ void ProgressBridge(DBStage stage, const char* detail, void* ctx)
       *error = fsError.localizedDescription ?: @"Could not delete the extracted game.";
     return NO;
   }
-  // A module without its game root is useless, but losing it is not fatal:
-  // reload() keys off the game root, so a leftover .dvm just wastes space.
-  [fm removeItemAtPath:entry.modulePath error:nil];
-
   [self reload];
   return YES;
 }

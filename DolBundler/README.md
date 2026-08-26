@@ -65,8 +65,7 @@ Four steps run, with live output in the console pane:
 1. **Extract** the disc into `~/.local/share/moderngekko/games/<DISC_ID>`
 2. **Read** the disc header for the game's name, ID, and platform
 3. **Recompile** the DOL to a native `.dylib`, cached under
-   `~/.cache/moderngekko/modules/<DISC_ID>/` — or to a `.dvm` the runtime
-   interprets, see [Recompiler](#recompiler)
+   `~/.cache/moderngekko/modules/<DISC_ID>/` — see [Recompiler](#recompiler)
 4. **Add** it to the library, with its banner art
 
 That is all it takes to play. Building `~/Applications/<Game Name>.app` is a
@@ -86,21 +85,13 @@ with until you add it again.
 
 | | |
 |---|---|
-| **Bytecode (interpreted)** | PowerPC → DolVM. Seconds, because nothing is compiled — the runtime interprets the result instead. This is the default. |
-| **Native code** | PowerPC → C → arm64. A few minutes of compiling per game, and full speed. |
+| **Native code (via C)** | PowerPC → C → arm64, through the host compiler. This is the default, and the reference the other backend is checked against. |
+| **Native code (via LLVM)** | PowerPC → DolIR → arm64 objects, in process. The path an iOS build uses, where a module is linked into the app before it is signed. |
 
-Bytecode exists because some hosts may not run generated machine code at all:
-an App Store binary may not create executable pages or load code it did not
-ship with, which rules the native path out on iOS however the recompilation is
-packaged. Everything else is the same — same recompiler, same analysis, same
-runtime, same coverage and self-modifying-code checks. It is only slower to
-play, by an amount that depends on the game: measured against the Gekko's
-486 MHz with a window open, Super Smash Bros Melee runs at full speed, The
-SpongeBob SquarePants Movie at about 0.95x and Mario Party 4 at about 0.87x,
-where native is at the frame limiter for all three.
-
-It is also the quickest way to find out whether a disc recompiles and boots at
-all, since it takes seconds rather than minutes.
+Both take a few minutes of compiling per game and play at full speed. They
+share everything before codegen — same frontend, same analysis, same coverage
+and self-modifying-code checks — so the choice is how the machine code is
+produced, not what is recompiled.
 
 The game then sits in the library with its banner art, decoded from the disc's
 own `opening.bnr`. Per game:

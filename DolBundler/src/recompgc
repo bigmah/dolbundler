@@ -3,11 +3,10 @@
 # RecompGC - turn a GameCube/Wii disc image into a native macOS app.
 #
 #   1. extract the disc with Dolphin's DiscIO (ModernGekko --extract)
-#   2. statically recompile its DOL (moderngekko-port build) - to native arm64,
-#      or, with --backend vm, to DolVM bytecode the runtime interprets
+#   2. statically recompile its DOL (moderngekko-port build) to native arm64
 #   3. emit a double-clickable .app that runs the result
 #
-# Usage: recompgc [--porcelain] [--app] [--no-open] [--backend vm|c]
+# Usage: recompgc [--porcelain] [--app] [--no-open] [--backend c|llvm]
 #                 <disc-image> [more images...]
 #        recompgc play     --disc-id <id> --game-root <dir> --module <lib> --title <s>
 #                          [--graphics <backend>] [--audio <backend>]
@@ -21,13 +20,12 @@
 # ~/Applications. `play` and `make-app` are what the window calls for an
 # already-recompiled game.
 #
-# --backend picks what the DOL is recompiled to. `vm` is the default: DolVM
-# bytecode, which takes seconds because nothing is compiled - the runtime
-# interprets it. It is the arm of the pipeline an iOS build has to use, because
-# an App Store binary may not generate or load executable code, and it is the
-# one to reach for while working on the interpreter. `--backend c` opts into
-# native code: PowerPC to C to native arm64, a few minutes of compiling per
-# game, and still the faster of the two to play.
+# --backend picks how the DOL is recompiled. Both produce native arm64 and take
+# a few minutes per game. `c` is the default and the reference: PowerPC to C to
+# native, through the host compiler. `llvm` goes straight from DolIR to Mach-O
+# objects in process, which is the path an iOS build uses - a module is linked
+# into the app before it is signed, because iOS will not map a page executable
+# without a valid signature behind it.
 #
 # --graphics and --audio override the defaults from toolchain.conf for one
 # launch; the window passes whatever the game's settings resolved to. Everything
@@ -71,7 +69,7 @@ IMAGES=()
 # Subcommand fields, unused by the pipeline.
 ARG_DISC_ID=''; ARG_GAME_ROOT=''; ARG_MODULE=''; ARG_TITLE=''; ARG_PLATFORM=''
 ARG_GRAPHICS=''; ARG_AUDIO=''
-ARG_BACKEND=vm
+ARG_BACKEND=c
 DRIVER_ACTION=status; ARG_PIPE=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -115,8 +113,8 @@ ok()    { printf '%s    %s%s\n' "$green" "$*" "$off"; }
 die()   { emit "fail $*"; printf '\n%serror: %s%s\n' "$red" "$*" "$off" >&2; exit 1; }
 
 case "$ARG_BACKEND" in
-  c|vm) ;;
-  *) echo "unknown backend: $ARG_BACKEND (expected vm or c)" >&2; exit 2 ;;
+  c|llvm) ;;
+  *) echo "unknown backend: $ARG_BACKEND (expected c or llvm)" >&2; exit 2 ;;
 esac
 
 [ -f "$CONF" ] || die "missing $CONF; re-run DolBundler/build.sh"
@@ -313,19 +311,6 @@ if [ "$MODE" = play ]; then
   # instead of erroring.
   audio_args=()
   [ -n "$AUDIO_BACKEND" ] && audio_args=(--audio "$AUDIO_BACKEND")
-  # A bytecode module is tied to the interpreter that was built with it: the
-  # runtime refuses one from an older recompiler rather than misread it. The
-  # library remembers the path it was built at, so ask the port tool for the
-  # current one instead -- a cache hit when nothing changed, a rebuild in
-  # seconds when the recompiler did. Native modules are left alone; they are
-  # minutes to rebuild and their ABI has not moved.
-  case "$ARG_MODULE" in
-    *.dvm)
-      current="$("$MG_BUILD/moderngekko-port" build "$ARG_GAME_ROOT" --backend vm 2>/dev/null \
-        | grep -E '^(built module|cache hit): ' | tail -1 | sed 's/^[^:]*: "//; s/"$//')"
-      [ -f "$current" ] && ARG_MODULE="$current"
-      ;;
-  esac
   exec "$MG_BUILD/moderngekko-run" \
     --game "$ARG_GAME_ROOT" \
     --module "$ARG_MODULE" \
@@ -392,12 +377,10 @@ process_one() {
   info platform "$platform"
 
   local module_suffix=.dylib
-  if [ "$ARG_BACKEND" = vm ]; then
-    module_suffix=.dvm
-    step 3 4 "Recompiling $name to bytecode"
-    note "PowerPC -> DolVM. Seconds, not minutes: nothing is compiled, the runtime interprets it."
+  step 3 4 "Recompiling $name to native code"
+  if [ "$ARG_BACKEND" = llvm ]; then
+    note "PowerPC -> DolIR -> native, in process. The first pass takes a few minutes; later ones are cached."
   else
-    step 3 4 "Recompiling $name to native code"
     note "PowerPC -> C -> native. The first pass takes a few minutes; later ones are cached."
   fi
   local port_log; port_log="$(mktemp -t recompgc-port)"
@@ -409,16 +392,10 @@ process_one() {
   [ -f "$module" ] || die "the recompiler did not report a module path"
   info module "$module"
   info backend "$ARG_BACKEND"
-  if [ "$ARG_BACKEND" = vm ]; then
-    ok "$(du -h "$module" | cut -f1 | tr -d ' ') bytecode module"
-  else
-    ok "$(du -h "$module" | cut -f1 | tr -d ' ') native module"
-  fi
+  ok "$(du -h "$module" | cut -f1 | tr -d ' ') native module"
 
   # Also park it where a bare `moderngekko-run --game ...` looks, so the game is
-  # playable without going through the generated app. The runner prefers a
-  # native module when both are sitting there, so a vm build leaves any earlier
-  # native one alone rather than shadowing it.
+  # playable without going through the generated app.
   mkdir -p "$USER_DIR/StaticRecompModules"
   cp -f "$module" "$USER_DIR/StaticRecompModules/g${disc_id}_recomp${module_suffix}"
 

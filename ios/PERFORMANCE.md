@@ -1,11 +1,22 @@
 # What is actually slow on iOS
 
+> **Read this first (2026-08-26).** The DolVM bytecode path was removed from
+> the tree on 2026-08-26; the app now runs only games recompiled to native
+> arm64 on a Mac and linked in before signing. Everything below is kept as the
+> measurement record that led there, and much of it was written while the
+> interpreter was still the shipping architecture. Where a conclusion has since
+> been overturned it is marked inline with a dated note; where it says "the
+> bytecode path" or "the interpreter", read it as history. The *method*
+> sections -- how to measure speed on a device, and the traps around it -- are
+> still current and still the reason this file exists.
+
 Measured 2026-08-21 on an iPhone 15 Pro Max against Disney's Extreme Skate
-Adventure (GEXE52). This is a record of an experiment that has since been
-reverted: for a week the app could be built with games compiled to native arm64
-code instead of DolVM bytecode, to find out how much of the speed on a phone is
-the interpreter's fault. The answer turned out to be "less than expected", and
-the parts worth keeping are written down here rather than in the build.
+Adventure (GEXE52). This is a record of the first native-code experiment: for a
+week the app could be built with games compiled to native arm64 instead of
+DolVM bytecode, to find out how much of the speed on a phone was the
+interpreter's fault. The answer at the time was "less than expected", it was
+reverted on 2026-08-22, and it was rebuilt and kept a few days later once the
+LLVM backend could emit iPhoneOS objects directly.
 
 ## How to measure
 
@@ -84,6 +95,11 @@ settings are already at their fast values -- internal resolution 1x,
 
 ## What this means for the bytecode path
 
+> **Superseded 2026-08-26.** The dispatch-gate gap named below was closed: the
+> LLVM backend's generated loop guards read the chassis gate directly through
+> `dolrecomp_native_gate`, so the native path no longer lacks the optimisation
+> this section says it lacks.
+
 Very little of it transfers, and that is the useful conclusion.
 
 The one real win -- cutting chassis dispatches -- **DolVM already does far
@@ -115,14 +131,20 @@ interpreter already has.
 
 ## Why the AOT build is not the answer anyway
 
-Even setting speed aside, it could not ship. iOS will not map a page executable
-unless it is backed by a valid code signature: generating code on the phone
-needs the `dynamic-codesigning` entitlement, which is WebKit's, and a dylib
-produced on the phone could not be signed by anything on it. Native code has to
-be compiled *and signed* before install, so the app can only ever run games it
-was built with -- which is neither the emulator that guideline 4.7 permits nor
-something this project can distribute. The bytecode path exists for that reason
-and remains the shipping architecture.
+> **Overturned 2026-08-26.** The constraint below is still exactly true, and it
+> is still the OS rather than App Store policy. What changed is the conclusion
+> drawn from it: the project accepted "the app can only ever run games it was
+> built with" as the architecture instead of treating it as disqualifying, and
+> the bytecode path was removed. The distribution question this paragraph
+> raises is open, not answered.
+
+Even setting speed aside, it could not ship *as a general-purpose emulator*.
+iOS will not map a page executable unless it is backed by a valid code
+signature: generating code on the phone needs the `dynamic-codesigning`
+entitlement, which is WebKit's, and a dylib produced on the phone could not be
+signed by anything on it. Native code has to be compiled *and signed* before
+install, so the app can only ever run games it was built with -- which is not
+the user-supplies-the-ROM emulator that guideline 4.7 permits.
 
 ---
 

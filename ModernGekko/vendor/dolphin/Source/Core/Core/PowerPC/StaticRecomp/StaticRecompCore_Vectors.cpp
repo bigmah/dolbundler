@@ -9,7 +9,7 @@
 // a phone does not (~9% of the emulation thread on an iPhone 15 Pro Max,
 // 164K exceptions per 24e9 cycles, ~21 interpreted instructions each).
 //
-// The stub is provable the way the DolVM SDK stand-ins are proved: every
+// The stub is provable the way every SDK stand-in here is proved: every
 // instruction word compared against a stored pattern. Across four titles
 // spanning both SDK generations the 38-word template is bit-identical except
 // exactly two kinds of word, both verified structurally and used as data:

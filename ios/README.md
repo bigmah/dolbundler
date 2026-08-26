@@ -1,13 +1,19 @@
 # DolBundler for iOS
 
-A GameCube disc goes in, the app recompiles it to DolVM bytecode on the device,
-and it shows up in a library you tap to play. No Mac in the loop, and nothing
-the app produces is ever mapped executable.
+A GameCube disc is recompiled to native arm64 on a Mac and linked into the app
+before it is signed. On the phone the disc goes in, gets extracted, and shows up
+in a library you tap to play against the module already inside the binary.
 
 ```
-   .iso  ──▶  extract  ──▶  recompile  ──▶  .dvm  ──▶  ▶ play
-              (DolRecomp)    (DolVM)                    (ModernGekko + Metal)
+   on a Mac:   main.dol ──▶ DolRecomp --backend llvm ──▶ .o ──▶ link ──▶ sign
+   on the phone:  .iso ──▶ extract ──▶ game root ──▶ ▶ play
+                          (DolRecomp)                (ModernGekko + Metal)
 ```
+
+Nothing is generated or mapped executable at runtime: the guest code is part of
+the signed binary, and the phone only ever reads the disc's data. That is also
+why a disc this build was not compiled for can be imported and stored but not
+played -- the library says so rather than booting into something unusably slow.
 
 ## Building
 
@@ -28,12 +34,10 @@ Device Management**.
 Requirements: Xcode 15+, an iOS 17+ device with an A-series chip. Built and
 tested against an iPhone 15 Pro Max.
 
-### Developer-only LLVM AOT build
+### Building a game into the app
 
-The normal app remains the DolVM build described below. For a private,
-pre-signed native experiment, build the host recompiler with the pinned LLVM
-20 wrapper, emit iPhoneOS objects on the Mac, and embed them before Xcode signs
-the app:
+Build the host recompiler with the pinned LLVM 20 wrapper, emit iPhoneOS objects
+on the Mac, and embed them before Xcode signs the app:
 
 ```sh
 ./ios/build-dolrecomp-llvm20.sh
@@ -43,7 +47,7 @@ export DOLRECOMP_LLVM_CPU=apple-a16
 export DOLRECOMP_LLVM_CACHE=/tmp/dolbundler-gexe52-llvm-cache
 
 build-dolrecomp-llvm20/dolrecomp \
-  --gamecube --backend llvm --game-id GEXE52 \
+  --gamecube --backend llvm \
   /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios
 cp /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios/generated/main.dol
 
@@ -53,14 +57,14 @@ export DOLBUNDLER_TEAM=<your Apple Developer team ID>
 ./ios/build.sh --install
 ```
 
-Several AOT titles can coexist in one signed app. Give each generated module a
+Several titles can coexist in one signed app. Give each generated module a
 unique C-identifier prefix while recompiling, then pass all `GAME_ID=directory`
 pairs to the iOS build:
 
 ```sh
 export DOLRECOMP_LLVM_SYMBOL_PREFIX=gG4QE01_
 build-dolrecomp-llvm20/dolrecomp \
-  --gamecube --backend llvm --game-id G4QE01 \
+  --gamecube --backend llvm \
   /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios
 cp /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios/generated/main.dol
 
@@ -104,9 +108,11 @@ game console emulators, including ones that run user-provided games, since
 April 2024.
 
 **Nothing here generates executable code.** Guideline 2.5.2 forbids an app from
-generating or running code. DolBundler never does: `dolrecomp` lowers the
-disc's PowerPC to *bytecode*, and `dolvm_interp.c` reads that bytecode as data.
-There is no JIT and no executable memory. Verified against the built binary:
+generating or running code, or loading code it did not ship with. DolBundler
+does neither: every instruction the guest runs was compiled on a Mac and signed
+as part of the binary, and the only thing the phone produces is the extracted
+disc's *data*. There is no JIT, no `dlopen`, and no executable memory allocated
+at runtime. Verified against the built binary:
 
 ```sh
 APP=build-ios/Release-iphoneos/DolBundler.app/DolBundler
@@ -139,13 +145,13 @@ The macOS pipeline is four binaries wired together by a shell script
 bash script that `exec`s `moderngekko-run`. None of that survives on iOS.
 
 **No subprocesses.** iOS marks `system()` unavailable at compile time and has no
-`fork`/`exec` at all. Both halves of the pipeline are linked into the app and
-called in-process instead:
+`fork`/`exec` at all. What remains of the pipeline on the phone is linked into
+the app and called in-process instead:
 
 | macOS | iOS |
 |---|---|
 | `ModernGekko --extract` | `disc_extract_gamecube()` |
-| `moderngekko-port` → `popen(dolrecomp)` | `emit_dol_split(..., BACKEND_VM, ...)` |
+| `moderngekko-port` → `popen(dolrecomp)` | done on the Mac, linked in before signing |
 | launcher script → `exec moderngekko-run` | `Runtime::Create()` / `Run()` |
 
 `ios/bridge/dolbundler_core.h` is the import half, `dolbundler_run.h` the play
@@ -206,7 +212,7 @@ left ducked.
 
 | Dropped | Reason |
 |---|---|
-| All JIT backends | `ENABLE_GENERIC`; the whole point of DolVM |
+| All JIT backends | `ENABLE_GENERIC`; guest code is AOT-compiled and signed, so nothing needs to be generated |
 | cubeb (audio) | The vendored copy declares macOS-only CoreAudio globals at file scope with no iOS guard -- 164 compile errors spread through the file, which is a fork of a third-party library rather than a patch. Replaced by `IOSSoundStream`, a RemoteIO audio unit. |
 | libusb, hidapi | Both need IOKit. The devices they drive can't attach to an iPhone anyway |
 | Quartz input | Carbon key codes and CoreGraphics mouse events |
@@ -254,53 +260,43 @@ DEVICECTL_CHILD_DOLBUNDLER_AUTOPLAY=GLME01 xcrun devicectl device process launch
 Crash reports land in `~/Library/Logs/DiagnosticReports/DolBundler-*.ips`.
 
 One more loop worth knowing: a macOS build with `ENABLE_GENERIC=ON` runs the
-same JIT-less StaticRecomp/DolVM path against the same `.dvm`, in seconds, with
-a debugger. It will not reproduce anything iOS-specific, but it tells you
-straight away whether the interpreter or the module is at fault.
+same JIT-less StaticRecomp path against a module recompiled for the Mac, with a
+debugger. It will not reproduce anything iOS-specific, but it tells you straight
+away whether the chassis or the generated code is at fault.
 
 ## Known limitations
 
-**Speed is the real constraint, not the port.** Measured on an M4 Pro (cpu
-time over each title's first six billion guest cycles), DolVM runs Mario Party
-4 at 3.80× realtime, the SpongeBob movie game at 12.36×, Disney's Extreme Skate
-Adventure at 1.43× and Melee at 1.41×. An A17 Pro core has roughly three
-quarters of that single-thread throughput and throttles under sustained load.
+**Only games built into this app can be played.** A module is generated on a
+Mac and linked in before signing, so an imported disc the build does not cover
+shows in the library as "not in this build" and refuses to boot. That is not a
+policy choice: iOS will not map a page executable unless a valid code signature
+backs it, which needs the `dynamic-codesigning` entitlement (WebKit's), and a
+dylib produced on the phone could not be signed by anything on it -- so `dlopen`
+refuses it too. "Just AOT-compile any ISO on the phone" cannot be made to work.
 
-Those are boot windows, and how much of a boot is spent waiting on hardware
-varies enormously by title -- which is also where most of the 2026-08-22 gain
-came from. Over a fixed *gameplay* window Disney skate went from 1.055× to
-2.92×, because the game's idle thread polls the command processor's status
-register for 45% of every frame and the interpreter now recognises that as a
-wait. `ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says how, where
-the rest of the time goes, and what each change bought.
-
-[`PERFORMANCE.md`](PERFORMANCE.md) is the device-side companion to that: how to
+**Speed.** [`PERFORMANCE.md`](PERFORMANCE.md) is the device-side record: how to
 measure emulation speed on a phone without a console attached, and what a
 week's worth of measuring found -- including which plausible-sounding fixes
-(dual core, the DSP, graphics settings) are already done or worth nothing.
+(dual core, the DSP, graphics settings) are already done or worth nothing. Dual
+core in particular is worth **-15% on the phone** and +19% on a desktop, so the
+desktop does not predict the phone here.
 
-Three things in the build matter for it and are easy to lose: the interpreter
-is compiled with one indirect branch per handler (`-mllvm -tail-dup-*-size`),
-with LTO over the cpu helpers (and the same `-mllvm` flags handed to the
-linker, or LTO undoes the first), and with `-mcpu=apple-a16` rather than
-`native`, which on a cross build would name whatever Mac did the compiling.
-All three live in `ModernGekko/CMakeLists.txt` under `moderngekko_dolvm`.
+Two things in the build matter and are easy to lose: GXRuntime's guest CPU
+helpers are compiled with `-ffp-contract=off -fno-fast-math` so a lane computed
+in a helper matches one the generated code inlined, and with `-mcpu=apple-a16`
+rather than `native`, which on a cross build would name whatever Mac did the
+compiling. Both live in `ModernGekko/CMakeLists.txt` under `moderngekko_gxcpu`,
+and module-template applies the same two flags to the generated objects.
 
-**A module from an older build is rebuilt, not refused.** The bytecode ABI
-changes as the interpreter does, and the library checks each `.dvm`'s header
-on load. A stale one shows as "needs a quick update" and is recompiled from
-the extracted disc the next time it is played -- seconds, since nothing is
-extracted again.
-
-**Memory during import.** Peak RSS scales at roughly 1.5 KB per guest
+**Memory during recompilation.** Peak RSS scales at roughly 1.5 KB per guest
 instruction: 423 MB for Mario Party 4, 796 MB for Luigi's Mansion, 1.44 GB for
-Melee. An 8 GB device handles all three; smaller devices will be tight on the
-largest games, because the whole DolIR is held in memory at once.
+Melee, because the whole DolIR is held in memory at once. This is now the Mac's
+problem rather than the phone's.
 
 **Storage.** A disc costs its ISO plus roughly the same again extracted —
 about 2.7 GB for Melee. The importer refuses to start with under 3 GB free.
-Deleting the `.iso` after import is safe; the game root and `.dvm` are what
-the app plays from.
+Deleting the `.iso` after import is safe; the extracted game root is what the
+app plays from.
 
 **GameCube only.** Wii discs need the `wit` bridge to extract, which cannot run
 here.

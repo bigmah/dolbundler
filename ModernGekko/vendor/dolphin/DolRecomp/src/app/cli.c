@@ -15,8 +15,7 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -jN                            Use N worker jobs for split C output (e.g. -j14)\n");
     fprintf(stderr, "  --cpu gekko|broadway|espresso  Select CPU profile (default: broadway)\n");
-    fprintf(stderr, "  --backend c|llvm|vm            Select generated-code backend (default: c)\n");
-    fprintf(stderr, "  --game-id <id>                 Disc ID stamped into a --backend vm module\n");
+    fprintf(stderr, "  --backend c|llvm               Select generated-code backend (default: c)\n");
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
@@ -154,23 +153,9 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
-        if (strcmp(arg, "--game-id") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "error: --game-id needs a disc id\n");
-                return 0;
-            }
-            opts->game_id = argv[++i];
-            continue;
-        }
-
-        if (strncmp(arg, "--game-id=", 10) == 0) {
-            opts->game_id = arg + 10;
-            continue;
-        }
-
         if (strcmp(arg, "--backend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "error: --backend needs c, llvm or vm\n");
+                fprintf(stderr, "error: --backend needs c or llvm\n");
                 return 0;
             }
             arg = argv[++i];
@@ -178,8 +163,6 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 opts->backend = DOLRECOMP_BACKEND_C;
             else if (ascii_case_equal(arg, "llvm"))
                 opts->backend = DOLRECOMP_BACKEND_LLVM;
-            else if (ascii_case_equal(arg, "vm"))
-                opts->backend = DOLRECOMP_BACKEND_VM;
             else {
                 fprintf(stderr, "error: unknown backend '%s'\n", arg);
                 return 0;
@@ -193,8 +176,6 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 opts->backend = DOLRECOMP_BACKEND_C;
             else if (ascii_case_equal(name, "llvm"))
                 opts->backend = DOLRECOMP_BACKEND_LLVM;
-            else if (ascii_case_equal(name, "vm"))
-                opts->backend = DOLRECOMP_BACKEND_VM;
             else {
                 fprintf(stderr, "error: unknown backend '%s'\n", name);
                 return 0;

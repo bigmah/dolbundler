@@ -159,7 +159,7 @@ void StaticRecompCore::Init()
   m_poll_yields = 0;
   for (PollSite& site : m_poll_sites)
     site = {};
-  const char* vector_hle = std::getenv("DOLVM_VECTOR_HLE");
+  const char* vector_hle = std::getenv("STATICRECOMP_VECTOR_HLE");
   m_vector_stubs_enabled = !vector_hle || std::strcmp(vector_hle, "0") != 0;
   ResetVectorStubs();
   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");

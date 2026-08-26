@@ -460,7 +460,7 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
   // Guard the whole native call chain, not one generated function.  Without a
   // published chassis gate (host execution tests and standalone modules), keep
   // the conservative fixed allowance.  An attached iOS module instead runs to
-  // the end of the chassis's live slice, exactly as DolVM does.
+  // the end of the chassis's live slice.
   Value *hasGate = builder_.CreateAnd(
       builder_.CreateIsNotNull(gate_chunk_open_),
       builder_.CreateAnd(builder_.CreateIsNotNull(gate_budget_),

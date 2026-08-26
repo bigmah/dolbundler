@@ -2,18 +2,18 @@
 
 #import <Foundation/Foundation.h>
 
-// One imported disc: the extracted game plus the bytecode module built from it.
+// One imported disc: the extracted game, and whether this build can play it.
 @interface DBGameEntry : NSObject
 @property(nonatomic, copy) NSString* discID;
 @property(nonatomic, copy) NSString* title;
 @property(nonatomic, copy) NSString* gameRoot;
-@property(nonatomic, copy) NSString* modulePath;
 // Bytes on disk for the extracted game, so the UI can explain where the
 // storage went. A GameCube disc costs well over a gigabyte extracted.
 @property(nonatomic, assign) unsigned long long extractedBytes;
-// The module was built by an older version of the app and has to be rebuilt
-// before this one can play it. Seconds, not the minutes an import takes.
-@property(nonatomic, assign) BOOL moduleStale;
+// This build was linked against a native module for this disc. Games are
+// recompiled on a Mac and linked in before signing, so an imported disc the
+// build does not cover can be stored and deleted but not played.
+@property(nonatomic, assign) BOOL playable;
 @end
 
 @interface DBLibrary : NSObject
@@ -36,11 +36,6 @@
 - (DBGameEntry*)importDiscAtPath:(NSString*)path
                         progress:(void (^)(NSString* stage))progress
                            error:(NSString**)error;
-
-// Rebuild a stale module. Blocking: call it off the main thread.
-- (BOOL)rebuildModuleForGame:(DBGameEntry*)entry
-                    progress:(void (^)(NSString* stage))progress
-                       error:(NSString**)error;
 
 - (BOOL)deleteGame:(DBGameEntry*)entry error:(NSString**)error;
 

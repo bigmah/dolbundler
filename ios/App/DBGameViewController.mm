@@ -229,8 +229,8 @@ CGFloat GameDrawableScale(CGSize bounds)
   // scheduler treat it as background work shows up immediately as stutter.
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
     char err[512] = {0};
-    const int ok = db_run_game(game.gameRoot.UTF8String, game.modulePath.UTF8String,
-                               userDir.UTF8String, game.title.UTF8String, err, sizeof(err));
+    const int ok = db_run_game(game.gameRoot.UTF8String, userDir.UTF8String,
+                               game.title.UTF8String, err, sizeof(err));
 
     NSString* message = ok ? nil : @(err);
     dispatch_async(dispatch_get_main_queue(), ^{

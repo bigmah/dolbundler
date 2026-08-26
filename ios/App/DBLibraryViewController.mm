@@ -81,14 +81,13 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   {
     if (![entry.discID isEqualToString:wanted])
       continue;
-    // The same two paths a tap takes. A module left over from an older
-    // bytecode format has to be rebuilt first, and that is exactly the state
-    // an autoplay run is usually launched in -- the interpreter has just
-    // changed, which is why the run is happening at all.
-    if (entry.moduleStale)
-      [self rebuildModuleThenPlay:entry];
-    else
-      [self play:entry];
+    if (!entry.playable)
+    {
+      NSLog(@"DOLBUNDLER_AUTOPLAY=%@ but this build has no native module for it",
+            wanted);
+      return;
+    }
+    [self play:entry];
     return;
   }
   NSLog(@"DOLBUNDLER_AUTOPLAY=%@ but no such game in the library", wanted);
@@ -207,7 +206,7 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
                                  [NSByteCountFormatter
                                      stringFromByteCount:(long long)entry.extractedBytes
                                               countStyle:NSByteCountFormatterCountStyleFile],
-                                 entry.moduleStale ? @"  ·  needs a quick update" : @""];
+                                 entry.playable ? @"" : @"  ·  not in this build"];
   cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
   return cell;
 }
@@ -217,9 +216,14 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   [tableView deselectRowAtIndexPath:indexPath animated:YES];
   DBGameEntry* entry = DBLibrary.shared.games[indexPath.row];
 
-  if (entry.moduleStale)
+  if (!entry.playable)
   {
-    [self rebuildModuleThenPlay:entry];
+    [self showError:[NSString stringWithFormat:
+                                  @"This build of DolBundler has no native module for %@. "
+                                  @"Games are recompiled on a Mac and linked into the app "
+                                  @"before it is signed, so the disc has to be built in.",
+                                  entry.discID]
+              title:@"Cannot play this game"];
     return;
   }
   [self play:entry];
@@ -230,53 +234,6 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
   DBGameViewController* game = [[DBGameViewController alloc] initWithGame:entry];
   game.modalPresentationStyle = UIModalPresentationFullScreen;
   [self presentViewController:game animated:YES completion:nil];
-}
-
-// A module built by an older version of the app is recompiled in place before
-// the game starts. The extracted disc is untouched, so this takes seconds.
-- (void)rebuildModuleThenPlay:(DBGameEntry*)entry
-{
-  _progressAlert = [UIAlertController alertControllerWithTitle:@"Updating"
-                                                       message:@"Recompiling to bytecode\n\n"
-                                                preferredStyle:UIAlertControllerStyleAlert];
-  [self presentViewController:_progressAlert animated:YES completion:nil];
-
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    NSString* error = nil;
-    const BOOL ok = [DBLibrary.shared
-        rebuildModuleForGame:entry
-                    progress:^(NSString* stage) {
-                      dispatch_async(dispatch_get_main_queue(), ^{
-                        self->_progressAlert.message = [NSString
-                            stringWithFormat:@"%@\n\nThis version of the app uses a newer "
-                                             @"bytecode format, so the game is being "
-                                             @"recompiled once.\n",
-                                             stage];
-                      });
-                    }
-                       error:&error];
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-      [self->_progressAlert dismissViewControllerAnimated:YES
-                                               completion:^{
-                                                 self->_progressAlert = nil;
-                                                 [self refresh];
-                                                 if (!ok)
-                                                 {
-                                                   [self showError:error title:@"Update failed"];
-                                                   return;
-                                                 }
-                                                 for (DBGameEntry* fresh in DBLibrary.shared.games)
-                                                 {
-                                                   if ([fresh.discID isEqualToString:entry.discID])
-                                                   {
-                                                     [self play:fresh];
-                                                     return;
-                                                   }
-                                                 }
-                                               }];
-    });
-  });
 }
 
 - (UISwipeActionsConfiguration*)tableView:(UITableView*)tableView

@@ -151,7 +151,8 @@ private:
   // change the value being tested. Remember repeated identical chassis reads
   // and end the current timing slice after the wait has proved itself. The
   // generated loop guard then leaves at the loop head and polls again next
-  // slice, matching DolVM's conservative poll-spin handling.
+  // slice: a wait that is still waiting costs a slice boundary, never a
+  // wrongly-skipped read.
   void TrackExternalRead(u32 pc, u32 address, u64 value);
   void ResetExternalPollRun();
 

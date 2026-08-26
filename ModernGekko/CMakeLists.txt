@@ -18,17 +18,6 @@ option(MODERNGEKKO_ENABLE_DYNAMIC_MODULES
        "Load game modules through the host dynamic-library API"
        ${MODERNGEKKO_DYNAMIC_MODULES_DEFAULT})
 
-option(MODERNGEKKO_DOLVM_PGO_GENERATE
-    "Instrument the interpreter so a run writes a PGO profile" OFF)
-set(MODERNGEKKO_DOLVM_PGO_PROFILE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/dolvm/dolvm.profdata" CACHE FILEPATH
-    "llvm-profdata file to build the interpreter against; empty to disable")
-option(MODERNGEKKO_DOLVM_SAMPLE
-    "Sample the interpreter and attribute host time to opcodes (implies BENCH and PROFILE)" OFF)
-option(MODERNGEKKO_DOLVM_BENCH
-    "Stop once DOLVM_BENCH_CYCLES guest cycles have been interpreted, reporting the wall time" OFF)
-option(MODERNGEKKO_DOLVM_PROFILE
-    "Count executed DolVM opcodes and print the histogram when a bytecode module closes" OFF)
 option(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME
        "Build the RecompCore/Dolphin production chassis" ON)
 option(MODERNGEKKO_ENABLE_DOLPHIN_TESTS
@@ -193,147 +182,55 @@ add_library(moderngekko_legacy STATIC
 )
 add_library(ModernGekko::LegacyRuntime ALIAS moderngekko_legacy)
 
-# DolRecomp's interpreter half, compiled against the chassis's CPUState rather
-# than the recompiler's own runtime copy of it. That is what lets a .dvm -- a
-# recompilation lowered to bytecode instead of to machine code -- be dispatched
-# through the same module ABI a native module uses.
-#
-# The shim include directory has to come before DolRecomp's own src/: both trees
-# ship a "cpu/cpu.h" and a "common/types.h" under matching include guards, and
-# the chassis needs GXRuntime's of each.
+# GXRuntime's guest CPU helpers, compiled into the host rather than into each
+# module. An embedded static module is linked into an already-built executable,
+# so module-template's RECOMPCORE_MODULE_EMBEDDED path deliberately compiles
+# only cpu_exception.c and resolves cpu.c and the interpreter helpers against
+# this target instead; a dynamic module still carries its own copy. Generated
+# native code calls into these for anything it did not lower itself -- the
+# reference interpreter behind a fallback terminator, and the paired-single
+# lane helpers.
 if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
-    add_library(moderngekko_dolvm STATIC
-        src/runtime/dolvm/dolvm_bridge.c
-        vendor/dolphin/DolRecomp/src/vm/dolvm_module.c
-        vendor/dolphin/DolRecomp/src/vm/dolvm_interp.c
-        vendor/dolphin/DolRecomp/src/vm/dolvm_hle_native.c
+    add_library(moderngekko_gxcpu STATIC
         vendor/dolphin/GXRuntime/src/core/cpu.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter_table.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter_float.c
         vendor/dolphin/GXRuntime/src/core/cpu_interpreter_integer.c
     )
-    target_include_directories(moderngekko_dolvm
-        PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/dolvm"
-        PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/dolvm/shim"
-            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include"
-            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/DolRecomp/src"
-    )
-    set_target_properties(moderngekko_dolvm PROPERTIES
+    target_include_directories(moderngekko_gxcpu
+        PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+    set_target_properties(moderngekko_gxcpu PROPERTIES
         C_STANDARD 11
         C_STANDARD_REQUIRED ON
         C_VISIBILITY_PRESET hidden
     )
     if(NOT MSVC)
-        # The guest's arithmetic is the guest's; the host may not reassociate it.
-        # -fno-stack-protector: the dispatch loop's frame holds a 2 KB register
-        # file, so it gets a guard by default -- a load, a store and a compare
-        # on a function called once per thirty guest instructions.
+        # The guest's arithmetic is the guest's; the host may not reassociate
+        # it. These two match what module-template compiles generated code
+        # with, so a lane computed in a helper and a lane computed inline agree.
         #
         # -mcpu: the host's own core on a native build. A cross build for iOS
         # names the A16 -- the same ARMv8.6 core generation as the A17 Pro the
         # app is tested on, and `native` would quietly pick whatever Mac is
         # doing the building.
         if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            set(_dolvm_cpu -mcpu=apple-a16)
+            set(_gxcpu_arch -mcpu=apple-a16)
         else()
-            set(_dolvm_cpu -mcpu=native)
+            set(_gxcpu_arch -mcpu=native)
         endif()
-        target_compile_options(moderngekko_dolvm PRIVATE
-            -ffp-contract=off -fno-fast-math ${_dolvm_cpu} -fno-stack-protector)
-        # The interpreter is threaded code: every handler ends in its own
-        # indirect branch, so each one gets its own branch-prediction history.
-        # LLVM's tail merger undoes that -- it folds the 180 identical
-        # `load op; load handler; branch` tails into one, and the tail
-        # duplicator that would split them back up refuses once a block has
-        # more than 16 predecessors. Raising the limit keeps one `br` per
-        # handler, which is worth 3-7% of wall clock on real titles. CMake
-        # de-duplicates repeated flags, so each `-mllvm` pair needs SHELL:.
-        target_compile_options(moderngekko_dolvm PRIVATE
-            "SHELL:-mllvm -tail-dup-pred-size=256"
-            "SHELL:-mllvm -tail-dup-succ-size=256")
-        # Link-time optimization over the interpreter and the cpu helpers it
-        # calls: the paired-single arithmetic is a call into cpu_interpreter_
-        # float.c per lane per instruction, and on a title that lives in
-        # paired singles inlining it is worth 3%. The codegen then happens at
-        # link, so the tail-duplication limits have to reach the linker too,
-        # or the per-handler branches are lost again and everything regresses.
-        target_compile_options(moderngekko_dolvm PRIVATE -flto)
-        target_link_options(moderngekko_dolvm INTERFACE -flto
-            "SHELL:-Wl,-mllvm,-tail-dup-pred-size=256"
-            "SHELL:-Wl,-mllvm,-tail-dup-succ-size=256")
-    endif()
-    if(MODERNGEKKO_DOLVM_PROFILE)
-        target_compile_definitions(moderngekko_dolvm PRIVATE DOLVM_PROFILE=1)
-    endif()
-    if(MODERNGEKKO_DOLVM_BENCH)
-        target_compile_definitions(moderngekko_dolvm PRIVATE DOLVM_BENCH=1)
-    endif()
-    # The dispatch loop is one enormous function, and which handler follows
-    # which is the whole question -- exactly what a compiler has to guess at and
-    # a recorded profile does not have to. Worth 6-8% of wall clock, so the
-    # profile ships with the tree: generating one needs a game, and the tree
-    # ships none. Regenerate it after changing the interpreter, or the compiler
-    # quietly falls back to guessing:
-    #
-    #   cmake -DMODERNGEKKO_DOLVM_PGO_GENERATE=ON -DMODERNGEKKO_DOLVM_BENCH=ON .
-    #   cmake --build . --target moderngekko-run
-    #   LLVM_PROFILE_FILE=<game>.profraw DOLVM_BENCH_CYCLES=6000000000 \
-    #       ./moderngekko-run --game <extracted> --module <game>.dvm --headless \
-    #       --graphics Null --audio "No Audio Output"
-    #   xcrun llvm-profdata merge -output=src/runtime/dolvm/dolvm.profdata *.profraw
-    if(MODERNGEKKO_DOLVM_PGO_GENERATE)
-        target_compile_options(moderngekko_dolvm PUBLIC -fprofile-instr-generate)
-        target_link_options(moderngekko_dolvm PUBLIC -fprofile-instr-generate)
-        target_compile_definitions(moderngekko_dolvm PRIVATE DOLVM_PGO_GENERATE=1)
-    elseif(MODERNGEKKO_DOLVM_PGO_PROFILE AND EXISTS "${MODERNGEKKO_DOLVM_PGO_PROFILE}")
-        # A profile is tied to the format its llvm-profdata wrote, so a compiler
-        # that cannot read this one has to build without it rather than fail.
-        include(CheckCSourceCompiles)
-        set(CMAKE_REQUIRED_FLAGS
-            "-fprofile-instr-use=${MODERNGEKKO_DOLVM_PGO_PROFILE}")
-        check_c_source_compiles("int main(void){return 0;}"
-            MODERNGEKKO_DOLVM_PGO_USABLE)
-        unset(CMAKE_REQUIRED_FLAGS)
-        if(MODERNGEKKO_DOLVM_PGO_USABLE)
-            target_compile_options(moderngekko_dolvm PRIVATE
-                "-fprofile-instr-use=${MODERNGEKKO_DOLVM_PGO_PROFILE}"
-                # A profile older than the interpreter costs the speedup, not
-                # correctness, so say so once at configure time rather than
-                # shouting on every translation unit.
-                -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled)
-            # Every object in the library has to be built against the same
-            # profile: LTO refuses to merge modules whose profile summaries
-            # disagree, which is what an incremental build produces when the
-            # profile changes and only the interpreter recompiles. A hash of
-            # the profile in the compile definitions makes a new profile a
-            # new set of flags, which every generator -- Xcode included, which
-            # ignores OBJECT_DEPENDS -- treats as a reason to rebuild all of it.
-            file(SHA256 "${MODERNGEKKO_DOLVM_PGO_PROFILE}" _dolvm_profile_hash)
-            string(SUBSTRING "${_dolvm_profile_hash}" 0 16 _dolvm_profile_hash)
-            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-                "${MODERNGEKKO_DOLVM_PGO_PROFILE}")
-            target_compile_definitions(moderngekko_dolvm PRIVATE
-                "DOLVM_PGO_PROFILE_ID=0x${_dolvm_profile_hash}")
-        else()
-            message(STATUS
-                "DolVM: this compiler cannot read the shipped PGO profile; "
-                "building the interpreter without it")
-        endif()
-    endif()
-    # Sampling deliberately does *not* turn the opcode counters on. Counting is
-    # two global increments per opcode, which is enough to make every handler's
-    # epilogue identical again -- LLVM's tail merger then folds them into one
-    # shared indirect branch, and the profile that comes back describes a build
-    # nobody ships. Turn MODERNGEKKO_DOLVM_PROFILE on as well when the executed
-    # mix is what is wanted; leave it off when the question is where time goes.
-    if(MODERNGEKKO_DOLVM_SAMPLE)
-        target_compile_definitions(moderngekko_dolvm PRIVATE
-            DOLVM_BENCH=1 DOLVM_SAMPLE=1)
+        target_compile_options(moderngekko_gxcpu PRIVATE
+            -ffp-contract=off -fno-fast-math ${_gxcpu_arch} -fno-stack-protector)
+        # Link-time optimization across these and the generated code that calls
+        # them: paired-single arithmetic is a call into cpu_interpreter_float.c
+        # per lane per instruction, and on a title that lives in paired singles
+        # inlining it is worth a few percent. module-template turns IPO on for
+        # the module itself, so both halves reach the linker as bitcode.
+        target_compile_options(moderngekko_gxcpu PRIVATE -flto)
+        target_link_options(moderngekko_gxcpu INTERFACE -flto)
     endif()
     if(NOT WIN32)
-        target_link_libraries(moderngekko_dolvm PRIVATE m)
+        target_link_libraries(moderngekko_gxcpu PRIVATE m)
     endif()
 endif()
 
@@ -438,8 +335,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     else()
         target_compile_definitions(moderngekko PRIVATE _M_GENERIC=1)
     endif()
-    target_sources(moderngekko PRIVATE src/runtime/dolvm/dolvm_module.cpp)
-    target_link_libraries(moderngekko PRIVATE core uicommon moderngekko_dolvm)
+    target_link_libraries(moderngekko PRIVATE core uicommon moderngekko_gxcpu)
     if(TARGET PkgConfig::X11)
         target_sources(moderngekko PRIVATE
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformX11.cpp)

@@ -113,33 +113,6 @@ add_library(dr_ir STATIC
 target_include_directories(dr_ir PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_ir PUBLIC dr_frontend)
 
-# The interpreter half. Deliberately free of any compiler-side dependency: this
-# is the code that ships inside an app that may not create executable pages.
-add_library(dr_vm STATIC
-    src/vm/dolvm_module.c
-    src/vm/dolvm_interp.c
-    src/vm/dolvm_hle_native.c
-)
-target_include_directories(dr_vm PUBLIC ${DOLRECOMP_SRC})
-target_link_libraries(dr_vm PUBLIC dr_cpu)
-if(NOT MSVC)
-    # The dispatch loop's frame holds a 2 KB register file, so it gets a stack
-    # guard by default -- a load, a store and a compare on a function called
-    # once per thirty guest instructions. Nothing here writes an array by an
-    # index the loader has not already bounds-checked.
-    target_compile_options(dr_vm PRIVATE -fno-stack-protector)
-endif()
-
-# The compiler-side half: DolIR optimization and bytecode lowering.
-add_library(dr_vm_backend STATIC
-    src/backend/vm/dolvm_opt.c
-    src/backend/vm/dolvm_emit.c
-    src/backend/vm/dolvm_hle_match.c
-    src/backend/vm/dolvm_pipeline.c
-)
-target_include_directories(dr_vm_backend PUBLIC ${DOLRECOMP_SRC})
-target_link_libraries(dr_vm_backend PUBLIC dr_ir dr_cpu dr_analysis)
-
 if(DOLRECOMP_ENABLE_LLVM)
     add_library(dr_llvm STATIC
         src/backend/llvm/llvm_backend.cpp
@@ -206,7 +179,7 @@ add_library(dr_app STATIC
     src/app/pipeline.c
 )
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
-target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform dr_ir dr_vm_backend)
+target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform dr_ir)
 if(DOLRECOMP_ENABLE_LLVM)
     target_link_libraries(dr_app PUBLIC dr_llvm)
     target_include_directories(dr_app PRIVATE
@@ -227,31 +200,6 @@ endif()
 
 add_executable(dolir_stats tools/dolir_stats.c)
 target_link_libraries(dolir_stats PRIVATE dr_ir dr_frontend dr_analysis)
-
-add_executable(dolvm_dis tools/dolvm_dis.c)
-target_link_libraries(dolvm_dis PRIVATE dr_vm)
-
-# The interpreter measured against the C backend on identical guest programs.
-# The native arm is generated at build time by the C emitter and compiled by the
-# host compiler, so both arms really are the same instructions.
-add_executable(dolvm_hle_gen tools/dolvm_hle_gen.c)
-target_include_directories(dolvm_hle_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dolvm_hle_gen PRIVATE dr_backend dr_frontend)
-
-add_executable(dolvm_bench_gen tools/dolvm_bench_gen.c)
-target_include_directories(dolvm_bench_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(dolvm_bench_gen PRIVATE dr_backend dr_frontend)
-
-set(DOLVM_BENCH_SOURCE ${CMAKE_CURRENT_BINARY_DIR}/dolvm_bench_generated.c)
-add_custom_command(
-    OUTPUT ${DOLVM_BENCH_SOURCE}
-    COMMAND dolvm_bench_gen ${DOLVM_BENCH_SOURCE}
-    DEPENDS dolvm_bench_gen
-    VERBATIM
-)
-add_executable(dolvm_bench tools/dolvm_bench.c ${DOLVM_BENCH_SOURCE})
-target_include_directories(dolvm_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(dolvm_bench PRIVATE dr_vm dr_vm_backend dr_ir dr_cpu)
 
 enable_testing()
 
@@ -344,47 +292,6 @@ add_test(NAME float_semantics COMMAND test_float_semantics)
 add_executable(test_dolir tests/test_dolir.c)
 target_link_libraries(test_dolir PRIVATE dr_ir)
 add_test(NAME dolir COMMAND test_dolir)
-
-add_executable(test_dolvm tests/test_dolvm.c)
-target_link_libraries(test_dolvm PRIVATE dr_vm_backend dr_vm dr_ir)
-add_test(NAME dolvm COMMAND test_dolvm)
-
-# The same programs again with computed goto forced off, so the portable switch
-# dispatch stays exercised on compilers that would have used threading.
-# Every opcode the decoder knows, run through the C backend and the interpreter
-# on identical state. The C backend is the shipping one, so it defines correct.
-add_executable(test_dolvm_diff_gen tests/test_dolvm_diff_gen.c)
-target_link_libraries(test_dolvm_diff_gen PRIVATE dr_backend dr_frontend dr_ir)
-
-set(DOLVM_DIFF_SOURCE ${CMAKE_CURRENT_BINARY_DIR}/dolvm_diff_generated.c)
-add_custom_command(
-    OUTPUT ${DOLVM_DIFF_SOURCE}
-    COMMAND test_dolvm_diff_gen ${DOLVM_DIFF_SOURCE}
-    DEPENDS test_dolvm_diff_gen
-    VERBATIM
-)
-add_executable(test_dolvm_diff tests/test_dolvm_diff.c ${DOLVM_DIFF_SOURCE})
-target_link_libraries(test_dolvm_diff PRIVATE dr_vm_backend dr_vm dr_ir dr_cpu)
-add_test(NAME dolvm_diff COMMAND test_dolvm_diff)
-add_test(NAME dolvm_diff_plain COMMAND test_dolvm_diff --no-home-state)
-# Same comparison with the register file poisoned, which turns a read of a
-# register the bytecode never wrote from luck into a failure.
-add_test(NAME dolvm_diff_poison COMMAND test_dolvm_diff)
-set_tests_properties(dolvm_diff_poison PROPERTIES
-    ENVIRONMENT "DOLVM_POISON_REGS=1;DOLVM_POISON_BYTE=0xA0")
-add_test(NAME dolvm_diff_poison_zero COMMAND test_dolvm_diff)
-set_tests_properties(dolvm_diff_poison_zero PROPERTIES
-    ENVIRONMENT "DOLVM_POISON_REGS=1;DOLVM_POISON_BYTE=0x00")
-
-add_executable(test_dolvm_switch
-    tests/test_dolvm.c
-    src/vm/dolvm_interp.c
-    src/vm/dolvm_module.c
-    src/vm/dolvm_hle_native.c
-)
-target_compile_definitions(test_dolvm_switch PRIVATE DOLVM_FORCE_SWITCH=1)
-target_link_libraries(test_dolvm_switch PRIVATE dr_vm_backend dr_ir dr_cpu)
-add_test(NAME dolvm_switch COMMAND test_dolvm_switch)
 
 if(DOLRECOMP_ENABLE_LLVM)
     add_executable(test_llvm_backend tests/test_llvm_backend.cpp)
