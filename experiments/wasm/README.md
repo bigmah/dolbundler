@@ -61,12 +61,32 @@ Weighted by a realistic instruction mix that is **0.5–0.6x of native**. Whethe
 that still clears 100% on a phone is *unmeasured*: the titles holding 100%
 today are frame-limited, so their headroom was never recorded.
 
-**The whole memory gap is one missing instruction.** `swap.c` isolates it: a
-raw WASM linear-memory load is as fast as native (0.129 vs 0.142 ns — bounds
-checks are free), but `bswap32` is folded away on arm64 and costs +0.214 ns in
-WASM (2.66x), because WASM has no byteswap opcode and JSC does not pattern-match
-the shift-or chain. There is no workaround. Do not go looking elsewhere for the
-0.66x.
+**The byteswap is real but it is not the memory gap.** GameCube is big-endian
+and WASM linear memory is little-endian by spec, so every guest access swaps.
+arm64 has `REV` — LLVM even auto-vectorises it to `rev32.16b`, four words per
+instruction — while WASM has no byteswap opcode at all, so LLVM emits a six-op
+rotate/xor/mask idiom that JSC does not fold back. In a tight throughput-bound
+loop (`swap.c`) that costs 2.66x on the load.
+
+**In real recompiled guest code it costs approximately nothing**, and this is
+worth knowing before anyone spends a week on it. Rebuilding the `mem` kernel
+with the byteswap deleted entirely — wrong results, but it isolates the cost —
+moves the wasm/native ratio from 0.62 to 0.68, which is inside the run-to-run
+spread. The swap hides behind address computation and dependent arithmetic. A
+second control confirms it: four different spellings of a byteswap inside a
+latency-bound loop all measure identical to no byteswap at all, on both targets.
+
+**Nor is it the range checks.** Replacing the branchy `resolve_addr` walk with a
+single unchecked RAM path nearly doubles native (1295 → 2408 guest MIPS) and
+leaves wasm flat (805 → 817). The wasm memory path sits at a ~800 MIPS floor
+that neither removing the swap nor removing the checks moves.
+
+So the memory gap is **unattributed**, and it is in how JSC compiles wasm
+linear-memory access in this shape rather than in anything the emitter is doing.
+Note the direction of that last result: optimising the native side widens the
+ratio (0.62 → 0.34). The shipping LLVM backend inlines its range checks, so the
+0.5–0.6x figure here — measured against the C backend — is likely **optimistic**
+for the backend that actually ships.
 
 **Without a JIT, forget it.** The same module through JSC's interpreter tier is
 18x / 42x / 95x / 33x slower than native on those kernels — one to two orders of
@@ -186,6 +206,8 @@ Requires `brew install emscripten`, a clang with the PowerPC assembler
 cd experiments/wasm
 
 ./bench/build.sh              # native vs wasm guest MIPS, plus the byteswap
+emcc -O2 -msimd128 bench/bulk_swap.c -o /tmp/b.js \
+  -sENVIRONMENT=shell -sINITIAL_MEMORY=256MB   # bulk swap: SIMD vs scalar
 ./bench/build.sh --web        # also build the browser harness
 ./spike/build.sh              # GXRuntime -> wasm, and the WebGPU spike
 
@@ -195,6 +217,12 @@ python3 serve.py bench --lan  # reachable from a phone on the same network
 
 Results the pages POST back land in `reports.jsonl`, and a rendered frame is
 written to `frame.png`.
+
+To attribute a cost rather than guess at it, shadow `common/types.h` or
+`cpu/cpu.c` in a temp directory, patch the one thing you want to price out, and
+put `-I<temp>` ahead of the real include path. That is how the byteswap and the
+range checks above were each priced, and both answers were the opposite of what
+the microbenchmark implied.
 
 **No game data, as everywhere else in this repo.** The benchmark's guest code is
 `bench/bench.s`, assembled here. The browser harness will also measure a

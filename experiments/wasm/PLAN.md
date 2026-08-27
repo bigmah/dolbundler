@@ -268,17 +268,30 @@ recompiled on the phone, and played — with no rebuild and no re-signing.
 
 Deliberately last, and deliberately not optional.
 
-**Known, measured costs to attack:**
+**Start by finding out where the gap is, because two obvious answers are wrong.**
+Measured against the `mem` kernel: deleting the byteswap entirely moves the
+wasm/native ratio 0.62 → 0.68, inside the noise; replacing the branchy
+`resolve_addr` with one unchecked path nearly doubles native (1295 → 2408 guest
+MIPS) and leaves wasm flat (805 → 817). Neither the endianness swap nor the
+range checks are the bottleneck — the wasm memory path sits at a ~800 MIPS floor
+that neither change moves, and the cause is unidentified. **Attribute it before
+optimising anything**, ideally against the LLVM backend's inlined memory path
+rather than the C backend's helper calls.
 
-- **The byteswap is the entire guest-memory gap.** A raw WASM load matches
-  native; `bswap32` costs 2.6x because WASM has no byteswap opcode. There is no
-  workaround at the instruction level, so the wins are structural: fewer guest
-  memory operations, and SIMD (`i8x16.shuffle`) for bulk swaps where the access
-  is vectorisable.
-- **wasm SIMD128 is available**, and paired-single work maps onto `f64x2`.
+- **Build the whole thing with `-msimd128`.** It is one flag, Safari supports
+  it, and it takes bulk byteswap loops from 9.4 to 49.3 GB/s — native parity
+  (48.8). It does nothing for scalar guest loads (818 → 818 MIPS on the `mem`
+  kernel), so it is a texture-decode and vertex-loader win, not a CPU win. Do
+  not hand-write intrinsics: LLVM's auto-vectoriser beat a hand-written
+  `i8x16.shuffle` version (49.3 vs 44.2 GB/s).
+- **Paired-single work maps onto `f64x2`** if the FP path needs it.
 - **Floating point was the worst kernel (0.42x)** in the C backend's helper-call
   shape. The LLVM backend inlines the common FP path; confirm that survives the
   WASM retarget rather than assuming it.
+- **Expect the ratio to worsen as the native side improves.** The `resolve_addr`
+  result above shows native has headroom wasm cannot reach, so the 0.5–0.6x
+  figure measured against the C backend is likely optimistic for the shipping
+  LLVM backend.
 
 **Exit criteria.** A speed figure on device for the target title, and an honest
 statement of what is left.
