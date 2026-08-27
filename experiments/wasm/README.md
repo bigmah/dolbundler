@@ -152,7 +152,8 @@ today, renderer included. The cost becomes *finish a 76k-line runtime* rather
 than *port a 480k-line one* — and GXRuntime's gap is maturity and speed (~11 fps
 in-match, by its own README), not portability.
 
-Suggested order:
+`PLAN.md` in this directory is the full plan for taking this all the way to a
+game running in Safari on an iPhone. The short version of its order:
 
 1. **Decide GXRuntime, not Dolphin, is the browser runtime.** That is the fork
    in the road this spike unlocks, and it trades a mature-but-unportable
