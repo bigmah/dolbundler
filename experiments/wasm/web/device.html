@@ -1,0 +1,177 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>device check</title>
+<style>
+:root{color-scheme:dark}
+body{font:13px/1.6 -apple-system,system-ui,sans-serif;margin:0;padding:16px;
+     background:#0d1214;color:#e4ebeb}
+h1{font-size:16px;margin:0 0 2px}
+p.sub{margin:0 0 14px;color:#8b9a9d;font-size:12px}
+h2{font-size:13px;margin:18px 0 6px;color:#9dacaf;font-weight:600}
+table{border-collapse:collapse;font:11.5px/1.5 ui-monospace,Menlo,monospace;width:100%}
+td{padding:2px 10px 2px 0;vertical-align:top;word-break:break-word}
+td:first-child{color:#8b9a9d;white-space:nowrap}
+canvas{width:100%;max-width:420px;aspect-ratio:640/528;border:1px solid #243033;
+       border-radius:8px;background:#000;display:block;margin:8px 0}
+.ok{color:#63bc8a}.bad{color:#e0796a}.dim{color:#7d8b8e}
+#verdict{font-size:14px;font-weight:600;margin:14px 0;padding:10px;border-radius:8px;
+         background:#141b1d;border:1px solid #243033}
+</style></head><body>
+<h1>Device check</h1>
+<p class="sub">The two questions a Simulator cannot answer: does WebGPU work on this
+   phone, and does a whole-game WebAssembly module survive its memory limit.
+   Nothing is installed and no disc is transferred.</p>
+<div id="verdict" class="dim">running…</div>
+<h2>1 — what this engine offers</h2><table id="caps"></table>
+<h2>2 — WebGPU, end to end</h2>
+<canvas id="cv" width="640" height="528"></canvas>
+<table id="gpu"></table>
+<h2>3 — the whole-game module</h2><table id="mod"></table>
+<h2>4 — and then the game itself</h2>
+<p class="sub" id="next">Stages 1-3 need nothing but this page. Playing needs a
+   disc: open the player, choose your own disc image once, and it is kept in
+   this browser's storage from then on. Sustained execution is the real memory
+   test — compiling a module is lazy, running it is not.</p>
+<p><a id="play" href="index.html" style="color:#63bc8a">open the player →</a></p>
+
+<script src="caps.js"></script>
+<script src="dolweb.js"></script>
+<script src="selftest.js"></script>
+<script>
+// Each stage POSTs as it completes. If the tab is killed by the memory limit --
+// which is the outcome stage 3 exists to detect -- the last report that arrived
+// says exactly how far it got, which a page that only reports at the end cannot.
+const results = { stages: {} };
+function report(extra) {
+  const body = JSON.stringify(Object.assign({ device_check: true }, results, extra || {}),
+                              (k, v) => (typeof v === 'bigint' ? Number(v) : v));
+  try { navigator.sendBeacon('/report', body); }
+  catch (e) { fetch('/report', { method: 'POST', body, keepalive: true }).catch(() => {}); }
+}
+function row(tableId, k, v, good) {
+  const tr = document.createElement('tr');
+  const a = document.createElement('td'); a.textContent = k;
+  const b = document.createElement('td'); b.textContent = String(v);
+  if (good !== undefined) b.className = good ? 'ok' : 'bad';
+  tr.append(a, b); document.getElementById(tableId).appendChild(tr);
+}
+function verdict(text, cls) {
+  const el = document.getElementById('verdict');
+  el.textContent = text; el.className = cls || '';
+}
+
+async function main() {
+  // --- 1. capabilities -----------------------------------------------------
+  const caps = {};
+  await probeCapabilities((k, v, good) => { caps[k] = v; row('caps', k, v, good); });
+  results.stages.caps = caps;
+  report({ stage: 'caps' });
+
+  const hasAdapter = caps['requestAdapter()'] === 'adapter';
+  if (!hasAdapter) {
+    verdict('No WebGPU adapter on this engine — rendering cannot work here.', 'bad');
+    row('gpu', 'skipped', 'no adapter', false);
+  }
+
+  // --- 2. WebGPU through the real backend ---------------------------------
+  // The self-test module is 140 KB: it drives gxcore with real GX FIFO bytes
+  // and renders through the same web backend the game uses, so a pass here is
+  // a pass for the renderer, not for a toy triangle.
+  if (hasAdapter) {
+    try {
+      const t0 = performance.now();
+      const M = await DolWebSelfTest({ print: () => {}, printErr: () => {} });
+      const renderer = new DolWebRenderer(M, document.getElementById('cv'));
+      await renderer.init();
+      row('gpu', 'adapter', JSON.stringify(renderer.adapterInfo || {}), true);
+      if (!M._dolweb_selftest_init()) throw new Error('backend init failed');
+      for (let i = 0; i < 3; i++) { M._dolweb_selftest_frame(i * 0.12); renderer.renderFrame(); }
+      const fb = await renderer.readbackEfb();
+      let lit = 0; const colours = new Set();
+      for (let y = 0; y < fb.height; y += 2)
+        for (let x = 0; x < fb.width; x += 2) {
+          const o = y * fb.bytesPerRow + x * 4;
+          if (fb.data[o] + fb.data[o + 1] + fb.data[o + 2] > 24) lit++;
+          if (colours.size < 64) colours.add((fb.data[o] << 16) | (fb.data[o + 1] << 8) | fb.data[o + 2]);
+        }
+      const coverage = lit / ((fb.width / 2) * (fb.height / 2));
+      const drew = coverage > 0.02 && coverage < 0.98 && colours.size > 3;
+      row('gpu', 'ms to first frame', ((performance.now() - t0) | 0), true);
+      row('gpu', 'EFB covered', (coverage * 100).toFixed(1) + '%', drew);
+      row('gpu', 'distinct colours', colours.size, colours.size > 3);
+      row('gpu', 'GX -> pixels', drew ? 'yes' : 'no', drew);
+      results.stages.webgpu = { ok: drew, coverage, colours: colours.size,
+                                adapter: renderer.adapterInfo || {} };
+    } catch (e) {
+      row('gpu', 'failed', String(e), false);
+      results.stages.webgpu = { ok: false, error: String(e) };
+    }
+    report({ stage: 'webgpu' });
+  }
+
+  // --- 3. the whole-game module -------------------------------------------
+  // Compiling it is the memory question. A 106 MB module cost ~460 MB of engine
+  // metadata per 29 MB elsewhere in this experiment; if that holds, this stage
+  // is where a phone's WebContent process dies -- and then no further report
+  // arrives, which is itself the answer.
+  try {
+    const head = await fetch('strikers.wasm', { method: 'HEAD' });
+    const bytes = Number(head.headers.get('content-length') || 0);
+    row('mod', 'module size (MB)', (bytes / 1048576).toFixed(1));
+    results.stages.module = { bytes, phase: 'fetching' };
+    report({ stage: 'module-start' });
+
+    const t0 = performance.now();
+    const mod = await WebAssembly.compileStreaming(fetch('strikers.wasm'));
+    const compileMs = performance.now() - t0;
+    row('mod', 'compiled in (ms)', compileMs | 0, true);
+    row('mod', 'exports', WebAssembly.Module.exports(mod).length, true);
+    results.stages.module = { bytes, compileMs, ok: true };
+    report({ stage: 'module-compiled' });
+
+    // Instantiating is what actually commits the engine's per-function
+    // structures on most engines, so do that too rather than stop at compile.
+    const t1 = performance.now();
+    const memory = new WebAssembly.Memory({ initial: 2048, maximum: 32768 });
+    let instantiated = false;
+    try {
+      await WebAssembly.instantiate(mod, new Proxy({}, {
+        get: () => new Proxy({}, { get: (_, name) =>
+          name === 'memory' ? memory : (() => 0) }),
+      }));
+      instantiated = true;
+    } catch (e) {
+      // A missing-import shape is expected here; only a memory failure matters.
+      results.stages.module.instantiate_note = String(e).slice(0, 200);
+    }
+    row('mod', 'instantiate (ms)', (performance.now() - t1) | 0, true);
+    row('mod', 'instantiated', instantiated, instantiated);
+    results.stages.module.instantiateMs = performance.now() - t1;
+    results.stages.module.instantiated = instantiated;
+  } catch (e) {
+    row('mod', 'failed', String(e), false);
+    results.stages.module = Object.assign(results.stages.module || {},
+                                          { ok: false, error: String(e) });
+  }
+  report({ stage: 'done' });
+
+  const w = results.stages.webgpu, m = results.stages.module;
+  if (w && w.ok && m && m.ok) {
+    verdict('WebGPU renders here and the whole-game module compiles. ' +
+            'Both device questions answered yes.', 'ok');
+  } else if (w && w.ok) {
+    verdict('WebGPU renders here, but the whole-game module did not load.', 'bad');
+  } else {
+    verdict('WebGPU did not render here.', 'bad');
+  }
+  document.title = 'DONE';
+}
+main().catch((e) => {
+  verdict('fatal: ' + e, 'bad');
+  report({ stage: 'fatal', error: String(e && e.stack || e) });
+  document.title = 'DONE';
+});
+</script>
+</body></html>

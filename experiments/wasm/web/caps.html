@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>engine capabilities</title>
+<style>
+body{font:13px/1.6 -apple-system,system-ui,sans-serif;margin:0;padding:16px;
+     background:#0d1214;color:#e4ebeb}
+h1{font-size:15px;margin:0 0 10px}
+table{border-collapse:collapse;font:12px/1.5 ui-monospace,Menlo,monospace}
+td{padding:2px 10px 2px 0;vertical-align:top}
+td:first-child{color:#8b9a9d}
+.ok{color:#63bc8a}.bad{color:#e0796a}
+</style></head><body>
+<h1>What this engine offers</h1>
+<table id="t"></table>
+<script src="caps.js"></script>
+<script>
+// Every fact the browser build depends on, in one page, reported back so a
+// device or Simulator run needs no console. This is the ten-minute check
+// PLAN.md asks for in milestone 6.
+const rows = [];
+function put(k, v, good) {
+  rows.push([k, v]);
+  const tr = document.createElement('tr');
+  const a = document.createElement('td'); a.textContent = k;
+  const b = document.createElement('td'); b.textContent = String(v);
+  if (good !== undefined) b.className = good ? 'ok' : 'bad';
+  tr.append(a, b); document.getElementById('t').appendChild(tr);
+}
+
+async function main() {
+  await probeCapabilities(put);
+
+  const payload = { caps: Object.fromEntries(rows), ua: navigator.userAgent };
+  try { await fetch('/report', { method: 'POST', body: JSON.stringify(payload) }); } catch (e) {}
+  document.title = 'DONE';
+}
+main().catch((e) => {
+  put('fatal', String(e), false);
+  fetch('/report', { method: 'POST',
+                     body: JSON.stringify({ caps: Object.fromEntries(rows), error: String(e) }) })
+    .catch(() => {});
+});
+</script>
+</body></html>

@@ -18,6 +18,9 @@ history for it.
 "Over the line" means: a disc the user owns, imported in the browser, boots to
 gameplay at a frame rate a person would accept, on an iPhone, in Safari.
 
+**Reached 2026-08-27.** See the status section below for the numbers, on the
+phone and off it.
+
 ## Why this shape and not the obvious one
 
 Not negotiable, and worth restating because it kills every simpler design:
@@ -32,6 +35,275 @@ Not negotiable, and worth restating because it kills every simpler design:
 
 So the browser build is not a port of the iOS app. It is the product, and any
 future iOS app is a WKWebView shell around it.
+
+## Status (2026-08-27)
+
+**A GameCube game plays in a browser, including on an iPhone.** Super Mario
+Strikers (`G4QE01`) boots from a user-supplied disc, gets through the health
+screen, the intro cutscene and the front-end menus on its own input, and reaches
+a live match -- scoreboard, clock, both teams, shadows -- rendering through
+WebGPU, with the runtime, the renderer, the disc and the audio all inside one
+page and the guest code interpreted. ~18 fps in a match on an M4 desktop;
+**31.7 fps over 4 000 frames on an iPhone 15 Pro Max in Safari**, nothing
+installed.
+
+| Milestone | State |
+|---|---|
+| 0 — where the 11 fps goes | **Answered, and the premise was wrong.** In-match reached in the browser and it runs at ~18 fps with the renderer and ~40 fps without on WebKit, so it is not CPU-bound in the way the gate assumed. The ~11 fps figure predates the texture-cache fix below. |
+| 1 — the web backend | **Done.** `backends/web/` + `web/dolweb.js`; verified by GPU readback, not by eye (`web/selftest.html`). |
+| 2 — replay a trace, count the gaps | Superseded: the counters come straight out of a live browser run, which is a better sample than a recorded trace. No pixel comparison against Aurora yet. |
+| 3 — close the gaps | Little to close: 7 503 skipped draws out of 598 580 in a gameplay run is 1.25%, and 6 537 of those are `cull_all` (state, not a gap). The real remainder is 966 vertex-decode failures and 7 699 unresolved texture matrices. |
+| 4 — boot a game in the browser | **Done.** Disc import, OPFS persistence, memory card, the frame loop, input through the real pad path, and audio through an AudioWorklet -- boot, intro, menus and a live match all reached. **The returning-visit path is verified end to end**: with no `?iso` and no picker, the page finds the 648 MB disc in storage, attaches it and boots. Touch pad untested on a device. |
+| 5 — guest code as WebAssembly | Not started. |
+| 6 — iOS device bring-up | **Done.** On an iPhone 15 Pro Max in Safari: WebGPU renders through the real backend, the 106 MB module loads in 1.5 s, and the game runs 4 000 frames at 31.7 fps. In-match on the device is the one figure still unmeasured. |
+| 7 — recompile on the device | Not started. |
+| 8 — make it fast enough | Measured, and better than forecast: **~0.5x of native on V8, ~1.0x on WebKit** (14-16M guest block dispatches/s against native's ~15M). One texture-cache fix was worth 2.8x on texture-heavy scenes. |
+
+### What it took, beyond the plan
+
+The plan assumed StrikersRecomp booted. In this tree it did not, and five real
+defects stood between "the plan" and "a game on screen". All are fixed:
+
+1. **DolRecomp's chunked emission hid the HLE dispatcher.** A `bl` to a function
+   inside the caller's own ~16 KB chunk became a plain `goto`, so it never
+   reached `ppc_host_call` and every SDK intercept in that chunk silently ran
+   the guest's own code instead. New opt-in emitter mode
+   (`DOLRECOMP_HLE_LOCAL_CALLS=1`, `emit_set_hle_local_calls`) puts the host
+   check back in front of the goto. Without it the guest hung in
+   `__OSInitAudioSystem` waiting on a DSP reset bit.
+2. **Intercepts that tail-call had their jump overwritten.** `hle_dispatch` ran
+   `hle_return()` unconditionally after every intercept, clobbering the `pc` an
+   intercept had set to a guest callback (`dol_hle_aramUploadData` says as much
+   in a comment). Now it only returns when the intercept left the pc alone.
+3. **The ARQ DMA completion callback never ran.** `dol_hle_ARQPostRequest` set
+   `cpu->pc = callback` into the teeth of (2); it now queues the callback, which
+   is both faithful to an asynchronous DMA and survives `hle_return`. The guest
+   busy-waits on a flag that callback clears, so `aramInit` hung forever.
+4. **The DVD read completion callback was never invoked** — the code printed a
+   note saying so. Every asynchronous resource load stalled. Now queued.
+5. **`GXDrawDone()` slept forever.** Nothing raised the PE FINISH interrupt, so
+   the game's main thread parked on the GX finish queue at its first frame and
+   the OS idle loop was the only thing left running. The FIFO peek in
+   `runtime/host/mmio.c` now commits PE finish on BP 0x45 = 0x02.
+
+And one that was the browser port's own fault: the host policy that needs *a
+graphics backend* was spelled `#ifdef STRIKERSRECOMP_AURORA`, which left the web
+build with no `GXBegin`, no `GXCallDisplayList`, no `GXCopyDisp` and therefore no
+present at all. It is `STRIKERSRECOMP_HAS_BACKEND` now.
+
+### On the phone (iPhone 15 Pro Max, iOS 26.6.1, Safari)
+
+**Both risks the plan called fatal are retired.**
+
+| question | answer |
+|---|---|
+| WebGPU on a real iPhone | **yes** — `requestAdapter()` returns an adapter, and `web/device.html` rendered real GX FIFO bytes through the actual web backend to pixels: 45.8% EFB coverage, 64+ colours, verified by GPU readback, identical to the desktop result |
+| does a 106 MB module survive | **yes** — compiled in 1 544 ms, instantiated in 5 ms, tab alive |
+| **does the game run on it** | **yes** — 4 000 frames at **31.7 fps** through boot, the intro and the front-end menus, 213 265 draws planned and **0 skipped**, texture cache at 99.97%, tab alive throughout |
+
+The disc came over Wi-Fi from the Mac in 9 s and went straight into OPFS, so the
+phone keeps it; the module was ready 2.8 s later. By segment: 37.8 fps during
+boot, then 31-34 through the menus at 74 draws/frame. Audio did not start
+because a scripted run has no user gesture and iOS demands one — on a real tap
+it does.
+
+Everything else the build needs is there too: `crossOriginIsolated` true and
+SharedArrayBuffer available (so threads are on the table), AudioWorklet, wasm
+SIMD128, OffscreenCanvas, OPFS with a **39 GB quota** and a verified 1 MB round
+trip, and wasm memory that grows to 4 032 MB. Four cores, DPR 3, 430x932.
+The adapter reports `maxBufferSize` 1 GB and `minUniformBufferOffsetAlignment`
+**32** — a quarter of the desktop's 256, so the frame stream's uniform padding
+is conservative there and could be tightened for the device.
+
+**And the thing that nearly hid all of it:** over plain HTTP from a LAN address
+the same phone reported **no `navigator.gpu`, no OPFS, no AudioWorklet and no
+SharedArrayBuffer**. Every one of those is a secure-context feature, and a LAN
+IP over HTTP is not a secure context — while `127.0.0.1` is, which is exactly
+why the Simulator showed a clean bill of health and a real phone did not.
+`serve.py --lan` now serves HTTPS with a self-signed certificate (Safari warns
+once; tap through) and all of it comes back. A shipping build serving from the
+bundle or from HTTPS never meets this, but any LAN test does.
+
+### What the browser reports in the Simulator (iOS 18.7)
+
+`web/caps.html` is the ten-minute check milestone 6 asks for, run through the
+`ios/` WKWebView shell:
+
+| capability | result |
+|---|---|
+| `crossOriginIsolated` | **true** over HTTP — SharedArrayBuffer and threads are on the table |
+| `SharedArrayBuffer` | present |
+| wasm SIMD128 | present |
+| AudioWorklet / OffscreenCanvas | present |
+| OPFS | present, **9.8 GB quota**, and a 1 MB write reads back identical — a 1.4 GB disc fits |
+| wasm memory grown to | 2 624 MB |
+| `navigator.gpu` | present |
+| `requestAdapter()` | **null** — the Simulator has no adapter, exactly as the plan predicted |
+
+So the Simulator answers everything except the one question that matters most,
+and rendering on a real device stays unverified.
+
+### Speed, at scenes rather than in the abstract
+
+Headless Chrome on an M4, 640x528 EFB, guest code interpreted:
+
+| scene | draws/frame | frames/s |
+|---|---|---|
+| boot + intro cutscene | 1-25 | 23-25 |
+| front-end menus | ~58 | **30** (the guest's own rate; not CPU-limited) |
+| in match | ~270 | **~18** |
+
+For context the native Aurora build sits at a vsync-capped 60 at a 23-draw menu,
+so the browser is not the limiting factor until a scene gets heavy.
+
+**And the engine that matters is much faster than the one that was measured.**
+Running the same page with `?norender=1` (no WebGPU work, guest only) through the
+`ios/` shell in the Simulator — real iOS WebKit, on the Mac's CPU — against
+headless Chrome on the same machine and the same 900 frames, which executed a
+bit-identical 340 192 497 guest blocks in both:
+
+| engine | frames/s | guest blocks/s |
+|---|---|---|
+| Chrome (V8) | 17.6 | 6.6M |
+| **iOS WebKit (JSC)** | **42.6** | **16.2M** |
+
+At a heavier scene JSC held 14.1-14.6M blocks/s against V8's 8.5-9.7M. Native
+arm64 runs ~15M. So **on WebKit the recompiled guest costs roughly nothing, not
+the 0.5x the four-kernel benchmark predicted** — that benchmark measured what
+JSC does to four tight loops, and a real game is not four tight loops. The
+0.5-0.6x figure in `README.md` should be read as a V8 number.
+
+The caveat is unavoidable and worth stating plainly: the Simulator runs on the
+Mac's M4, so this compares *engines*, not devices. What it does establish is
+that the browser tax on iPhone is a WebKit question, and WebKit answers it well.
+
+**One fix moved the heavy scenes 2.8x.** The texture cache hashed
+`tlut_available` bytes of the palette region to key a CI texture -- and
+`tlut_available` is "whatever the resolver can still reach from that address",
+i.e. the rest of MEM1. So every paletted draw hashed megabytes, and any
+unrelated write nearby invalidated the entry. In a menu that meant 66 628
+texture decodes across 3 007 frames; after hashing `tlut_entries * 2` bytes it
+is 1 276, the hit rate is 99.97%, and the scene went 6.5 -> 18 fps. **The same
+bug is in the native substrate** (`graphics/aurora/lib/gfx/gxcore_draw.cpp`) and
+is fixed there too, so GXRuntime's own ~11 fps in-match figure predates it.
+
+Audio is proven end to end: the DSP path fills the ring and the AudioWorklet
+drains it (`?audio=1` in the harness, with `--mute-audio` -- a scripted run
+should never make noise in someone's room).
+
+Storage is proven too, which matters because it is what a returning visitor
+hits every time. `PROFILE_DIR=... ./run-headless.sh` keeps the browser profile
+between runs, so the two-visit sequence is scriptable:
+
+```sh
+P=/tmp/dolweb-profile
+PROFILE_DIR=$P ./run-headless.sh '?iso=/disc.iso&store=1&auto=1&frames=120&seconds=60'
+PROFILE_DIR=$P ./run-headless.sh '?auto=1&frames=400&seconds=90'   # no ?iso, no picker
+```
+
+The second run reports `disc-restored` and boots. A memory card round-trips the
+same way, with a size floor so the runtime's 40-byte stub is not mistaken for a
+save.
+
+### The two measurements that decide the iOS story
+
+- **Module size: ~106 MB** for 665k guest instructions (~155 bytes each, against
+  37 for native arm64), and **three separate attempts failed to move it**:
+
+  | lever | result |
+  |---|---|
+  | chunks at `-Os` instead of `-O3` | 105.8 -> 100.8 MB (-5%) |
+  | `DOLRECOMP_C_CHUNK_INSTRUCTIONS=1024` (a quarter the default) | 105.8 -> 101.9 MB (-4%), but **45% faster to build** |
+  | `wasm-opt -Oz` | 105.8 -> **95.6 MB (-10%)**, the only real lever -- but 19.5 minutes and **9.7 GB resident** |
+
+  None of it turned out to matter: the phone loads the unoptimised 106 MB module
+  in 1.5 s and plays thousands of frames on it. Size is a startup-latency
+  question, not the jetsam question the plan feared.
+
+  And a trap in the last one: `--all-features` makes wasm-opt emit compact
+  imports, which Chrome rejects outright (*"Invalid import kind 127"*). Pass the
+  eight features the module's own `target_features` section declares, or nothing
+  at all and let wasm-opt read that section itself.
+
+  The section breakdown says why none of these get far: the module is **100.0% code**,
+  2 846 function bodies of which the top 200 are 103 MB. It is not structuring
+  overhead and it is not dead weight — it is the emitted shape, one `ctx->pc =`
+  store and a handful of wasm instructions per guest instruction, times 665k.
+
+  The honest conclusion is that a *whole-game static* module cannot be made
+  small, because it carries every instruction in the game whether or not the
+  game ever executes it. The lever that actually exists is milestone 7: emit
+  only what is reached, on the device. At the ~16x engine-metadata blowup
+  measured earlier this is ~1.6 GB against a WebContent jetsam limit, and
+  **only a phone can say whether that is fatal** — `web/device.html` asks it.
+- **Guest throughput: ~0.5x native**, 6.9-8.4M block dispatches/s in the browser
+  against ~15M natively — the kernel benchmark's 0.5-0.6x, confirmed on a whole
+  real game rather than four kernels.
+
+### Coverage, from a live run rather than a trace
+
+gxcore's gap counters over ~42 000 planned draws of boot + intro:
+
+| counter | count |
+|---|---|
+| draws_planned | 42 836 |
+| **draws_skipped** | **0** |
+| tlut_texture (CI/paletted) | 14 166 |
+| tev_multi_texmap | 7 790 |
+| efb_copies / efb_display_copies | 11 725 / 11 729 |
+
+Zero skipped draws is the headline: milestone 3 has nothing to close on this
+path. The CI-texture and multi-texmap counters are demand signals, not failures —
+both are handled.
+
+### Reproducing it
+
+```sh
+cd experiments/wasm
+web/build-selftest.sh                       # the backend, no game (seconds)
+web/build.sh --generate /path/to/your.iso   # the full client (minutes)
+python3 serve.py game --iso /path/to/your.iso
+```
+
+Then open `http://127.0.0.1:8712/`, choose your disc once (it is streamed into
+OPFS and loads itself next time), and press Boot. Keyboard is J/K/U/I = A/B/X/Y,
+WASD = stick, Enter = Start; a phone gets the on-screen pad automatically and
+audio starts on the first touch.
+
+Scripted, in headless Chrome — always muted, and it POSTs a JSON report plus a
+filmstrip of EFB readbacks:
+
+```sh
+./run-headless.sh selftest.html                   # the backend alone
+./run-headless.sh '?iso=/disc.iso&auto=1&frames=4000&seconds=380&shots=700&input=mash'
+```
+
+On an actual phone — no install, no signing, no disc:
+
+```sh
+python3 serve.py game --iso /path/to/your.iso --lan   # prints a LAN URL
+```
+
+Open `http://<that address>/device.html` in Safari on the phone. It reports its
+capabilities, renders real GX FIFO bytes through WebGPU and reads the pixels
+back, then compiles and instantiates the whole-game module — POSTing after each
+stage, so if the tab is killed by the memory limit the last report that arrived
+says exactly where. `reports.jsonl` collects them on the Mac.
+
+Under real iOS WebKit, through the WKWebView shell in the Simulator (which has
+no WebGPU adapter, hence `norender`):
+
+```sh
+URL="http://127.0.0.1:8712/caps.html" ios/build-sim.sh          # what the engine offers
+URL="http://127.0.0.1:8712/?iso=/disc.iso&auto=1&norender=1&frames=4000&seconds=380&input=mash" \
+  ios/build-sim.sh                                             # guest throughput
+```
+
+Useful query parameters: `trace=1` (mirror every log line to the console, the
+only channel a headless page reliably has), `env=STRIKERS_HLE_LOG,...` (turn on
+the runtime's own diagnostics, which are environment-gated and would otherwise
+be unreachable in wasm), `budget=`/`ms=` (per-slice guest budget), `audio=1`,
+`shots=N`, `heartbeat=N`.
 
 ## Current State
 

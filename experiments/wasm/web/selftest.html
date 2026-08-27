@@ -1,0 +1,118 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>web backend self-test</title>
+<style>
+body{font:13px/1.55 -apple-system,system-ui,sans-serif;margin:0;padding:16px;
+     background:#0d1214;color:#e4ebeb}
+h1{font-size:15px;margin:0 0 2px}
+p.sub{margin:0 0 14px;color:#8b9a9d;font-size:12px}
+canvas{width:min(100%,480px);aspect-ratio:640/528;border:1px solid #243033;
+       border-radius:8px;background:#000;display:block}
+pre{background:#10171a;border:1px solid #1c2528;padding:10px;border-radius:8px;
+    font:11.5px/1.5 ui-monospace,Menlo,monospace;overflow-x:auto;
+    white-space:pre-wrap;margin:14px 0 0}
+.ok{color:#63bc8a}.bad{color:#e0796a}.dim{color:#7d8b8e}
+</style></head><body>
+<h1>GXRuntime web backend — self-test</h1>
+<p class="sub">Real GX FIFO bytes → RetailGxFrontend → gxcore → the frame stream →
+   WebGPU. No game, no recompiled code: just the browser backend.</p>
+<canvas id="cv" width="640" height="528"></canvas>
+<pre id="log">starting…</pre>
+
+<script src="dolweb.js"></script>
+<script src="selftest.js"></script>
+<script>
+const qs = new URLSearchParams(location.search);
+const logEl = document.getElementById('log');
+const results = { steps: [] };
+function log(s, cls) {
+  results.steps.push(s);
+  const el = document.createElement('span');
+  el.className = cls || '';
+  el.textContent = s + '\n';
+  logEl.appendChild(el);
+}
+
+async function main() {
+  logEl.textContent = '';
+  const M = await DolWebSelfTest({ print: (s) => log(s, 'dim'),
+                                   printErr: (s) => log(s, 'bad') });
+  log('module loaded', 'ok');
+
+  const renderer = new DolWebRenderer(M, document.getElementById('cv'));
+  await renderer.init();
+  log(`WebGPU: ${renderer.adapterInfo.vendor || 'adapter'} ` +
+      `${renderer.adapterInfo.architecture || ''} (${renderer.canvasFormat})`, 'ok');
+  log(`stream v${M._dolweb_stream_version()}  vertex stride ${renderer.vertexStride}B  ` +
+      `vs uniform ${renderer.vsUniformSize}B  ps uniform ${renderer.psUniformSize}B`);
+
+  if (!M._dolweb_selftest_init()) { log('backend init failed', 'bad'); return; }
+
+  const frames = parseInt(qs.get('frames') || '3', 10);
+  for (let i = 0; i < frames; i++) {
+    if (!M._dolweb_selftest_frame(i * 0.12)) { log('frame ' + i + ' not ready', 'bad'); return; }
+    renderer.renderFrame();
+  }
+  results.planned = M._dolweb_frame_draws();
+  results.plan_skipped = M._dolweb_frame_skipped();
+  results.gpu = Object.assign({}, renderer.stats);
+  results.gaps = renderer.gapCounters();
+  results.frontend_failed = M._dolweb_frontend_failed() !== 0;
+  log(`plans: ${results.planned} built, ${results.plan_skipped} skipped; ` +
+      `gpu: ${results.gpu.draws} draws, ${results.gpu.pipelines} pipelines`,
+      results.planned > 0 ? 'ok' : 'bad');
+  if (renderer.lastError) log('renderer error: ' + renderer.lastError, 'bad');
+
+  // Read the EFB back off the GPU rather than sampling the canvas: sampling
+  // races the compositor and reports black on a perfectly good frame.
+  const fb = await renderer.readbackEfb();
+  let lit = 0; const colours = new Set();
+  for (let y = 0; y < fb.height; y += 2)
+    for (let x = 0; x < fb.width; x += 2) {
+      const o = y * fb.bytesPerRow + x * 4;
+      const r = fb.data[o], g = fb.data[o + 1], b = fb.data[o + 2];
+      if (r + g + b > 24) lit++;
+      if (colours.size < 64) colours.add((r << 16) | (g << 8) | b);
+    }
+  const sampled = (fb.width / 2) * (fb.height / 2);
+  results.coverage = lit / sampled;
+  results.distinct_colours = colours.size;
+  const drew = results.coverage > 0.02 && results.coverage < 0.98 && colours.size > 3;
+  log(`readback: ${(results.coverage * 100).toFixed(1)}% of the EFB lit, ` +
+      `${colours.size}+ distinct colours`, drew ? 'ok' : 'bad');
+  log(drew ? 'GX FIFO bytes became pixels through the web backend.'
+           : 'nothing recognisable on the EFB.', drew ? 'ok' : 'bad');
+  results.ok = drew;
+
+  const gaps = Object.entries(results.gaps).filter(([, v]) => v);
+  if (gaps.length) log('gap counters: ' + gaps.map(([k, v]) => `${k}=${v}`).join(' '), 'dim');
+
+  try {
+    const c = document.createElement('canvas');
+    c.width = fb.width; c.height = fb.height;
+    const g2 = c.getContext('2d');
+    const img = g2.createImageData(fb.width, fb.height);
+    for (let y = 0; y < fb.height; y++)
+      for (let x = 0; x < fb.width; x++) {
+        const s = y * fb.bytesPerRow + x * 4, d = (y * fb.width + x) * 4;
+        img.data[d] = fb.data[s]; img.data[d + 1] = fb.data[s + 1];
+        img.data[d + 2] = fb.data[s + 2]; img.data[d + 3] = 255;
+      }
+    g2.putImageData(img, 0, 0);
+    results.png = c.toDataURL('image/png');
+  } catch (e) { results.png_error = e.message; }
+
+  results.ua = navigator.userAgent;
+  try { await fetch('/report', { method: 'POST', body: JSON.stringify(results) }); }
+  catch (e) {}
+  document.title = 'DONE';
+}
+main().catch(e => {
+  log('exception: ' + (e && e.stack ? e.stack : e), 'bad');
+  results.error = String(e);
+  fetch('/report', { method: 'POST', body: JSON.stringify(results) }).catch(() => {});
+  document.title = 'DONE';
+});
+</script>
+</body></html>

@@ -20,6 +20,17 @@
 // Open an explicit GameCube disc image path. Returns false for NULL, unreadable,
 // or invalid images. CLI/environment policy belongs to the game executable.
 bool dvd_open_image(const char* path);
+
+// Open a disc backed by an arbitrary host reader instead of a file path.
+// `read` copies `size` bytes at absolute disc offset `offset` into `dest` and
+// returns the number of bytes it actually produced (short reads are zero-filled
+// by this layer, matching the end-of-image behaviour of the file path).
+//
+// This exists because not every host has a seekable file. The browser build
+// keeps the disc image outside WASM linear memory, in a JavaScript ArrayBuffer
+// or an OPFS handle, and services reads with a synchronous copy into the heap.
+typedef u32 (*DolDiscReadFn)(void* user, u64 offset, u32 size, void* dest);
+bool dvd_open_reader(DolDiscReadFn read, void* user);
 void dvd_close_image(void);
 bool dvd_image_ready(void);
 

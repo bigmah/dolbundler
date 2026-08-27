@@ -1,0 +1,529 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>GameCube in the browser</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body { font: 13px/1.5 -apple-system,system-ui,sans-serif; margin: 0; padding: 0;
+       background: #0d1214; color: #e4ebeb; overscroll-behavior: none; }
+header { padding: 10px 14px; border-bottom: 1px solid #1c2528; }
+h1 { font-size: 14px; margin: 0; font-weight: 600; }
+p.sub { margin: 2px 0 0; color: #8b9a9d; font-size: 12px; }
+#stage { position: relative; background: #000; display: flex; justify-content: center; }
+canvas { display: block; width: 100%; max-width: 800px; aspect-ratio: 4 / 3;
+         background: #000; touch-action: none; }
+#controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button, label.file { background: #1b2427; border: 1px solid #2b3a3e; color: #dbe6e6;
+         padding: 6px 12px; border-radius: 6px; font: inherit; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+input[type=file] { display: none; }
+#log { margin: 0 14px 10px; background: #10171a; border: 1px solid #1c2528;
+       border-radius: 6px; padding: 8px 10px; font: 11.5px/1.5 ui-monospace,Menlo,monospace;
+       white-space: pre-wrap; max-height: 200px; overflow: auto; }
+.ok { color: #63bc8a } .bad { color: #e0796a } .dim { color: #7d8b8e }
+#hud { position: absolute; left: 8px; top: 8px; font: 11px/1.4 ui-monospace,Menlo,monospace;
+       color: #9ee8bd; text-shadow: 0 1px 2px #000; pointer-events: none; white-space: pre; }
+#pad { display: none; }
+#pad.on { display: block; position: absolute; inset: 0; pointer-events: none; }
+.btn { position: absolute; pointer-events: auto; border-radius: 50%;
+       background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.22);
+       display: flex; align-items: center; justify-content: center;
+       font: 600 15px/1 -apple-system,system-ui,sans-serif; color: #eaf3f3; }
+.btn.on { background: rgba(120,220,170,.35); }
+#stick { position: absolute; left: 6%; bottom: 10%; width: 34%; aspect-ratio: 1;
+         border-radius: 50%; background: rgba(255,255,255,.07);
+         border: 1px solid rgba(255,255,255,.16); pointer-events: auto; }
+#knob { position: absolute; left: 30%; top: 30%; width: 40%; height: 40%;
+        border-radius: 50%; background: rgba(255,255,255,.28); }
+</style></head><body>
+
+<header>
+  <h1>GameCube in the browser</h1>
+  <p class="sub">GXRuntime + gxcore, compiled to WebAssembly. Guest code recompiled by
+     DolRecomp. Rendering through WebGPU. Bring your own disc.</p>
+</header>
+
+<div id="stage">
+  <canvas id="cv" width="640" height="480"></canvas>
+  <div id="hud"></div>
+  <div id="pad">
+    <div id="stick"><div id="knob"></div></div>
+  </div>
+</div>
+
+<div id="controls">
+  <label class="file">Choose disc<input id="file" type="file" accept=".iso,.gcm,.ciso"></label>
+  <button id="boot" disabled>Boot</button>
+  <button id="pause" disabled>Pause</button>
+  <button id="sound" disabled>Sound</button>
+  <button id="touch">Touch pad</button>
+  <button id="gaps">Gap report</button>
+</div>
+<pre id="log">ready.</pre>
+
+<script src="dolweb.js"></script>
+<script src="dolboot.js"></script>
+<script src="strikers.js"></script>
+<script>
+const qs = new URLSearchParams(location.search);
+const logEl = document.getElementById('log');
+const hudEl = document.getElementById('hud');
+const canvas = document.getElementById('cv');
+const logLines = [];
+let logSuppressed = 0;
+const TRACE = new URLSearchParams(location.search).get('trace');
+function trace(...a) { if (TRACE) console.log('[trace]', ...a); }
+// A guest that hits a repeating fprintf would otherwise append a DOM node per
+// line and take the page down with it. Keep every line in the array (that is
+// what the reports carry) but bound what reaches the document.
+function log(s, cls) {
+  if (TRACE) console.log('[out]', s);
+  logLines.push(s);
+  if (logLines.length > 2000) logLines.shift();
+  if (logEl.childNodes.length > 300) {
+    if (++logSuppressed % 500 === 1) {
+      const n = document.createElement('span');
+      n.className = 'dim';
+      n.textContent = `… ${logSuppressed} further lines suppressed\n`;
+      logEl.appendChild(n);
+    }
+    return;
+  }
+  const line = document.createElement('span');
+  line.className = cls || '';
+  line.textContent = s + '\n';
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+let session = null;
+let raf = 0;
+
+async function ensureSession() {
+  if (session) return session;
+  logEl.textContent = '';
+  log('loading module…', 'dim');
+  const t0 = performance.now();
+  // The runtime's diagnostics are env-gated (STRIKERS_*), and a wasm build has
+  // no environment. Emscripten snapshots ENV into `environ` before main, so the
+  // values have to be in place during preRun -- setting Module.ENV afterwards is
+  // too late and getenv() keeps returning NULL.
+  const envNames = (qs.get('env') || '').split(',').map((n) => n.trim()).filter(Boolean);
+  session = await new DolWebSession({
+    canvas,
+    log,
+    blockBudget: parseInt(qs.get('budget') || '20000000', 10),
+    msBudget: parseFloat(qs.get('ms') || '12'),
+  }).load(
+    () => StrikersWeb({ print: (s) => log(s, 'dim'),
+                        printErr: (s) => log(s, s.startsWith('[') ? 'dim' : 'bad'),
+                        preRun: [(mod) => {
+                          const env = (mod && mod.ENV) || (typeof ENV !== 'undefined' ? ENV : null);
+                          if (!env) return;
+                          for (const n of envNames) env[n] = '1';
+                        }] }),
+    qs.get('norender') !== null);
+  if (envNames.length) log('env: ' + envNames.join(','), 'dim');
+  log(`module ready in ${(performance.now() - t0) | 0} ms`, 'ok');
+  session.bindKeyboard(window);
+  return session;
+}
+
+async function useDiscBytes(bytes) {
+  const s = await ensureSession();
+  s.attachDisc(new ArrayBufferDisc(bytes));
+  await s.restoreCard();
+  document.getElementById('boot').disabled = false;
+}
+
+document.getElementById('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  // Into origin-private storage first, streamed, so the next visit needs no
+  // file picker and the copy never doubles in memory.
+  log(`storing ${f.name} (${(f.size / 1048576) | 0} MB)…`, 'dim');
+  let stored = false;
+  try {
+    stored = await DOLWEB_OPFS.storeFile(DOLWEB_OPFS.DISC, f, (done, total) => {
+      const pct = ((done / total) * 100) | 0;
+      if (pct % 20 === 0) log(`  ${pct}%`, 'dim');
+    });
+  } catch (err) { log('could not store the disc: ' + err.message, 'dim'); }
+  log(stored ? 'disc stored; it will load itself next time' : 'running from memory only',
+      stored ? 'ok' : 'dim');
+  await useDiscBytes(new Uint8Array(await f.arrayBuffer()));
+});
+
+// A disc already in storage loads itself. Resolves to the source that won, or
+// null if the page has to wait for the picker.
+const storedDisc = (async function restoreDisc() {
+  if (qs.get('iso')) return null;   // an explicit ?iso= wins
+  const bytes = await DOLWEB_OPFS.read(DOLWEB_OPFS.DISC);
+  if (!bytes) return null;
+  log(`found a stored disc (${(bytes.length / 1048576) | 0} MB)`, 'ok');
+  await useDiscBytes(bytes);
+  return 'opfs';
+})();
+
+document.getElementById('boot').addEventListener('click', () => start());
+document.getElementById('pause').addEventListener('click', () => {
+  if (!session) return;
+  session.running = !session.running;
+  if (session.running) loop();
+});
+document.getElementById('sound').addEventListener('click', async () => {
+  if (session) { await session.startAudio(); document.getElementById('sound').disabled = true; }
+});
+document.getElementById('touch').addEventListener('click', () => {
+  document.getElementById('pad').classList.toggle('on');
+});
+document.getElementById('gaps').addEventListener('click', () => {
+  if (!session) return;
+  const st = session.stats();
+  log('--- gap report (cumulative) ---');
+  for (const [k, v] of Object.entries(st.gaps || {})) if (v) log(`  ${k}: ${v}`);
+  log(`  gpu: ${JSON.stringify(st.gpu)}`);
+});
+
+let cardSaveTimer = 0;
+function start() {
+  try {
+    session.boot();
+    // The card lives in MEMFS; copy it out now and then so a save survives the
+    // tab. Not on a timer the guest can starve -- this is the page's own clock.
+    if (!cardSaveTimer)
+      cardSaveTimer = setInterval(() => { if (session) session.persistCard(); }, 20000);
+    addEventListener('pagehide', () => { if (session) session.persistCard(); });
+  } catch (e) {
+    progress('boot-failed', { error: e.message });
+    throw e;
+  }
+  document.getElementById('boot').disabled = true;
+  document.getElementById('pause').disabled = false;
+  document.getElementById('sound').disabled = false;
+  loop();
+}
+
+let lastHud = 0;
+// Frame scheduling. A visible tab uses requestAnimationFrame, which paces the
+// loop to the display. A headless automated run cannot: its compositor produces
+// no frames once nothing is on screen, so rAF fires once and stops, and its
+// timers are throttled to nothing. A MessageChannel macrotask is neither
+// throttled nor tied to the compositor, so the harness uses that instead.
+const frameChannel = new MessageChannel();
+let framePending = null;
+frameChannel.port1.onmessage = () => {
+  const fn = framePending;
+  framePending = null;
+  if (fn) fn();
+};
+function scheduleFrame(fn) {
+  if (qs.get('auto')) { framePending = fn; frameChannel.port2.postMessage(0); }
+  else raf = requestAnimationFrame(fn);
+}
+
+let loopIters = 0;
+let autoWant = null;      // set by the ?auto=1 harness
+let autoStart = 0;
+let autoLastReport = 0;
+let autoFinished = false;
+
+// Everything the automated run needs, driven from requestAnimationFrame. A
+// headless page's setTimeout does not fire (Chrome treats it as backgrounded),
+// so the harness must not depend on timers.
+let autoShots = 0;
+async function autoTick() {
+  if (!autoWant || autoFinished) return;
+  const now = performance.now();
+  if (session.renderer && autoWant.shotEvery &&
+      session.frames >= (autoShots + 1) * autoWant.shotEvery) {
+    autoShots++;
+    try {
+      const fb = await session.renderer.readbackEfb();
+      progress('shot', { shot: autoShots, frames: session.frames,
+                         png: efbToPng(fb) });
+    } catch (e) { progress('shot-failed', { shot: autoShots, error: String(e) }); }
+  }
+  if (now - autoLastReport > autoWant.reportMs) {
+    autoLastReport = now;
+    const s = session.stats();
+    progress('running', { frames: s.frames, fps: s.fps, pc: s.pc,
+                          presents: s.presents, blocks: s.blocks,
+                          draws: s.gpu ? s.gpu.draws : null,
+                          pipelines: s.gpu ? s.gpu.pipelines : null,
+                          textures: s.gpu ? s.gpu.textures : null,
+                          planned: s.planned, planSkipped: s.planSkipped,
+                          rendererError: s.rendererError });
+  }
+  if (session.frames < autoWant.frames && session.running &&
+      now - autoStart < autoWant.wallMs)
+    return;
+  autoFinished = true;
+  session.running = false;
+  // The page's own 20 s card timer is a setTimeout, which a headless run never
+  // fires; save once here so the scripted two-visit test covers the card too.
+  try { await session.persistCard(); } catch (e) {}
+  const st = session.stats();
+  st.wall_ms = now - autoStart;
+  st.ua = navigator.userAgent;
+  st.disc = session.discInfo ? session.discInfo.gameId : null;
+  st.stop_reason = session.M.UTF8ToString(session.M._dolweb_stop_reason());
+  try {
+    if (session.renderer) st.png = efbToPng(await session.renderer.readbackEfb());
+  } catch (e) { st.readback_error = String(e); }
+  report(st);
+}
+
+function loop() {
+  if (!session || !session.running) { autoTick(); return; }
+  loopIters++;
+  if (TRACE && loopIters % 100 === 0) {
+    const el = (performance.now() - autoStart) / 1000;
+    const b = Number(session.M._dolweb_blocks());
+    trace('loop', loopIters, 'blocks', b, 'presents',
+          Number(session.M._dolweb_present_count()), 'frames', session.frames,
+          'pc', (session.M._dolweb_guest_pc() >>> 0).toString(16),
+          'elapsed', el.toFixed(1), 'blocks/s', (b / Math.max(el, 0.001)).toFixed(0));
+    trace('diag fifo', session.M._dolweb_diag(0), 'bp', session.M._dolweb_diag(1),
+          'pe_finish', session.M._dolweb_diag(2));
+    try {
+      const g = session.renderer.gapCounters();
+      trace('gaps planned', g.draws_planned, 'skipped', g.draws_skipped,
+            'frontend_failed', session.M._dolweb_frontend_failed(),
+            'planObs', session.M._dolweb_frame_draws());
+    } catch (e) { trace('gapCounters threw', String(e)); }
+  }
+  if (qs.get('heartbeat') && loopIters % parseInt(qs.get('heartbeat'), 10) === 0) {
+    const s = session.stats();
+    progress('heartbeat', { iters: loopIters, frames: s.frames, blocks: s.blocks,
+                            pc: s.pc, presents: s.presents,
+                            rendererError: s.rendererError });
+  }
+  session.pollGamepad();
+  // ?input=mash drives the real pad path -- dolweb_set_pad -> web_pad_read ->
+  // PADRead -- rather than the game-specific HLE mash route, so an automated
+  // run exercises the input the product actually ships.
+  if (autoWant && autoWant.mash) {
+    // Strikers' team-select asks the player to MOVE THEIR CONTROLLER to pick a
+    // side, so buttons alone stall there. Cycle a stick push with the buttons.
+    const phase = Math.floor(loopIters / 15) % 6;
+    // START is what walks the menus, and it is also what pauses a match -- so
+    // stop pressing it once the game should be in one, or the "in-match" number
+    // is really a paused-match number.
+    const menus = session.frames < autoWant.mashUntil;
+    session.touchButtons = (phase === 1 || phase === 4) ? DOLWEB_PAD.A
+                         : (menus && phase === 5) ? DOLWEB_PAD.START : 0;
+    session.stickTouch.x = (phase === 2) ? -1 : (phase === 3) ? 1 : 0;
+    session.stickTouch.y = (phase === 0) ? 0.6 : 0;
+  }
+  try {
+    session.step();
+  } catch (e) {
+    session.running = false;
+    progress('step-threw', { iters: loopIters, error: String(e && e.stack || e) });
+    throw e;
+  }
+  const now = performance.now();
+  if (now - lastHud > 400) {
+    lastHud = now;
+    const s = session.stats();
+    const g = s.gpu;   // null when there is no renderer (?norender)
+    hudEl.textContent =
+      `${s.fps.toFixed(1)} fps  frame ${s.frames}\n` +
+      (g ? `draws ${g.draws}  skipped ${s.planSkipped + g.skippedDraws}\n` +
+           `pipelines ${g.pipelines}  textures ${g.textures}\n`
+         : `planned ${s.planned}  no renderer\n`) +
+      `pc 0x${s.pc.toString(16).padStart(8, '0')}` +
+      (s.rendererError ? `\n! ${s.rendererError}` : '');
+  }
+  autoTick();
+  scheduleFrame(loop);
+}
+
+// A phone gets the on-screen pad without being asked, and audio starts on the
+// first touch anywhere -- iOS will not start an AudioContext without a gesture,
+// and making the user find a button for it is a worse first thirty seconds.
+if (matchMedia('(pointer: coarse)').matches)
+  document.getElementById('pad').classList.add('on');
+addEventListener('pointerdown', async function unlock() {
+  removeEventListener('pointerdown', unlock);
+  if (session) {
+    try { await session.startAudio(); document.getElementById('sound').disabled = true; }
+    catch (e) { log('audio unavailable: ' + e.message, 'bad'); }
+  }
+}, { once: true });
+
+// --- on-screen pad --------------------------------------------------------
+const PADBITS = window.DOLWEB_PAD;
+const padEl = document.getElementById('pad');
+const FACE = [
+  { name: 'A', bit: PADBITS.A, x: 82, y: 68, r: 9 },
+  { name: 'B', bit: PADBITS.B, x: 70, y: 80, r: 7 },
+  { name: 'X', bit: PADBITS.X, x: 93, y: 56, r: 6 },
+  { name: 'Y', bit: PADBITS.Y, x: 71, y: 55, r: 6 },
+  { name: 'S', bit: PADBITS.START, x: 50, y: 88, r: 5 },
+  { name: 'L', bit: PADBITS.L, x: 12, y: 20, r: 6 },
+  { name: 'R', bit: PADBITS.R, x: 88, y: 20, r: 6 },
+  { name: 'Z', bit: PADBITS.Z, x: 76, y: 22, r: 5 },
+];
+for (const b of FACE) {
+  const el = document.createElement('div');
+  el.className = 'btn';
+  el.textContent = b.name;
+  el.style.left = `calc(${b.x}% - ${b.r}%)`;
+  el.style.top = `calc(${b.y}% - ${b.r * 4 / 3}%)`;
+  el.style.width = `${b.r * 2}%`;
+  el.style.aspectRatio = '1';
+  const set = (on) => {
+    if (!session) return;
+    if (on) session.touchButtons |= b.bit; else session.touchButtons &= ~b.bit;
+    el.classList.toggle('on', on);
+  };
+  el.addEventListener('pointerdown', (e) => { e.preventDefault(); el.setPointerCapture(e.pointerId); set(true); });
+  el.addEventListener('pointerup', () => set(false));
+  el.addEventListener('pointercancel', () => set(false));
+  padEl.appendChild(el);
+}
+const stick = document.getElementById('stick'), knob = document.getElementById('knob');
+function stickMove(e) {
+  const r = stick.getBoundingClientRect();
+  let dx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+  let dy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+  const m = Math.hypot(dx, dy);
+  if (m > 1) { dx /= m; dy /= m; }
+  if (session) { session.stickTouch.x = dx; session.stickTouch.y = -dy; }
+  knob.style.left = `${30 + dx * 30}%`;
+  knob.style.top = `${30 + dy * 30}%`;
+}
+stick.addEventListener('pointerdown', (e) => { e.preventDefault(); stick.setPointerCapture(e.pointerId); stickMove(e); });
+stick.addEventListener('pointermove', (e) => { if (e.buttons || e.pressure > 0) stickMove(e); });
+const stickRelease = () => {
+  if (session) { session.stickTouch.x = 0; session.stickTouch.y = 0; }
+  knob.style.left = '30%'; knob.style.top = '30%';
+};
+stick.addEventListener('pointerup', stickRelease);
+stick.addEventListener('pointercancel', stickRelease);
+
+// --- headless/automated mode ----------------------------------------------
+// ?iso=/disc.iso&auto=1&frames=N boots without a picker and POSTs a report,
+// so a browser run can be scripted end to end.
+// Progress is reported as it happens, not only at the end: a headless run that
+// dies mid-way still leaves a record of how far it got, which is the difference
+// between a diagnosable failure and a blank file.
+function progress(phase, extra) {
+  if (!qs.get('auto')) return;
+  const body = Object.assign({ phase, log: logLines.slice(-40) }, extra || {});
+  if (body.png) body.log = undefined;
+  // A BigInt anywhere in the payload makes JSON.stringify throw; reporting must
+  // never be able to take the run down with it.
+  let text;
+  try {
+    text = JSON.stringify(body, (k, v) => (typeof v === 'bigint' ? Number(v) : v));
+  } catch (e) {
+    text = JSON.stringify({ phase, report_error: String(e) });
+  }
+  fetch('/report', { method: 'POST', body: text }).catch(() => {});
+}
+window.addEventListener('error', (e) => {
+  log('uncaught: ' + e.message, 'bad');
+  progress('uncaught-error', { error: e.message, stack: String(e.error && e.error.stack) });
+});
+window.addEventListener('unhandledrejection', (e) => {
+  log('unhandled rejection: ' + e.reason, 'bad');
+  progress('unhandled-rejection', { error: String(e.reason) });
+});
+
+(async function auto() {
+  const iso = qs.get('iso');
+  if (!iso && !qs.get('auto')) return;
+  try {
+    progress('start');
+    if (!iso) {
+      // No ?iso: the only way to have a disc is the stored one. This is the
+      // returning-visit path a real user takes on every load after the first.
+      const source = await storedDisc;
+      if (!source) { progress('no-disc', { note: 'nothing stored and no ?iso' }); return; }
+      progress('disc-restored', { game: session.discInfo.gameId,
+                                  bytes: session.disc.size });
+    } else {
+    log(`fetching ${iso}…`, 'dim');
+    const res = await fetch(iso);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    progress('disc-fetched', { bytes: bytes.length });
+    // ?store=1 puts the fetched disc where a picked one would go, so the
+    // returning-visit path (restore from OPFS, no picker) can be exercised
+    // without a human clicking anything.
+    if (qs.get('store')) {
+      const ok = await DOLWEB_OPFS.write(DOLWEB_OPFS.DISC, bytes);
+      progress('disc-stored', { ok });
+    }
+    await useDiscBytes(bytes);
+    progress('disc-attached', { game: session.discInfo.gameId });
+    }
+  } catch (e) {
+    log('setup failed: ' + e.message, 'bad');
+    progress('setup-failed', { error: e.message, stack: String(e.stack) });
+    return;
+  }
+  if (!qs.get('auto')) return;
+
+  autoWant = { frames: parseInt(qs.get('frames') || '600', 10),
+               wallMs: parseInt(qs.get('seconds') || '120', 10) * 1000,
+               reportMs: parseInt(qs.get('report_ms') || '5000', 10),
+               shotEvery: parseInt(qs.get('shots') || '0', 10),
+               mash: qs.get('input') === 'mash',
+               mashUntil: parseInt(qs.get('mash_until') || '3000', 10) };
+  autoStart = performance.now();   // before start(): loop() calls autoTick()
+  start();
+  progress('booted');
+  // Audio needs a user gesture in a real browser; a scripted run gets it with
+  // --autoplay-policy=no-user-gesture-required so the DSP -> worklet path is
+  // exercised rather than assumed.
+  if (qs.get('audio')) {
+    try { await session.startAudio(); progress('audio-started'); }
+    catch (e) { progress('audio-failed', { error: String(e) }); }
+  }
+
+  // Is the run loop stalled because a step never returns, or because the page's
+  // timers are not firing? One step, timed and reported before anything else
+  // runs, tells the two apart -- they need completely different fixes.
+  {
+    const t = performance.now();
+    let r = -99;
+    try { r = session.M._dolweb_step(session.blockBudget, session.msBudget); }
+    catch (e) { progress('probe-threw', { error: String(e) }); throw e; }
+    progress('probe', { step_result: r, step_ms: performance.now() - t,
+                        blocks: Number(session.M._dolweb_blocks()),
+                        pc: session.M._dolweb_guest_pc() >>> 0 });
+  }
+})();
+
+function efbToPng(fb) {
+  const c = document.createElement('canvas');
+  c.width = fb.width; c.height = fb.height;
+  const g = c.getContext('2d');
+  const img = g.createImageData(fb.width, fb.height);
+  for (let y = 0; y < fb.height; y++)
+    for (let x = 0; x < fb.width; x++) {
+      const s = y * fb.bytesPerRow + x * 4, d = (y * fb.width + x) * 4;
+      img.data[d] = fb.data[s]; img.data[d + 1] = fb.data[s + 1];
+      img.data[d + 2] = fb.data[s + 2]; img.data[d + 3] = 255;
+    }
+  g.putImageData(img, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+async function report(payload) {
+  const bigless = (k, v) => (typeof v === 'bigint' ? Number(v) : v);
+  log('--- report ---');
+  try { log(JSON.stringify({ ...payload, png: undefined }, bigless, 1)); }
+  catch (e) { log('report render failed: ' + e.message, 'bad'); }
+  try { await fetch('/report', { method: 'POST', body: JSON.stringify(payload, bigless) }); }
+  catch (e) { log('report POST failed: ' + e.message, 'bad'); }
+  document.title = 'DONE';
+}
+</script>
+</body></html>

@@ -1,5 +1,14 @@
 # WebAssembly as a target
 
+**Update, 2026-08-27: a GameCube game now runs in a browser.** Super Mario
+Strikers boots from a disc the user supplies, presents frames through WebGPU,
+streams textures and performs EFB copies -- runtime, renderer, disc and guest
+all inside one page. `web/` is the client, `ModernGekko/vendor/dolphin/GXRuntime/backends/web/`
+is the third implementation of `DolPlatformOps`, and `PLAN.md` in this directory
+carries the milestone status and the five runtime defects that had to be fixed
+before any of it drew a pixel. The measurements below are unchanged and still
+describe the target; what follows them is now history rather than forecast.
+
 Measured 2026-08-26. Two questions, both with running code in this directory:
 can DolRecomp emit WASM instead of native arm64, and if it did, could a phone
 run it. Nothing here is wired into the shipping build; it is an experiment kept
@@ -205,6 +214,14 @@ Requires `brew install emscripten`, a clang with the PowerPC assembler
 ```sh
 cd experiments/wasm
 
+# The browser client (see PLAN.md)
+web/build-selftest.sh                       # the backend alone, no game
+web/build.sh --generate /path/to/your.iso   # the full client
+python3 serve.py game --iso /path/to/your.iso
+./run-headless.sh selftest.html             # scripted, in headless Chrome
+ios/build-sim.sh                            # the WKWebView shell, in the Simulator
+
+# The 2026-08-26 measurements
 ./bench/build.sh              # native vs wasm guest MIPS, plus the byteswap
 emcc -O2 -msimd128 bench/bulk_swap.c -o /tmp/b.js \
   -sENVIRONMENT=shell -sINITIAL_MEMORY=256MB   # bulk swap: SIMD vs scalar

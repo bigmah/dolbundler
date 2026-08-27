@@ -20,3 +20,15 @@ bench/web/full.wasm
 
 # spike/frame.png is the one committed image; keep it despite frame.png above.
 !spike/frame.png
+
+# The browser client's module is built from the user's own disc.
+web/strikers.js
+web/strikers.wasm
+web/selftest.js
+web/selftest.wasm
+web/build-gxr/
+
+# Frames read back from a run are pictures of the user's own game.
+frame-*.png
+ios/build/
+.devcert/

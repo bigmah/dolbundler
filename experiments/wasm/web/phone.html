@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>play</title>
+<style>body{font:15px/1.6 -apple-system,system-ui,sans-serif;background:#0d1214;
+color:#e4ebeb;margin:0;padding:24px}a{color:#63bc8a}</style></head><body>
+<p id="m">starting the device run…</p>
+<script>
+// A short URL to type on a phone. Everything the device measurement needs, in
+// one redirect: fetch the disc from the Mac once and keep it in OPFS, drive the
+// game to a match, report every 20 s and post a frame every 600, with sound.
+const params = new URLSearchParams({
+  iso: '/disc.iso', store: '1', auto: '1',
+  frames: '4000', seconds: '600', report_ms: '20000', shots: '600',
+  input: 'mash', mash_until: '99999', audio: '1',
+  env: 'STRIKERS_AUTO_SKIP_CARD_PROMPT',
+});
+document.getElementById('m').innerHTML =
+  'fetching the disc (about 650 MB) and booting — leave this open.<br>' +
+  '<a href="index.html?' + params + '">continue</a>';
+location.replace('index.html?' + params);
+</script>
+</body></html>

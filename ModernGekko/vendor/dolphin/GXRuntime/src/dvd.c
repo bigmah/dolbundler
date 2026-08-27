@@ -18,11 +18,25 @@
 #define FST_ENTRY_SIZE 12u
 
 static FILE* g_iso;
+static DolDiscReadFn g_read;   // host reader; NULL means "use g_iso"
+static void* g_read_user;
 static u8*   g_fst;          // raw FST blob (entries followed by the string table)
 static u32   g_fst_size;
 static u32   g_num_entries;  // total entries; equals root entry's "next" field
 static const char* g_strings;  // string table, inside g_fst
 static bool  g_ready;
+
+// Every disc read funnels through here so the FST parse, the DMA fast path and
+// the byte-at-a-time fallback all share one backing store.
+static u32 disc_read(u64 offset, u32 size, void* dest) {
+    if (g_read != NULL)
+        return g_read(g_read_user, offset, size, dest);
+    if (g_iso == NULL)
+        return 0;
+    if (fseeko(g_iso, (off_t)offset, SEEK_SET) != 0)
+        return 0;
+    return (u32)fread(dest, 1, size, g_iso);
+}
 
 static u32 be32(const u8* p) {
     return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
@@ -54,55 +68,55 @@ static bool name_matches(const char* path, const char* string) {
 // ---------------------------------------------------------------------------
 // Image loading
 // ---------------------------------------------------------------------------
-static bool load_from(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f)
-        return false;
-
+// Parse the disc header + FST through whatever reader is installed. The caller
+// has already set g_iso or g_read; on failure it clears them.
+static bool load_current_reader(const char* label) {
     u8 header[0x440];
-    if (fread(header, 1, sizeof header, f) != sizeof header) {
-        fclose(f);
+    if (disc_read(0u, (u32)sizeof header, header) != sizeof header)
         return false;
-    }
-    if (be32(header + DISC_MAGIC_OFFSET) != DISC_MAGIC) {
-        fclose(f);  // not a GameCube disc image
-        return false;
-    }
+    if (be32(header + DISC_MAGIC_OFFSET) != DISC_MAGIC)
+        return false;  // not a GameCube disc image
 
     u32 fst_off = be32(header + DISC_FST_OFFSET);
     u32 fst_size = be32(header + DISC_FST_SIZE);
-    if (fst_size < FST_ENTRY_SIZE || fst_size > 0x4000000u) {
-        fclose(f);
+    if (fst_size < FST_ENTRY_SIZE || fst_size > 0x4000000u)
         return false;
-    }
 
     u8* fst = (u8*)malloc(fst_size);
-    if (!fst) {
-        fclose(f);
+    if (!fst)
         return false;
-    }
-    if (fseeko(f, (off_t)fst_off, SEEK_SET) != 0 ||
-        fread(fst, 1, fst_size, f) != fst_size) {
+    if (disc_read(fst_off, fst_size, fst) != fst_size) {
         free(fst);
-        fclose(f);
         return false;
     }
 
     u32 num_entries = be32(fst + 8);  // root entry's "next" field = total count
     if ((u64)num_entries * FST_ENTRY_SIZE > fst_size) {
         free(fst);
-        fclose(f);
         return false;
     }
 
-    g_iso = f;
     g_fst = fst;
     g_fst_size = fst_size;
     g_num_entries = num_entries;
     g_strings = (const char*)(fst + (size_t)num_entries * FST_ENTRY_SIZE);
     g_ready = true;
-    fprintf(stderr, "[dvd] disc image: %s (%u FST entries)\n", path, num_entries);
+    fprintf(stderr, "[dvd] disc image: %s (%u FST entries)\n", label, num_entries);
     return true;
+}
+
+static bool load_from(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return false;
+    g_iso = f;
+    g_read = NULL;
+    g_read_user = NULL;
+    if (load_current_reader(path))
+        return true;
+    fclose(f);
+    g_iso = NULL;
+    return false;
 }
 
 bool dvd_open_image(const char* path) {
@@ -115,11 +129,29 @@ bool dvd_open_image(const char* path) {
     return false;
 }
 
+bool dvd_open_reader(DolDiscReadFn read, void* user) {
+    if (g_ready)
+        return true;
+    if (read == NULL)
+        return false;
+    g_iso = NULL;
+    g_read = read;
+    g_read_user = user;
+    if (load_current_reader("<host reader>"))
+        return true;
+    g_read = NULL;
+    g_read_user = NULL;
+    fprintf(stderr, "[dvd] host reader did not produce a GameCube disc\n");
+    return false;
+}
+
 void dvd_close_image(void) {
     if (g_iso)
         fclose(g_iso);
     free(g_fst);
     g_iso = NULL;
+    g_read = NULL;
+    g_read_user = NULL;
     g_fst = NULL;
     g_strings = NULL;
     g_ready = false;
@@ -220,9 +252,7 @@ void dvd_read_to_guest(CPUState* cpu, u32 guest_addr, u32 disc_off, u32 length) 
         dst = cpu->ram + (guest_addr - GC_RAM_UNCACHED);
 
     if (dst) {
-        size_t got = 0;
-        if (fseeko(g_iso, (off_t)disc_off, SEEK_SET) == 0)
-            got = fread(dst, 1, length, g_iso);
+        u32 got = disc_read(disc_off, length, dst);
         if (got < length)
             memset(dst + got, 0, length - got);  // zero-fill past image end
         return;
@@ -232,8 +262,7 @@ void dvd_read_to_guest(CPUState* cpu, u32 guest_addr, u32 disc_off, u32 length) 
     // external region (VM window, etc.) is honored. Not expected in practice.
     for (u32 k = 0; k < length; k++) {
         u8 b = 0;
-        if (fseeko(g_iso, (off_t)(disc_off + k), SEEK_SET) == 0)
-            (void)(fread(&b, 1, 1, g_iso) == 1);
+        (void)disc_read((u64)disc_off + k, 1u, &b);
         mem_write8(cpu, guest_addr + k, b);
     }
 }
