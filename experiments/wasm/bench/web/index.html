@@ -1,0 +1,104 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DolRecomp WASM bench</title>
+<style>
+body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#111;color:#eee}
+h1{font-size:17px;margin:0 0 12px}
+pre{background:#1c1c1e;padding:10px;border-radius:8px;overflow-x:auto;font-size:12px;white-space:pre}
+.row{margin:8px 0}
+.k{color:#8ab4f8}
+button{font-size:16px;padding:10px 16px;border-radius:8px;border:0;background:#0a84ff;color:#fff}
+</style></head><body>
+<h1>DolRecomp → WASM benchmark</h1>
+<div class="row" id="dev"></div>
+<button id="go">Run</button>
+<pre id="out">idle</pre>
+<script src="bench.js"></script>
+<script>
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + "\n"; };
+const results = { ua: navigator.userAgent, cores: navigator.hardwareConcurrency || null,
+                  mem: navigator.deviceMemory || null, dpr: devicePixelRatio, ts: Date.now() };
+document.getElementById('dev').textContent =
+  navigator.userAgent + "  |  cores " + (navigator.hardwareConcurrency||"?");
+
+// Optional: drop your own whole-game module at web/full.wasm to measure how a
+// real title's worth of recompiled code loads. Nothing game-derived ships in
+// this repo, so the test is skipped when the file is absent.
+async function fullModuleTest() {
+  log("--- whole-game module (web/full.wasm, if present) ---");
+  const t0 = performance.now();
+  const resp = await fetch('full.wasm');
+  if (!resp.ok) { log("no web/full.wasm -- skipped (see the README)"); return; }
+  const buf = await resp.arrayBuffer();
+  const tFetch = performance.now() - t0;
+  log("fetched " + (buf.byteLength/1048576).toFixed(1) + " MB in " + tFetch.toFixed(0) + " ms");
+  results.full_bytes = buf.byteLength;
+  try {
+    const t1 = performance.now();
+    const mod = await WebAssembly.compile(buf);
+    const tc = performance.now() - t1;
+    results.full_compile_ms = tc;
+    results.full_exports = WebAssembly.Module.exports(mod).length;
+    log("WebAssembly.compile: " + tc.toFixed(0) + " ms, exports " + results.full_exports);
+  } catch (e) {
+    results.full_compile_error = String(e);
+    log("compile FAILED: " + e);
+  }
+}
+
+function featureTest() {
+  log("--- engine features a Dolphin-in-the-browser build needs ---");
+  const f = {};
+  f.sharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+  f.crossOriginIsolated = !!self.crossOriginIsolated;
+  f.webgpu = !!navigator.gpu;
+  try { const cv = document.createElement('canvas');
+        f.webgl2 = !!cv.getContext('webgl2'); } catch(e) { f.webgl2 = false; }
+  // wasm SIMD: (module (func (result v128) (i32x4.splat (i32.const 0))))
+  try { f.simd = WebAssembly.validate(new Uint8Array([
+    0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,17,253,
+    98,11])); } catch(e) { f.simd = false; }
+  // wasm threads (shared memory)
+  try { new WebAssembly.Memory({initial:1, maximum:1, shared:true}); f.wasmThreads = true; }
+  catch(e) { f.wasmThreads = false; }
+  f.audioWorklet = typeof AudioWorklet !== 'undefined';
+  results.features = f;
+  for (const k in f) log("  " + k + ": " + f[k]);
+}
+
+async function memTest() {
+  log("--- linear memory headroom ---");
+  let ok = 0;
+  try {
+    const m = new WebAssembly.Memory({ initial: 16, maximum: 32768 }); // pages of 64KB
+    for (let mb = 64; mb <= 2048; mb += 64) {
+      m.grow(1024); // +64MB
+      ok = mb;
+    }
+  } catch (e) { /* stop at the limit */ }
+  results.wasm_mem_mb = ok;
+  log("grew WebAssembly.Memory to " + ok + " MB before failing");
+}
+
+document.getElementById('go').onclick = async () => {
+  out.textContent = "";
+  log("--- recompiled guest kernels ---");
+  const M = await BenchModule();
+  const run = M.cwrap('bench_run', 'string', ['number', 'number']);
+  const csv = run(5000000, 5);
+  log(csv);
+  results.kernels = csv;
+  featureTest();
+  await fullModuleTest();
+  await memTest();
+  try {
+    await fetch('/report', { method: 'POST', headers: {'Content-Type':'application/json'},
+                             body: JSON.stringify(results) });
+    log("[reported]");
+  } catch (e) { log("[report failed: " + e + "]"); }
+};
+if (location.search.indexOf('auto') >= 0) document.getElementById('go').click();
+</script>
+</body></html>

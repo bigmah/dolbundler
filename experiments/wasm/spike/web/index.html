@@ -1,0 +1,226 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GX → WGSL → WebGPU</title>
+<style>
+body{font:14px/1.55 -apple-system,system-ui,sans-serif;margin:0;padding:16px;
+     background:#0d1214;color:#e4ebeb}
+h1{font-size:16px;margin:0 0 4px}
+p.sub{margin:0 0 14px;color:#9dacaf;font-size:13px}
+canvas{width:320px;height:320px;border:1px solid #243033;border-radius:8px;
+       image-rendering:pixelated;background:#000;display:block}
+pre{background:#141b1d;border:1px solid #243033;padding:10px;border-radius:8px;
+    font-size:11.5px;line-height:1.5;overflow-x:auto;white-space:pre-wrap;margin:14px 0 0}
+.ok{color:#63bc8a}.bad{color:#e0796a}
+</style></head><body>
+<h1>GameCube GX → WGSL → WebGPU</h1>
+<p class="sub">GXRuntime's gxcore, compiled to WebAssembly, decoding real GX register
+writes into a draw plan and a shader. Nothing below was written for the browser.</p>
+<canvas id="cv" width="320" height="320"></canvas>
+<pre id="log">starting…</pre>
+
+<script src="gxspike.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const results = { steps: [] };
+function log(s, cls) {
+  results.steps.push(s);
+  logEl.innerHTML += "\n" + (cls ? `<span class="${cls}">${s}</span>` : s);
+}
+
+async function main() {
+  logEl.textContent = "";
+
+  // ---- 1. the GameCube side, in WebAssembly ------------------------------
+  const M = await GxSpike();
+  const ok = M._gxspike_build();
+  if (!ok) { log("gxcore skipped the draw: " + M.UTF8ToString(M._gxspike_status()), "bad"); return; }
+
+  const wgsl        = M.UTF8ToString(M._gxspike_wgsl());
+  const stride      = M._gxspike_vertex_stride();
+  const vtxCount    = M._gxspike_vertex_count();
+  const idxCount    = M._gxspike_index_count();
+  const vtxPtr      = M._gxspike_vertices();
+  const idxPtr      = M._gxspike_indices();
+  const vscPtr      = M._gxspike_vs_constants();
+  const vscSize     = M._gxspike_vs_constants_size();
+  const offPos      = M._gxspike_off_pos(),   offMtx = M._gxspike_off_posmtx();
+  const offCol0     = M._gxspike_off_color0(), offCol1 = M._gxspike_off_color1();
+  const offTex0     = M._gxspike_off_tex0();
+  const cullMode    = M._gxspike_cull_mode();
+  const depthTest   = M._gxspike_depth_test();
+  const depthFunc   = M._gxspike_depth_func();
+
+  results.wgsl_bytes = wgsl.length;
+  results.vertex_count = vtxCount;
+  results.index_count = idxCount;
+  results.stride = stride;
+  log(`gxcore plan: ${vtxCount} vertices → ${idxCount} indices, ${stride}B stride`, "ok");
+  log(`gxcore shader: ${wgsl.length} bytes of WGSL, cull=${cullMode} depth=${depthTest}/${depthFunc}`, "ok");
+
+  const vertexBytes = new Uint8Array(M.HEAPU8.buffer, vtxPtr, vtxCount * stride).slice();
+  const indexBytes  = new Uint8Array(M.HEAPU8.buffer, idxPtr, idxCount * 2).slice();
+  const vscBytes    = new Uint8Array(M.HEAPU8.buffer, vscPtr, vscSize).slice();
+
+  // ---- 2. the browser side ----------------------------------------------
+  if (!navigator.gpu) { log("no navigator.gpu — WebGPU unavailable", "bad"); return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { log("requestAdapter() returned null", "bad"); return; }
+  const device = await adapter.requestDevice();
+  results.adapter = adapter.info ? adapter.info.vendor : "adapter";
+  log("WebGPU device acquired", "ok");
+
+  const canvas = document.getElementById('cv');
+  const ctx = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque',
+                  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
+
+  // Render into an offscreen texture and read *that* back. Sampling the canvas
+  // races the compositor; an offscreen copy is ordered by the queue and is the
+  // measurement this spike actually trusts. The canvas copy is only for looking at.
+  const offscreen = device.createTexture({
+    size: [canvas.width, canvas.height], format,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+  });
+
+  device.pushErrorScope('validation');
+
+  // gxcore's WGSL, handed straight to the browser
+  const module = device.createShaderModule({ code: wgsl });
+
+  const GPU_CULL = ['none', 'back', 'front', 'none'];          // GX cull modes
+  const GPU_CMP  = ['never','less','equal','less-equal',
+                    'greater','not-equal','greater-equal','always'];
+
+  const pipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: {
+      module, entryPoint: 'vs_main',
+      buffers: [{
+        arrayStride: stride,
+        attributes: [
+          { shaderLocation: 0, offset: offPos,       format: 'float32x3' },
+          { shaderLocation: 1, offset: offMtx,       format: 'uint32'    },
+          { shaderLocation: 2, offset: offCol0,      format: 'float32x4' },
+          { shaderLocation: 3, offset: offCol1,      format: 'float32x4' },
+          { shaderLocation: 4, offset: offTex0 +  0, format: 'float32x2' },
+          { shaderLocation: 5, offset: offTex0 +  8, format: 'float32x2' },
+          { shaderLocation: 6, offset: offTex0 + 16, format: 'float32x2' },
+          { shaderLocation: 7, offset: offTex0 + 24, format: 'float32x2' },
+        ],
+      }],
+    },
+    fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
+    primitive: { topology: 'triangle-list', cullMode: GPU_CULL[cullMode & 3] },
+    depthStencil: {
+      format: 'depth24plus',
+      depthWriteEnabled: true,
+      depthCompare: depthTest ? GPU_CMP[depthFunc & 7] : 'always',
+    },
+  });
+  log("pipeline created from gxcore's WGSL", "ok");
+
+  const vbuf = device.createBuffer({ size: vertexBytes.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(vbuf, 0, vertexBytes);
+  const ibuf = device.createBuffer({ size: Math.max(4, indexBytes.byteLength),
+    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(ibuf, 0, indexBytes);
+  const ubuf = device.createBuffer({ size: vscBytes.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(ubuf, 0, vscBytes);
+
+  const bind = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(1),
+    entries: [{ binding: 0, resource: { buffer: ubuf } }],
+  });
+
+  const depth = device.createTexture({
+    size: [canvas.width, canvas.height], format: 'depth24plus',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginRenderPass({
+    colorAttachments: [{
+      view: offscreen.createView(),
+      clearValue: { r: 0.05, g: 0.07, b: 0.08, a: 1 },
+      loadOp: 'clear', storeOp: 'store',
+    }],
+    depthStencilAttachment: {
+      view: depth.createView(), depthClearValue: 1.0,
+      depthLoadOp: 'clear', depthStoreOp: 'store',
+    },
+  });
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(1, bind);
+  pass.setVertexBuffer(0, vbuf);
+  pass.setIndexBuffer(ibuf, 'uint16');
+  pass.drawIndexed(idxCount);
+  pass.end();
+
+  const bytesPerRow = Math.ceil(canvas.width * 4 / 256) * 256;
+  const rb = device.createBuffer({ size: bytesPerRow * canvas.height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  enc.copyTextureToBuffer({ texture: offscreen }, { buffer: rb, bytesPerRow },
+                          [canvas.width, canvas.height]);
+  enc.copyTextureToTexture({ texture: offscreen }, { texture: ctx.getCurrentTexture() },
+                           [canvas.width, canvas.height]);
+  device.queue.submit([enc.finish()]);
+
+  const err = await device.popErrorScope();
+  if (err) { log("WebGPU validation error: " + err.message, "bad"); results.error = err.message; }
+  await device.queue.onSubmittedWorkDone();
+  await rb.mapAsync(GPUMapMode.READ);
+  const raw = new Uint8Array(rb.getMappedRange()).slice();
+  rb.unmap();
+
+  // bgra8unorm on Apple: swizzle to rgb for reporting
+  const bgra = format.startsWith('bgra');
+  const d = new Uint8Array(canvas.width * canvas.height * 4);
+  for (let y = 0; y < canvas.height; y++)
+    for (let x = 0; x < canvas.width; x++) {
+      const src = y * bytesPerRow + x * 4, dst = (y * canvas.width + x) * 4;
+      d[dst]     = bgra ? raw[src + 2] : raw[src];
+      d[dst + 1] = raw[src + 1];
+      d[dst + 2] = bgra ? raw[src] : raw[src + 2];
+      d[dst + 3] = raw[src + 3];
+    }
+  const at = (x, y) => { const o = (y * canvas.width + x) * 4; return [d[o], d[o+1], d[o+2]]; };
+  let clearPx = 0; const distinct = new Set();
+  for (let i = 0; i < d.length; i += 4) {
+    if (Math.abs(d[i]-13) <= 6 && Math.abs(d[i+1]-18) <= 6 && Math.abs(d[i+2]-20) <= 6) clearPx++;
+    if (distinct.size < 64) distinct.add((d[i] << 16) | (d[i+1] << 8) | d[i+2]);
+  }
+  const total = canvas.width * canvas.height;
+  const coverage = (total - clearPx) / total;
+  results.coverage = coverage;
+  results.clear_pixels = clearPx;
+  results.distinct_colours = distinct.size;
+  results.samples = { centre: at(160,160), lowerLeft: at(70,250),
+                      upperRight: at(230,90), corner: at(4,4) };
+  log(`canvas: ${(coverage*100).toFixed(1)}% covered by geometry, ${distinct.size}+ colours`,
+      clearPx > 0 ? "ok" : "bad");
+  log(`centre ${at(160,160)}  lower-left ${at(70,250)}  upper-right ${at(230,90)}  corner ${at(4,4)}`);
+  const drew = coverage > 0.02 && coverage < 0.98 && distinct.size > 3;
+  log(drew ? "GX register writes became pixels." : "no triangle on the canvas", drew ? "ok" : "bad");
+
+  // hand the rendered frame back as a PNG so the result is a picture, not a claim
+  try {
+    const c2 = document.createElement('canvas');
+    c2.width = canvas.width; c2.height = canvas.height;
+    const g2 = c2.getContext('2d');
+    const img = g2.createImageData(canvas.width, canvas.height);
+    img.data.set(d);
+    g2.putImageData(img, 0, 0);
+    results.png = c2.toDataURL('image/png');
+  } catch (e) {}
+
+  results.ua = navigator.userAgent;
+  try { await fetch('/report', { method: 'POST', body: JSON.stringify(results) }); log("[reported]"); }
+  catch (e) {}
+}
+main().catch(e => log("exception: " + e, "bad"));
+</script>
+</body></html>

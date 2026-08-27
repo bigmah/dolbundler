@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>webgpu control</title>
+<body style="background:#111;color:#eee;font:13px system-ui;padding:12px">
+<canvas id="cv" width="160" height="160" style="width:160px;height:160px;border:1px solid #444"></canvas>
+<pre id="o">…</pre>
+<script>
+const o=document.getElementById('o'); const R={steps:[]};
+const log=s=>{R.steps.push(s);o.textContent+="\n"+s;};
+(async()=>{
+ o.textContent="";
+ if(!navigator.gpu){log("no navigator.gpu");return;}
+ const ad=await navigator.gpu.requestAdapter(); if(!ad){log("no adapter");return;}
+ const dev=await ad.requestDevice(); log("device ok");
+ R.info = ad.info ? {vendor:ad.info.vendor,arch:ad.info.architecture,desc:ad.info.description} : null;
+ const cv=document.getElementById('cv'); const ctx=cv.getContext('webgpu');
+ const fmt=navigator.gpu.getPreferredCanvasFormat(); R.format=fmt; log("format "+fmt);
+ ctx.configure({device:dev,format:fmt,alphaMode:'opaque'});
+ dev.pushErrorScope('validation');
+ // simplest possible frame: clear the canvas texture to red
+ const enc=dev.createCommandEncoder();
+ const p=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),
+   clearValue:{r:1,g:0,b:0,a:1},loadOp:'clear',storeOp:'store'}]});
+ p.end(); dev.queue.submit([enc.finish()]);
+ const e=await dev.popErrorScope(); if(e){log("validation: "+e.message);R.err=e.message;}
+ await dev.queue.onSubmittedWorkDone();
+ const bmp=await createImageBitmap(cv); const c2=document.createElement('canvas');
+ c2.width=cv.width;c2.height=cv.height; const g=c2.getContext('2d'); g.drawImage(bmp,0,0);
+ const d=g.getImageData(0,0,cv.width,cv.height).data;
+ R.centre=[d[(80*160+80)*4],d[(80*160+80)*4+1],d[(80*160+80)*4+2]];
+ log("canvas centre rgb "+R.centre+"  (expect 255,0,0)");
+ R.pass = R.centre[0]>200 && R.centre[1]<50;
+ log(R.pass?"CONTROL PASSES — WebGPU renders here":"CONTROL FAILS — WebGPU not rendering in this context");
+ R.ua=navigator.userAgent;
+ try{await fetch('/report',{method:'POST',body:JSON.stringify(R)});}catch(_){}
+})().catch(e=>log("exception "+e));
+</script>

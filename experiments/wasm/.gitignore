@@ -1,0 +1,22 @@
+# Build outputs
+build/
+*.o
+*.wasm
+*.dol
+*.bin
+bench/web/bench.js
+spike/web/gxspike.js
+bench_native
+bench_wasm.js
+swap_native
+swap.js
+
+# Anything the harnesses report back
+reports.jsonl
+frame.png
+
+# A whole-game module is game-derived: never in this repo.
+bench/web/full.wasm
+
+# spike/frame.png is the one committed image; keep it despite frame.png above.
+!spike/frame.png
