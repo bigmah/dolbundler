@@ -41,7 +41,11 @@ add_executable(DolBundler MACOSX_BUNDLE
   App/DBAppDelegate.mm
   App/DBLibrary.mm
   App/DBLibraryViewController.mm
+  App/DBGameCell.mm
   App/DBGameViewController.mm
+  App/DBPauseMenuView.mm
+  App/DBSettings.mm
+  App/DBTheme.mm
   App/DBTouchPadView.mm
   bridge/dolbundler_core.c
   bridge/dolbundler_run.mm

@@ -2,6 +2,9 @@
 
 #import "DBLibrary.h"
 
+#include <cstdio>
+#include <cstring>
+
 #include "dolbundler_core.h"
 // For db_has_native_module(): whether a disc can be played is a property of
 // how the app was linked, not of anything the import wrote.
@@ -100,6 +103,65 @@
   return [_games copy];
 }
 
+- (unsigned long long)bytesOnDiskAt:(NSString*)path
+{
+  return [self directorySize:path];
+}
+
+- (DBGameEntry*)probeDiscAtPath:(NSString*)path error:(NSString**)error
+{
+  DBGame game;
+  char err[512] = {0};
+  if (!db_probe_iso(path.UTF8String, &game, err, sizeof(err)))
+  {
+    if (error)
+      *error = @(err);
+    return nil;
+  }
+
+  // db_paths_for() writes into the same struct it reads the disc ID from, so
+  // the ID is taken out first rather than handed back in as its own source.
+  char discID[DB_DISC_ID_SIZE];
+  snprintf(discID, sizeof(discID), "%s", game.disc_id);
+  NSString* title = @(game.title);
+  db_paths_for(_libraryDirectory.UTF8String, discID, &game);
+
+  DBGameEntry* entry = [[DBGameEntry alloc] init];
+  entry.discID = @(discID);
+  entry.title = title.length ? title : entry.discID;
+  entry.gameRoot = @(game.game_root);
+  entry.playable = db_has_native_module(discID) != 0;
+  entry.extractedBytes = 0;
+  return entry;
+}
+
+- (unsigned long long)estimatedExtractedBytesForDiscAtPath:(NSString*)path
+{
+  // A full GameCube disc. Used as a ceiling when the image on disk cannot say
+  // anything useful about what will come out of it.
+  static const unsigned long long kFullGameCubeDisc = 1459978240ULL;
+
+  NSDictionary* attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+  const unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
+
+  // A plain .iso is a byte-for-byte image, so its own size is the closest
+  // thing to a measurement available before a single file is written. A CISO
+  // is compressed and its size says nothing at all, so it falls back to the
+  // ceiling. NKit sits in between -- it strips padding much as extraction does
+  // -- and is close enough to be worth using. Every caller clamps the result,
+  // because none of these is exact and a bar that reaches the end early is
+  // less alarming than one that runs off it.
+  char magic[4] = {0};
+  if (FILE* f = fopen(path.UTF8String, "rb"))
+  {
+    fread(magic, 1, sizeof(magic), f);
+    fclose(f);
+  }
+  if (memcmp(magic, "CISO", sizeof(magic)) == 0 || fileSize == 0)
+    return kFullGameCubeDisc;
+  return fileSize;
+}
+
 - (unsigned long long)availableBytes
 {
   NSDictionary* attrs = [NSFileManager.defaultManager
@@ -120,14 +182,16 @@ void ProgressBridge(DBStage stage, const char* detail, void* ctx)
   NSString* text;
   switch (stage)
   {
+  // Verbs, not sentences: the caller puts the game's title after this, so
+  // "Extracting disc Luigi's Mansion" is what a noun here reads as.
   case DB_STAGE_PROBING:
-    text = @"Reading disc";
+    text = @"Reading";
     break;
   case DB_STAGE_EXTRACTING:
-    text = @"Extracting disc";
+    text = @"Extracting";
     break;
   case DB_STAGE_DONE:
-    text = @"Done";
+    text = @"Finishing";
     break;
   }
   block(text);

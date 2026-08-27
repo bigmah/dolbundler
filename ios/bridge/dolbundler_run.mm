@@ -86,6 +86,7 @@ void run_log(const char* fmt, ...)
 std::mutex s_runtime_mutex;
 std::unique_ptr<moderngekko::Runtime> s_runtime;
 std::atomic<bool> s_running{false};
+std::atomic<bool> s_paused{false};
 
 // Pad 0 is the only one the on-screen controls drive. A physical controller
 // paired over Bluetooth arrives through the SDL backend as its own device and
@@ -263,6 +264,7 @@ int db_run_game(const char* game_root, const char* user_dir,
     set_err(err, err_size, "A game is already running.");
     return 0;
   }
+  s_paused.store(false);
 
   s_log_path = std::string(user_dir) + "/dolbundler-run.log";
   run_log("---- run: %s", title ? title : "(untitled)");
@@ -440,6 +442,7 @@ int db_run_game(const char* game_root, const char* user_dir,
     s_runtime.reset();
   }
   s_running.store(false);
+  s_paused.store(false);
   FlushLLVMProfileIfRequested();
 
   if (result.reason == moderngekko::RuntimeExitReason::BootFailed)
@@ -456,6 +459,32 @@ void db_request_stop(void)
   std::lock_guard<std::mutex> lock(s_runtime_mutex);
   if (s_runtime)
     s_runtime->RequestStop();
+}
+
+void db_set_paused(int paused)
+{
+  std::lock_guard<std::mutex> lock(s_runtime_mutex);
+  if (!s_runtime)
+    return;
+
+  // Pause() and Resume() report an error only when the runtime is not running,
+  // which db_is_running() already covers for the caller. Nothing here can act
+  // on a failure beyond not changing the flag, so the flag follows the call.
+  if (paused)
+  {
+    if (!s_runtime->Pause())
+      s_paused.store(true);
+  }
+  else
+  {
+    if (!s_runtime->Resume())
+      s_paused.store(false);
+  }
+}
+
+int db_is_paused(void)
+{
+  return s_paused.load() ? 1 : 0;
 }
 
 int db_is_running(void)

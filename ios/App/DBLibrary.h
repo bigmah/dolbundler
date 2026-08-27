@@ -31,6 +31,22 @@
 // so deleting a folder in Files is enough to remove a game.
 - (void)reload;
 
+// Read a disc's identity without extracting it. Cheap -- it touches only the
+// first 0x440 bytes -- and it is what lets the import banner name the game and
+// watch the right directory fill up while the slow half runs.
+// The returned entry describes where the disc *would* land; it is not in the
+// library until importDiscAtPath: finishes.
+- (DBGameEntry*)probeDiscAtPath:(NSString*)path error:(NSString**)error;
+
+// Roughly how many bytes this image will produce once extracted, for a
+// progress bar. An estimate, not a measurement -- see the implementation for
+// which images it can and cannot be right about.
+- (unsigned long long)estimatedExtractedBytesForDiscAtPath:(NSString*)path;
+
+// Bytes currently on disk beneath `path`. Polled during an import, so it runs
+// off the main thread.
+- (unsigned long long)bytesOnDiskAt:(NSString*)path;
+
 // Import a disc image. Blocking: call it off the main thread.
 // `progress` is invoked with a short stage description.
 - (DBGameEntry*)importDiscAtPath:(NSString*)path

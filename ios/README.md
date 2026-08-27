@@ -99,6 +99,42 @@ because they keep the disc header and FST intact.
 `.rvz` and Wii discs do not work: both need the `wit` bridge, which cannot run
 on iOS (see *No subprocesses* below).
 
+The disc is probed before it is extracted — a 0x440-byte read — so a file that
+is not a GameCube image is rejected in a moment rather than after a minute of
+pointless work, and the progress card can name the game rather than the file.
+Import runs beside the library instead of behind a modal: it takes minutes, and
+the one thing there is to do while waiting is look at what is already there.
+
+There is no percentage from the extractor, so the card polls the growing game
+root once a second and shows the bytes written, which is exact. The bar beside
+it is an estimate — a plain `.iso` is a byte-for-byte image so its own size is
+the denominator, a CISO is compressed and its size says nothing so a full
+GameCube disc is used as a ceiling instead — and it is clamped short of the end
+rather than allowed to sit at 100% while the extractor is still working.
+
+## In a game
+
+The corner button opens a panel that pauses the emulated machine rather than
+leaving it running behind a menu, using `Runtime::Pause()`. It carries an
+overlay-opacity slider, a haptics switch, the fps/speed readout's switch, and
+Quit. It exists because the alternative was a bare ✕ that quit without asking,
+on a screen whose entire surface is a controller — a mis-tap in the corner
+ended the session.
+
+The button and the readout sit at the top *centre*. The corners are where L and
+R are, and those belong under the index fingers and cannot move.
+
+Backgrounding the app pauses the game and returning resumes it, unless the
+panel is open — someone who opened it before switching away still has it open,
+and resuming underneath it is what the panel exists to prevent.
+
+There is no "Starting <game>…" placeholder. The one that used to be here was a
+label on an eighteen-second timer, sized for the twelve seconds the removed
+bytecode path spent verifying a module against the DOL. Native AOT boots
+straight into the game, and a fixed timer that outlives what it was measuring
+is worse than nothing: it covers the first frames of a game that has already
+started.
+
 ## Why this is allowed on the App Store
 
 Two separate rules matter, and the architecture answers both.
@@ -171,7 +207,35 @@ thread.
 SDL3 builds for iOS and handles MFi and Bluetooth pads. The on-screen pad feeds
 `ciface::Touch`, the same input overrider the Android overlay uses, which
 carries no Android dependencies. The overlay hides itself whenever a real
-controller is connected.
+controller is connected, and drops whatever it was holding as it goes.
+
+Every control the hardware has is on screen: both analog sticks, the D-pad, A,
+B, X, Y, Z, L, R and Start. They are laid out and coloured the way a GameCube
+pad is, because the point of colouring them at all is that someone who has held
+one can find A without reading the letter.
+
+Three things about it are less obvious than they look:
+
+- **The main stick floats.** A touch anywhere in the lower left that misses
+  every button picks the stick up and re-centres it under the thumb. Finding an
+  exact circle without looking is the thing people get wrong, and a stick that
+  has to be found is a stick that is not being used. The C stick does not float
+  — the right side is crowded with buttons and a floating stick there would fire
+  on stray taps — so it stays put with a generous hit radius instead.
+- **The triggers report twice.** Pressing L sets both `GCPAD_L_ANALOG` and
+  `GCPAD_L_DIGITAL`. A game may read either the analog depth or the click at
+  the bottom of the throw, and which one it uses is not knowable from here.
+- **The outlines are light, not dark.** A dark outline disappears into the dark
+  scenes games spend most of their time in, and a translucent fill is too faint
+  to carry a control on its own there. Against a bright scene the fill is what
+  separates the shape, so the pale line can afford to lose that fight.
+
+Nothing is drawn with `-drawRect:`. Each control owns a `CAShapeLayer`, so
+pressing a button repaints that button rather than rasterising the whole
+overlay — which sits on top of a Metal layer that is the thing being measured.
+Overlay opacity is applied per layer for the same reason: a translucent *view*
+with this many sublayers forces Core Animation into an offscreen group-opacity
+pass every frame.
 
 **Dolphin's `Sys` folder rides inside the app.** The desktop build copies
 `Data/Sys` next to `moderngekko-run`; `ios/CMakeLists.txt` copies the same tree

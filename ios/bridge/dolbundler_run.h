@@ -63,6 +63,15 @@ void db_request_stop(void);
 
 int db_is_running(void);
 
+// Halt or resume the emulated machine without tearing it down. This is what
+// the in-game menu sits on top of: a menu that leaves the game running behind
+// it costs frames for nothing and, worse, lets a game advance while the
+// controls that would answer it are covered by a panel.
+//
+// A no-op when nothing is running. Call from the main thread.
+void db_set_paused(int paused);
+int db_is_paused(void);
+
 // Diagnostic only -- drives the on-screen overlay, remove with it.
 // fps is presented frames per second; speed is emulation speed as a ratio, so
 // 1.0 is full speed and 0.5 is half. Either may be NULL. Safe to call when
