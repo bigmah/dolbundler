@@ -134,7 +134,7 @@ typedef enum {
     // Not emitted by dolir_build_chunk. The bytecode backend rewrites the
     // builder's expanded condition-register update into this so the
     // interpreter spends one dispatch on it instead of twenty-nine; see
-    // backend/vm/dolvm_opt.c. immediate = field | signed << 8.
+    // immediate = field | signed << 8.
     DOLIR_HELPER_CR_FIELD,
 } DolIRHelper;
 

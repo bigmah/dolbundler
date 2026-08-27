@@ -7,6 +7,8 @@
 
 #import "DBLibrary.h"
 #import "DBMetalView.h"
+#import "DBPauseMenuView.h"
+#import "DBSettings.h"
 #import "DBTouchPadView.h"
 
 #include "dolbundler_run.h"
@@ -17,6 +19,12 @@ namespace
 // iPhone surface's aspect ratio, but do not spend GPU time upscaling that image
 // to the screen's native pixel density before Core Animation displays it.
 constexpr CGFloat kGameCubeOutputShortSide = 480.0;
+
+// How long the corner button stays at full strength before fading back. Long
+// enough to find it after the game starts, short enough that it is out of the
+// way by the time anyone is playing.
+constexpr NSTimeInterval kHUDIdleDelay = 4.0;
+constexpr CGFloat kHUDRestingAlpha = 0.22;
 
 CGFloat GameDrawableScale(CGSize bounds)
 {
@@ -43,14 +51,13 @@ CGFloat GameDrawableScale(CGSize bounds)
   DBGameEntry* _game;
   DBMetalView* _metalView;
   DBTouchPadView* _pad;
-  UIButton* _closeButton;
-  UILabel* _status;
-  UIActivityIndicatorView* _spinner;
+  UIButton* _menuButton;
+  DBPauseMenuView* _menu;
   BOOL _started;
-  // --- diagnostic overlay, remove before release --------------------------
+  BOOL _pausedByBackground;
+
   UILabel* _perfLabel;
   CADisplayLink* _perfLink;
-  // -----------------------------------------------------------------------
 }
 
 - (instancetype)initWithGame:(DBGameEntry*)game
@@ -96,47 +103,9 @@ CGFloat GameDrawableScale(CGSize bounds)
   _pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
   [self.view addSubview:_pad];
 
-  // Create() spends about twelve seconds verifying the bytecode module against
-  // the DOL before anything is drawn. Without this the screen is simply black
-  // for that whole time, which reads as a hang.
-  _status = [[UILabel alloc] initWithFrame:self.view.bounds];
-  _status.text = [NSString stringWithFormat:@"Starting %@\u2026", _game.title];
-  _status.textAlignment = NSTextAlignmentCenter;
-  _status.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
-  _status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-  _status.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  [self.view addSubview:_status];
-
-  _spinner = [[UIActivityIndicatorView alloc]
-      initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-  _spinner.color = [UIColor colorWithWhite:1.0 alpha:0.55];
-  [_spinner startAnimating];
-  [self.view addSubview:_spinner];
-
-  // --- diagnostic overlay, remove before release --------------------------
-  // Emulation speed is the number that matters: 100% means the game is running
-  // at the rate the hardware did. FPS on its own cannot distinguish a game
-  // that renders at 30 by design from one that is running at half speed.
-  _perfLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-  _perfLabel.font = [UIFont monospacedDigitSystemFontOfSize:12
-                                                     weight:UIFontWeightMedium];
-  _perfLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
-  _perfLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
-  _perfLabel.textAlignment = NSTextAlignmentCenter;
-  _perfLabel.layer.cornerRadius = 4;
-  _perfLabel.clipsToBounds = YES;
-  _perfLabel.text = @"-- fps  --%";
-  [self.view addSubview:_perfLabel];
-  // -----------------------------------------------------------------------
-
-  _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-  [_closeButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"]
-                forState:UIControlStateNormal];
-  _closeButton.tintColor = [UIColor colorWithWhite:1.0 alpha:0.6];
-  [_closeButton addTarget:self
-                   action:@selector(stopAndDismiss)
-         forControlEvents:UIControlEventTouchUpInside];
-  [self.view addSubview:_closeButton];
+  // Added after the pad so it wins the hit test: the pad covers the whole
+  // screen, and a menu button underneath it could never be tapped.
+  [self buildHUD];
 
   // Hide the overlay whenever a real controller is attached, and bring it back
   // when the last one disconnects.
@@ -149,14 +118,59 @@ CGFloat GameDrawableScale(CGSize bounds)
                                          selector:@selector(updatePadVisibility)
                                              name:GCControllerDidDisconnectNotification
                                            object:nil];
+
+  // A game left running while the app is in the background burns the battery
+  // on frames nobody is looking at, and comes back having advanced through
+  // whatever happened in the meantime.
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(applicationDidEnterBackground)
+                                             name:UIApplicationDidEnterBackgroundNotification
+                                           object:nil];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(applicationDidBecomeActive)
+                                             name:UIApplicationDidBecomeActiveNotification
+                                           object:nil];
+}
+
+- (void)buildHUD
+{
+  UIButtonConfiguration* config = [UIButtonConfiguration plainButtonConfiguration];
+  config.image = [UIImage systemImageNamed:@"ellipsis"];
+  config.baseForegroundColor = UIColor.whiteColor;
+  config.contentInsets = NSDirectionalEdgeInsetsMake(10, 10, 10, 10);
+
+  _menuButton = [UIButton buttonWithConfiguration:config primaryAction:nil];
+  _menuButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+  _menuButton.layer.cornerRadius = 17;
+  _menuButton.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+  _menuButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+  _menuButton.accessibilityLabel = @"Game menu";
+  [_menuButton addTarget:self
+                  action:@selector(showMenu)
+        forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:_menuButton];
+
+  // Emulation speed is the number that matters: 100% means the game is running
+  // at the rate the hardware did. FPS on its own cannot distinguish a game
+  // that renders at 30 by design from one that is running at half speed.
+  _perfLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+  _perfLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold];
+  _perfLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+  _perfLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+  _perfLabel.textAlignment = NSTextAlignmentCenter;
+  _perfLabel.layer.cornerRadius = 9;
+  _perfLabel.layer.cornerCurve = kCACornerCurveContinuous;
+  _perfLabel.clipsToBounds = YES;
+  _perfLabel.text = @"-- fps   --%";
+  _perfLabel.hidden = !DBSettings.shared.showsPerformance;
+  [self.view addSubview:_perfLabel];
 }
 
 - (void)dealloc
 {
   [NSNotificationCenter.defaultCenter removeObserver:self];
-  // --- diagnostic overlay, remove before release ---
+  [NSObject cancelPreviousPerformRequestsWithTarget:self];
   [_perfLink invalidate];
-  // ------------------------------------------------
 }
 
 - (void)updatePadVisibility
@@ -170,20 +184,22 @@ CGFloat GameDrawableScale(CGSize bounds)
 {
   [super viewDidLayoutSubviews];
 
-  const CGFloat inset = 16;
-  const CGFloat size = 36;
-  _closeButton.frame =
-      CGRectMake(self.view.safeAreaInsets.left + inset, self.view.safeAreaInsets.top + inset, size,
-                 size);
-  // --- diagnostic overlay, remove before release ---
-  const CGFloat pw = 104, ph = 20;
-  _perfLabel.frame = CGRectMake(CGRectGetWidth(self.view.bounds) -
-                                    self.view.safeAreaInsets.right - inset - pw,
-                                self.view.safeAreaInsets.top + inset, pw, ph);
-  // ------------------------------------------------
-  _status.frame = self.view.bounds;
-  _spinner.center = CGPointMake(CGRectGetMidX(self.view.bounds),
-                                CGRectGetMidY(self.view.bounds) + 28);
+  // Both of these live at the top centre rather than in the corners, because
+  // the corners are where the shoulder buttons are. L and R belong under the
+  // index fingers and cannot move; the top middle of a landscape screen is the
+  // one strip of the overlay with nothing in it.
+  const CGFloat inset = 14;
+  const CGFloat size = 34;
+  const CGFloat gap = 8;
+  const CGFloat perfWidth = 108, perfHeight = 22;
+  const CGFloat top = self.view.safeAreaInsets.top + inset;
+
+  const CGFloat groupWidth = size + (_perfLabel.hidden ? 0 : gap + perfWidth);
+  const CGFloat originX = round(CGRectGetMidX(self.view.bounds) - groupWidth / 2);
+
+  _menuButton.frame = CGRectMake(originX, top, size, size);
+  _perfLabel.frame = CGRectMake(originX + size + gap, top + (size - perfHeight) / 2, perfWidth,
+                                perfHeight);
 
   CAMetalLayer* layer = (CAMetalLayer*)_metalView.layer;
   layer.contentsScale = GameDrawableScale(_metalView.bounds.size);
@@ -205,32 +221,24 @@ CGFloat GameDrawableScale(CGSize bounds)
   CAMetalLayer* layer = (CAMetalLayer*)_metalView.layer;
   db_set_render_layer((__bridge void*)layer, layer.contentsScale);
 
-  // --- diagnostic overlay, remove before release ---
   // Twice a second: often enough to watch, rare enough that the label itself
   // does not show up in what it is measuring.
   _perfLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updatePerformance)];
   _perfLink.preferredFramesPerSecond = 2;
   [_perfLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-  // ------------------------------------------------
+
+  [self scheduleHUDFade];
 
   DBGameEntry* game = _game;
   NSString* userDir = DBLibrary.shared.userDirectory;
-
-  // Nothing reports "first frame drawn", so this clears once boot has had long
-  // enough to reach the point where the game is drawing over it anyway.
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(18 * NSEC_PER_SEC)),
-                 dispatch_get_main_queue(), ^{
-                   [self->_spinner stopAnimating];
-                   self->_status.hidden = YES;
-                 });
 
   // db_run_game() blocks for the whole session, so it gets its own thread.
   // User-interactive QoS: this thread is the emulation, and letting the
   // scheduler treat it as background work shows up immediately as stutter.
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
     char err[512] = {0};
-    const int ok = db_run_game(game.gameRoot.UTF8String, game.modulePath.UTF8String,
-                               userDir.UTF8String, game.title.UTF8String, err, sizeof(err));
+    const int ok = db_run_game(game.gameRoot.UTF8String, userDir.UTF8String,
+                               game.title.UTF8String, err, sizeof(err));
 
     NSString* message = ok ? nil : @(err);
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -243,15 +251,129 @@ CGFloat GameDrawableScale(CGSize bounds)
   });
 }
 
-// --- diagnostic overlay, remove before release ----------------------------
+#pragma mark - HUD
+
+- (void)scheduleHUDFade
+{
+  [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                           selector:@selector(fadeHUD)
+                                             object:nil];
+  [self performSelector:@selector(fadeHUD) withObject:nil afterDelay:kHUDIdleDelay];
+}
+
+- (void)fadeHUD
+{
+  [UIView animateWithDuration:0.4
+                   animations:^{
+                     self->_menuButton.alpha = kHUDRestingAlpha;
+                   }];
+}
+
+- (void)wakeHUD
+{
+  [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                           selector:@selector(fadeHUD)
+                                             object:nil];
+  _menuButton.alpha = 1.0;
+}
+
 - (void)updatePerformance
 {
+  if (_perfLabel.hidden)
+    return;
   double fps = 0, speed = 0;
   db_get_performance(&fps, &speed);
-  _perfLabel.text =
-      [NSString stringWithFormat:@"%.0f fps  %.0f%%", fps, speed * 100.0];
+  _perfLabel.text = [NSString stringWithFormat:@"%.0f fps   %.0f%%", fps, speed * 100.0];
 }
-// --------------------------------------------------------------------------
+
+#pragma mark - Menu
+
+- (void)showMenu
+{
+  if (_menu)
+    return;
+  [self wakeHUD];
+
+  // Pause before the panel is on screen. Presenting first would let the game
+  // run for the length of the animation with its controls already covered.
+  db_set_paused(1);
+
+  _menu = [[DBPauseMenuView alloc] initWithTitle:_game.title];
+  __weak __typeof(self) weakSelf = self;
+  _menu.onSettingsChanged = ^{
+    [weakSelf applySettings];
+  };
+  _menu.onResume = ^{
+    [weakSelf dismissMenuAndResume];
+  };
+  _menu.onQuit = ^{
+    [weakSelf quitGame];
+  };
+  [_menu presentInView:self.view];
+  _menuButton.hidden = YES;
+}
+
+- (void)dismissMenuAndResume
+{
+  if (!_menu)
+    return;
+  DBPauseMenuView* menu = _menu;
+  _menu = nil;
+  [menu dismissWithCompletion:^{
+    self->_menuButton.hidden = NO;
+    [self scheduleHUDFade];
+  }];
+  db_set_paused(0);
+}
+
+- (void)applySettings
+{
+  [_pad refreshFromSettings];
+  _perfLabel.hidden = !DBSettings.shared.showsPerformance;
+  // Hiding the readout changes how wide the HUD group is, and so where its
+  // centre falls.
+  [self.view setNeedsLayout];
+}
+
+- (void)quitGame
+{
+  DBPauseMenuView* menu = _menu;
+  _menu = nil;
+  [menu dismissWithCompletion:nil];
+
+  if (db_is_running())
+  {
+    // Resume first: a paused core cannot process the shutdown it is being
+    // asked for, and the run thread is what dismisses this controller once
+    // Run() returns.
+    db_set_paused(0);
+    db_request_stop();
+    return;
+  }
+  [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+#pragma mark - Lifecycle
+
+- (void)applicationDidEnterBackground
+{
+  if (!db_is_running() || db_is_paused())
+    return;
+  db_set_paused(1);
+  _pausedByBackground = YES;
+}
+
+- (void)applicationDidBecomeActive
+{
+  if (!_pausedByBackground)
+    return;
+  _pausedByBackground = NO;
+  // Not while the menu is up: someone who opened it before switching away
+  // still has it open, and resuming underneath it is exactly what the menu
+  // exists to prevent.
+  if (!_menu)
+    db_set_paused(0);
+}
 
 - (void)showFailure:(NSString*)message
 {
@@ -265,18 +387,6 @@ CGFloat GameDrawableScale(CGSize bounds)
                                             [self dismissViewControllerAnimated:YES completion:nil];
                                           }]];
   [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)stopAndDismiss
-{
-  if (db_is_running())
-  {
-    // The run thread dismisses this controller once Run() returns, so there is
-    // nothing to do here but ask.
-    db_request_stop();
-    return;
-  }
-  [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations

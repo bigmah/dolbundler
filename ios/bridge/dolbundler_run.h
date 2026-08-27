@@ -44,10 +44,17 @@ typedef enum
 // scale. Must be called before db_run_game(); the layer has to outlive the run.
 void db_set_render_layer(void* ca_metal_layer, float scale);
 
-// Boots `module_path` (a .dvm) against the disc extracted at `game_root` and
-// blocks until the game stops or db_request_stop() is called.
+// 1 if this build was linked against a native module for `disc_id`. Games are
+// recompiled on a Mac and linked in before the app is signed -- iOS will not
+// map a page executable without a valid signature behind it -- so this, not
+// anything on disk, is what decides whether an imported disc can be played.
+int db_has_native_module(const char* disc_id);
+
+// Boots the disc extracted at `game_root` against this build's native module
+// for it and blocks until the game stops or db_request_stop() is called.
+// Fails if there is no such module; ask db_has_native_module() first.
 // Returns 1 on a clean exit, 0 on failure with a message written to err.
-int db_run_game(const char* game_root, const char* module_path, const char* user_dir,
+int db_run_game(const char* game_root, const char* user_dir,
                 const char* title, char* err, size_t err_size);
 
 // Asks the running game to stop. Safe to call from any thread, including when
@@ -55,6 +62,15 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
 void db_request_stop(void);
 
 int db_is_running(void);
+
+// Halt or resume the emulated machine without tearing it down. This is what
+// the in-game menu sits on top of: a menu that leaves the game running behind
+// it costs frames for nothing and, worse, lets a game advance while the
+// controls that would answer it are covered by a panel.
+//
+// A no-op when nothing is running. Call from the main thread.
+void db_set_paused(int paused);
+int db_is_paused(void);
 
 // Diagnostic only -- drives the on-screen overlay, remove with it.
 // fps is presented frames per second; speed is emulation speed as a ratio, so

@@ -47,10 +47,6 @@ int main(int argc, char** argv) {
     title_id[0] = '\0';
     game_name[0] = '\0';
 
-    // A --backend vm module records the disc it was built from. A Wii title id
-    // already is that; a GameCube DOL carries none, so --game-id supplies it.
-    const char* module_game_id = opts.game_id;
-
     if (has_rpx_extension(input_path) && effective_cpu != DOLRECOMP_CPU_ESPRESSO) {
         fprintf(stderr, "error: .rpx input requires --cpu espresso\n");
         return 1;
@@ -97,8 +93,6 @@ int main(int argc, char** argv) {
         snprintf(game_name, sizeof(game_name), "Wii U executable");
     } else {
         copy_title_id(title_id, sizeof(title_id), title_id_arg);
-        if (!module_game_id)
-            module_game_id = title_id;
         describe_game(game_name, sizeof(game_name), title_id, 0);
     }
 
@@ -134,7 +128,7 @@ int main(int argc, char** argv) {
 
         printf("\nwriting output to: %s\n", output_path);
         if (!emit_rpx_split(&rpx, output_path, effective_cpu, opts.jobs,
-                            local_chunks_dir, opts.backend, module_game_id)) {
+                            local_chunks_dir, opts.backend)) {
             rpx_free(&rpx);
             return 1;
         }
@@ -156,8 +150,7 @@ int main(int argc, char** argv) {
         printf("REL base start: 0x%08X\n", rel_start_base);
         if (!emit_rel_directory(input_path, output_arg, title_id,
                                 titleless_mode, effective_cpu, opts.jobs,
-                                rel_start_base, opts.backend,
-                                module_game_id)) {
+                                rel_start_base, opts.backend)) {
             return 1;
         }
         return 0;
@@ -198,7 +191,7 @@ int main(int argc, char** argv) {
 
         printf("\nwriting output to: %s\n", output_path);
         if (!emit_rel_split(&rel, output_path, effective_cpu, opts.jobs,
-                            local_chunks_dir, opts.backend, module_game_id)) {
+                            local_chunks_dir, opts.backend)) {
             rel_free(&rel);
             return 1;
         }
@@ -244,8 +237,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!emit_dol_split(&dol, output_path, effective_cpu, opts.jobs, local_chunks_dir,
-                        opts.map_path ? &symbols : NULL, opts.backend,
-                        module_game_id)) {
+                        opts.map_path ? &symbols : NULL, opts.backend)) {
         symbol_map_free(&symbols);
         dol_free(&dol);
         return 1;

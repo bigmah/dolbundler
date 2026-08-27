@@ -4,6 +4,7 @@
 
 #import "DBLibrary.h"
 #import "DBLibraryViewController.h"
+#import "DBTheme.h"
 
 @implementation DBAppDelegate
 
@@ -21,6 +22,7 @@
   UINavigationController* nav =
       [[UINavigationController alloc] initWithRootViewController:library];
   nav.navigationBar.prefersLargeTitles = YES;
+  nav.navigationBar.tintColor = DBTheme.accent;
 
   self.window.rootViewController = nav;
   [self.window makeKeyAndVisible];

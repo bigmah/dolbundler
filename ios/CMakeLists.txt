@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # The iOS app. Everything below the app target comes from ModernGekko, which
-# brings Dolphin, DolRecomp and the DolVM interpreter with it.
+# brings Dolphin and DolRecomp's disc frontend with it.
 #
 # Configure with:
 #   cmake -S ios -B build-ios -G Xcode \
@@ -41,7 +41,11 @@ add_executable(DolBundler MACOSX_BUNDLE
   App/DBAppDelegate.mm
   App/DBLibrary.mm
   App/DBLibraryViewController.mm
+  App/DBGameCell.mm
   App/DBGameViewController.mm
+  App/DBPauseMenuView.mm
+  App/DBSettings.mm
+  App/DBTheme.mm
   App/DBTouchPadView.mm
   bridge/dolbundler_core.c
   bridge/dolbundler_run.mm
@@ -56,13 +60,15 @@ target_include_directories(DolBundler PRIVATE
 )
 
 target_link_libraries(DolBundler PRIVATE
-  # The runtime, and the interpreter built against the chassis's CPUState.
-  # Note this is moderngekko_dolvm and never DolRecomp's own dr_vm: the two
-  # compile the same interpreter sources against different CPUState layouts.
   ModernGekko::Runtime
-  moderngekko_dolvm
-  # The compiler half, for importing a disc on device.
-  dr_app
+  # GXRuntime's guest CPU helpers, compiled against the chassis's CPUState. An
+  # embedded native module leaves these out of its own objects and resolves
+  # them here; see module-template's RECOMPCORE_MODULE_EMBEDDED.
+  moderngekko_gxcpu
+  # Disc extraction only. Nothing in the app recompiles: iOS will not map a
+  # page executable without a valid signature behind it, so a module produced
+  # on the phone could never be run and the whole compiler half is left out.
+  dr_frontend
   # Dolphin's headers use fmt in inline code, so the app needs its include
   # path even though the app itself never formats anything. Linking the target
   # rather than hardcoding a path keeps this correct whether fmt comes from

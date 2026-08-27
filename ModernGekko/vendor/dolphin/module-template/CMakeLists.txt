@@ -189,7 +189,7 @@ option(RECOMPCORE_MODULE_EMBEDDED
 
 if(RECOMPCORE_MODULE_EMBEDDED)
   set(MODULE_LIBRARY_TYPE STATIC)
-  # moderngekko_dolvm already provides the common CPU helpers in an embedded
+  # moderngekko_gxcpu already provides the common CPU helpers in an embedded
   # host. The exception implementation is the only native-module source it
   # does not compile itself.
   set(MODULE_RUNTIME_SOURCES
@@ -263,7 +263,13 @@ if(NOT DEFINED RECOMPCORE_MODULE_OPT_LEVEL)
   set(RECOMPCORE_MODULE_OPT_LEVEL "2" CACHE STRING
       "Optimization level for generated module translation units (0, 1, 2, or 3)")
 endif()
-set_property(CACHE RECOMPCORE_MODULE_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)
+# Only a hint for cmake-gui, and only legal on a cache entry. An embedding
+# project that picks the level with a plain set() -- ios/CMakeLists.txt does --
+# leaves the branch above untaken, so there is no cache entry to hint at and
+# set_property would hard-error on a clean build directory.
+if(DEFINED CACHE{RECOMPCORE_MODULE_OPT_LEVEL})
+  set_property(CACHE RECOMPCORE_MODULE_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)
+endif()
 if(NOT RECOMPCORE_MODULE_OPT_LEVEL MATCHES "^[0-3]$")
   message(FATAL_ERROR
     "RECOMPCORE_MODULE_OPT_LEVEL must be one of 0, 1, 2, or 3")

@@ -11,7 +11,6 @@
 #include "backend/dispatch.h"
 #include "backend/codegen.h"
 #include "backend/symbols.h"
-#include "backend/vm/dolvm_pipeline.h"
 #include "analysis/code_section.h"
 #include "analysis/embedded_data.h"
 #include "analysis/smc.h"
@@ -59,8 +58,8 @@ static u32 c_chunk_instructions(void) {
 // register allocator keeps the whole guest register file live across. Against
 // the previous 1024 default this is +57.9% throughput and -66% .text on Mario
 // Kart. The small 1.4% gain there became decisive on GEXE52: with matched PGO,
-// 64 raised iOS Simulator throughput from 71.8% to 105.4-106.9%, while DolVM
-// measured 91.1% on the same saved-state workload.
+// 64 raised iOS Simulator throughput from 71.8% to 105.4-106.9% on the same
+// saved-state workload.
 #define DOLLLVM_DEFAULT_CHUNK_INSTRUCTIONS 64u
 #define DOLLLVM_DEFAULT_WORKER_BATCH 4u
 // v6 carries the execution budget across generated function calls.
@@ -945,11 +944,7 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
                                     DolRecompCPU cpu, u32 entry_point, u32 jobs,
                                     int local_chunks_dir,
                                     const DolRecompSymbolMap* symbols,
-                                    DolRecompBackend backend,
-                                    const char* game_id) {
-    if (backend == DOLRECOMP_BACKEND_VM)
-        return emit_code_sections_vm(sections, section_count, output_path,
-                                     entry_point, game_id);
+                                    DolRecompBackend backend) {
 #ifdef DOLRECOMP_ENABLE_LLVM
     if (backend == DOLRECOMP_BACKEND_LLVM)
         return emit_code_sections_llvm(sections, section_count, output_path, cpu,
@@ -1291,7 +1286,7 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
 int emit_dol_split(const DOLFile* dol, const char* output_path,
                           DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
                           const DolRecompSymbolMap* symbols,
-                          DolRecompBackend backend, const char* game_id) {
+                          DolRecompBackend backend) {
     LoadedCodeSection sections[DOL_NUM_TEXT + DOL_NUM_DATA];
     u32 section_count = 0;
     u32 text_low = 0xFFFFFFFFu;
@@ -1342,7 +1337,7 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
     // Off switch for bisecting: covering these sections is the largest speed win
     // on this game, and also the largest change in which guest code the module
     // -- rather than the interpreter -- ends up executing.
-    const bool skip_data_sections = getenv("DOLVM_NO_DATA_SECTIONS") != NULL;
+    const bool skip_data_sections = getenv("DOLRECOMP_NO_DATA_SECTIONS") != NULL;
     for (u32 i = 0; i < DOL_NUM_DATA; i++) {
         if (skip_data_sections)
             continue;
@@ -1370,13 +1365,12 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
 
     return emit_code_sections_split(sections, section_count, output_path, cpu,
                                     dol->header.entry_point, jobs,
-                                    local_chunks_dir, symbols, backend,
-                                    game_id);
+                                    local_chunks_dir, symbols, backend);
 }
 
 int emit_rpx_split(const RPXFile* rpx, const char* output_path,
                           DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
-                          DolRecompBackend backend, const char* game_id) {
+                          DolRecompBackend backend) {
     LoadedCodeSection sections[RPX_MAX_CODE_SECTIONS];
 
     for (u32 i = 0; i < rpx->code_section_count; i++) {
@@ -1394,12 +1388,12 @@ int emit_rpx_split(const RPXFile* rpx, const char* output_path,
 
     return emit_code_sections_split(sections, rpx->code_section_count,
                                     output_path, cpu, 0, jobs,
-                                    local_chunks_dir, NULL, backend, game_id);
+                                    local_chunks_dir, NULL, backend);
 }
 
 int emit_rel_split(const RELFile* rel, const char* output_path,
                           DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
-                          DolRecompBackend backend, const char* game_id) {
+                          DolRecompBackend backend) {
     LoadedCodeSection* sections =
         (LoadedCodeSection*)calloc(rel->section_count, sizeof(LoadedCodeSection));
     if (!sections) {
@@ -1426,7 +1420,7 @@ int emit_rel_split(const RELFile* rel, const char* output_path,
 
     int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
                                       rel->entry_point, jobs, local_chunks_dir,
-                                      NULL, backend, game_id);
+                                      NULL, backend);
     free(sections);
     return ok;
 }
@@ -1484,7 +1478,7 @@ int check_duplicate_rel_module(const RELBatchItem* items, u32 count,
 int emit_rel_directory(const char* input_dir, const char* output_root,
                               const char* title_id, int titleless_mode,
                               DolRecompCPU cpu, u32 jobs, u32 start_base,
-                              DolRecompBackend backend, const char* game_id) {
+                              DolRecompBackend backend) {
     PathList paths = {0};
     RELBatchItem* items = NULL;
     RELModuleMapEntry* map_entries = NULL;
@@ -1545,8 +1539,7 @@ int emit_rel_directory(const char* input_dir, const char* output_root,
             goto done;
         }
         printf("\nwriting output to: %s\n", rel_output_path);
-        if (!emit_rel_split(&items[i].rel, rel_output_path, cpu, jobs, 1, backend,
-                            game_id))
+        if (!emit_rel_split(&items[i].rel, rel_output_path, cpu, jobs, 1, backend))
             goto done;
     }
 

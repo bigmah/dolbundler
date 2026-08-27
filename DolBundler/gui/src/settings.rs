@@ -61,19 +61,19 @@ pub const AUDIO: [(&str, &str); 3] = [
     ("No Audio Output", "Muted"),
 ];
 
-/// (stored value, label) for what a disc is recompiled to, default first. `vm`
-/// lowers the recompilation to DolVM bytecode, which takes seconds because
-/// nothing is compiled -- the runtime interprets it instead. It is the arm an
-/// iOS build has to use, because an App Store binary may not generate or load
-/// executable code. `c` is the native path: PowerPC to C to native arm64, a few
-/// minutes of compiling per game, and still the faster of the two to play.
+/// (stored value, label) for how a disc is recompiled, default first. Both
+/// produce native arm64 and take a few minutes per game. `c` is the reference
+/// path: PowerPC to C to native, through the host compiler. `llvm` goes
+/// straight from DolIR to objects in process, which is the path an iOS build
+/// uses -- a module is linked into the app before it is signed, because iOS
+/// will not map a page executable without a valid signature behind it.
 pub const BACKENDS: [(&str, &str); 2] = [
-    ("vm", "Bytecode (interpreted)"),
-    ("c", "Native code"),
+    ("c", "Native code (via C)"),
+    ("llvm", "Native code (via LLVM)"),
 ];
 
 pub fn default_backend() -> String {
-    "vm".into()
+    "c".into()
 }
 
 /// A gamepad `recompgc list-controllers` reported.
@@ -148,6 +148,21 @@ impl Overrides {
     }
 }
 
+/// Which iPhone games are sent to, and which Apple Developer team signs the
+/// app that carries them. Not a per-game setting: one app holds every game, so
+/// there is one phone and one team to choose.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Iphone {
+    /// A devicectl identifier. Empty means "the only one paired", which is
+    /// what all but one setup has.
+    #[serde(default)]
+    pub device: String,
+    /// An Apple Developer team ID. Empty means "whichever recompios ranks
+    /// first", which is the one whose profile already covers the phone.
+    #[serde(default)]
+    pub team: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default)]
@@ -161,6 +176,8 @@ pub struct Store {
     /// Keyed by disc ID. Games with nothing overridden are dropped on save.
     #[serde(default)]
     pub games: BTreeMap<String, Overrides>,
+    #[serde(default)]
+    pub iphone: Iphone,
 }
 
 impl Default for Store {
@@ -169,6 +186,7 @@ impl Default for Store {
             defaults: Defaults::default(),
             backend: default_backend(),
             games: BTreeMap::new(),
+            iphone: Iphone::default(),
         }
     }
 }
@@ -226,10 +244,18 @@ pub fn store_path() -> PathBuf {
 }
 
 pub fn load() -> Store {
-    std::fs::read_to_string(store_path())
+    let mut store: Store = std::fs::read_to_string(store_path())
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Settings written before the bytecode backend was removed still name it,
+    // and recompgc now rejects that outright -- which would turn every import
+    // into an error until the user found the picker. Anything the current
+    // build does not offer falls back to the default.
+    if !BACKENDS.iter().any(|(value, _)| *value == store.backend) {
+        store.backend = default_backend();
+    }
+    store
 }
 
 pub fn save(store: &Store) -> std::io::Result<()> {

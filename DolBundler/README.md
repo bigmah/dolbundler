@@ -65,8 +65,7 @@ Four steps run, with live output in the console pane:
 1. **Extract** the disc into `~/.local/share/moderngekko/games/<DISC_ID>`
 2. **Read** the disc header for the game's name, ID, and platform
 3. **Recompile** the DOL to a native `.dylib`, cached under
-   `~/.cache/moderngekko/modules/<DISC_ID>/` — or to a `.dvm` the runtime
-   interprets, see [Recompiler](#recompiler)
+   `~/.cache/moderngekko/modules/<DISC_ID>/` — see [Recompiler](#recompiler)
 4. **Add** it to the library, with its banner art
 
 That is all it takes to play. Building `~/Applications/<Game Name>.app` is a
@@ -86,21 +85,13 @@ with until you add it again.
 
 | | |
 |---|---|
-| **Bytecode (interpreted)** | PowerPC → DolVM. Seconds, because nothing is compiled — the runtime interprets the result instead. This is the default. |
-| **Native code** | PowerPC → C → arm64. A few minutes of compiling per game, and full speed. |
+| **Native code (via C)** | PowerPC → C → arm64, through the host compiler. This is the default, and the reference the other backend is checked against. |
+| **Native code (via LLVM)** | PowerPC → DolIR → arm64 objects, in process. The path an iOS build uses, where a module is linked into the app before it is signed. |
 
-Bytecode exists because some hosts may not run generated machine code at all:
-an App Store binary may not create executable pages or load code it did not
-ship with, which rules the native path out on iOS however the recompilation is
-packaged. Everything else is the same — same recompiler, same analysis, same
-runtime, same coverage and self-modifying-code checks. It is only slower to
-play, by an amount that depends on the game: measured against the Gekko's
-486 MHz with a window open, Super Smash Bros Melee runs at full speed, The
-SpongeBob SquarePants Movie at about 0.95x and Mario Party 4 at about 0.87x,
-where native is at the frame limiter for all three.
-
-It is also the quickest way to find out whether a disc recompiles and boots at
-all, since it takes seconds rather than minutes.
+Both take a few minutes of compiling per game and play at full speed. They
+share everything before codegen — same frontend, same analysis, same coverage
+and self-modifying-code checks — so the choice is how the machine code is
+produced, not what is recompiled.
 
 The game then sits in the library with its banner art, decoded from the disc's
 own `opening.bnr`. Per game:
@@ -110,6 +101,7 @@ own `opening.bnr`. Per game:
 | **Play** | runs the game |
 | **Settings** | resolution, backends, and controllers for this game alone |
 | **Create App** | builds `~/Applications/<Game>.app`; disappears once one exists |
+| **iPhone** | recompiles it for a phone and puts it there — see [On an iPhone](#on-an-iphone) |
 | **Log** | loads that game's last 200 runtime log lines into the console |
 | **Reveal** | shows the app in Finder, or the extracted disc if there is none |
 | **Remove** | drops the library entry and its settings; nothing on disk is deleted |
@@ -119,6 +111,108 @@ points at the extracted disc, the cached module, and this ModernGekko build —
 so you can launch them straight from Launchpad or the Dock without DolBundler
 running. That independence is the reason to make one; if you are happy
 launching from the library, you never need to.
+
+## On an iPhone
+
+**iPhone** in the top right takes the library to a phone. One button, four
+things:
+
+```
+game.iso ─▶ DolBundler ─▶ arm64 iPhone objects ─┐
+                                                ├─▶ DolBundler.app, signed ─▶ 📱
+                        extracted disc ─────────┘        installed
+```
+
+1. **Recompile** each game's DOL a second time, for `arm64-apple-ios17.0`
+2. **Link** every recompiled game into the phone app, and **sign** it
+3. **Install** that app on the phone
+4. **Copy** each game's extracted disc into the app's Documents folder
+
+Step 2 is why the phone app is rebuilt whenever a game is added, and why
+sending one game reinstalls the app with all of them in it. Guest code has to
+be inside the code signature: iOS will not map a page executable without a
+valid one, and nothing on a phone could sign a module produced there, so
+`dlopen` refuses it too. A game cannot be handed to an app that is already
+installed. That is the operating system, not App Store policy, and it does not
+negotiate.
+
+The consequence worth knowing is that **the phone plays what was built into its
+app.** An `.iso` dropped into the app on the phone still extracts and appears
+in its library — but a disc this build was not compiled for says *not in this
+build* rather than booting into something unusable.
+
+### What it needs
+
+| | |
+|---|---|
+| **The phone** | iOS 17+ and an A16 or newer chip. Both the generated code and the runtime's guest CPU helpers are compiled `-mcpu=apple-a16`; an older phone is warned about rather than refused, and shows up as a game that quits the moment it starts. |
+| **Xcode** | The full app, not just the command line tools: `sudo xcode-select -s /Applications/Xcode.app`. |
+| **A signing team** | With a provisioning profile that covers that phone. |
+| **`llvm@20`** | `brew install llvm@20`. DolRecomp accepts LLVM 19 or 20 only; the first send builds a host recompiler against it, separately from anything else. |
+
+Plug the phone in, unlock it, and turn Developer Mode on under **Settings ›
+Privacy & Security**. The first launch after an install wants the certificate
+trusted under **Settings › General › VPN & Device Management**.
+
+### The panel
+
+**iPhone** in the top right picks the phone and the team, and lists what is on
+it. With one phone paired and one usable team there is nothing to choose and it
+chooses for you.
+
+The team list is ordered so the one that can actually reach the selected phone
+comes first, and every entry says what stands between it and that phone — *a
+signing certificate only, no profile for this app yet*, or *its profile does
+not list this iPhone*. Both of those fail at the last step of a build that
+takes twenty minutes, which is a bad moment to learn it.
+
+**Remove** beside a game drops its module, so the next send builds an app
+without it, and empties that game's folder on the phone. It is how you get the
+app back under a few gigabytes.
+
+### What is slow, and what is skipped
+
+The first send builds the whole phone app — all of Dolphin, cross-compiled —
+and the pinned LLVM 20 recompiler before it. Set aside an afternoon. After
+that:
+
+| | |
+|---|---|
+| **Recompiling a game** | minutes, and gigabytes of RAM. Skipped unless the DOL, the target triple or the CPU changed. Objects are cached under `~/Library/Caches/DolBundler/iphone-llvm`, so even a forced rebuild mostly copies. |
+| **Building the app** | a relink, once Dolphin is built. |
+| **Copying a disc** | a GameCube disc over the cable. Skipped unless the extracted disc changed size. |
+
+Only the games you ask for are recompiled and copied, but **every** game with a
+module is linked into the app — a game already on the phone would otherwise be
+taken away by the next send.
+
+### Without the window
+
+```sh
+R=~/Applications/DolBundler.app/Contents/Resources
+$R/recompios devices                       # paired phones, one per line
+$R/recompios teams --device "15 pro max"   # teams, readiest first
+$R/recompios send                          # the whole library onto the phone
+$R/recompios send --disc-id GMPE01         # one game, and relink around the rest
+$R/recompios drop --disc-id GMPE01         # and off it again
+```
+
+`send` takes `--device` and `--team` (a devicectl identifier or any part of the
+phone's name; a team ID), `--force` to redo work that would be skipped, and
+`--no-launch` to leave the app closed at the end. Add `--porcelain` for the
+event stream the window consumes.
+
+One more subcommand exists for the command-line route in
+[`ios/README.md`](../ios/README.md): a module built by hand — a PGO build, say —
+is adopted into the store rather than rebuilt, and then linked in and left
+alone.
+
+```sh
+$R/recompios adopt --disc-id GEXE52 --generated /tmp/gexe52-llvm-ios/generated
+```
+
+Without it, the first send after such a build would quietly produce an app
+missing that game.
 
 ### Settings
 
@@ -302,6 +396,8 @@ the protocol is documented at the top of the script.
     library.json                                    the library index
     settings.json                                   defaults and per-game overrides
     covers/<DISC_ID>.png                            banner art for the list
+    iphone/modules/<DISC_ID>/generated/             arm64 iPhone objects
+    iphone/devices/<device>/games/<DISC_ID>         what is on which phone
 ~/.local/share/moderngekko/games/<DISC_ID>/         extracted disc
 ~/.local/share/moderngekko/Logs/<DISC_ID>.log       runtime log
 ~/.local/share/moderngekko/config.ini               written per launch
@@ -310,6 +406,9 @@ the protocol is documented at the top of the script.
 ~/.local/share/moderngekko/Pipes/<name>             FIFO a pipe controller feeds
 ~/.local/share/moderngekko/Logs/gc_controller.log   the driver's own output
 ~/.cache/moderngekko/modules/<DISC_ID>/             recompiled modules
+~/Library/Caches/DolBundler/iphone-llvm/<DISC_ID>/  iPhone object cache
+<checkout>/build-dolrecomp-llvm20/                  the pinned host recompiler
+<checkout>/build-ios/                               the iPhone app build
 ```
 
 ## Layout
@@ -319,14 +418,16 @@ DolBundler/
   build.sh                 builds everything and installs the app
   gui/                     the Dioxus window (Rust)
     src/main.rs            UI, job state, drop and open handling
-    src/pipeline.rs        runs recompgc, parses its porcelain output
+    src/pipeline.rs        runs recompgc and recompios, parses their porcelain
     src/library.rs         library.json, cover art, log tailing
+    src/iphone.rs          which games are built for a phone, and on one
     src/settings.rs        settings.json, and the config.ini and pad profile
                            it renders into before each launch
     assets/style.css
   patches/                 the ModernGekko fixes build.sh applies
   src/
     recompgc               the four-step pipeline
+    recompios              the iPhone pipeline: recompile, link, sign, install
     make_game_app.py       library entry and cover art; .app only with --app
     make_app_icon.py       DolBundler's own icon
     check_game_patches.py  audits Dolphin's GameSettings against the patcher

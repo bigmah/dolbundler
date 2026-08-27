@@ -371,27 +371,19 @@ int RunMain(int argc, char **argv) {
     if (const char *env = std::getenv("STATICRECOMP_MODULE"))
       module_path = env;
     else {
-      const std::string stem = "g" + inspected.metadata->disc_id + "_recomp";
-      // A bytecode module and a native one sit in the same places under the
-      // same name; only the extension separates them. Native wins when both
-      // are present, because it is the faster of the two.
-      for (const std::string &suffix : {LibrarySuffix(), std::string(".dvm")}) {
-        const auto bundled = executable_directory / (stem + suffix);
-        const auto user_module =
-            config.user_directory / "StaticRecompModules" / (stem + suffix);
-        if (std::filesystem::is_regular_file(bundled)) {
-          module_path = bundled;
-          break;
-        }
-        if (std::filesystem::is_regular_file(user_module)) {
-          module_path = user_module;
-          break;
-        }
-      }
+      const std::string stem =
+          "g" + inspected.metadata->disc_id + "_recomp" + LibrarySuffix();
+      const auto bundled = executable_directory / stem;
+      const auto user_module =
+          config.user_directory / "StaticRecompModules" / stem;
+      if (std::filesystem::is_regular_file(bundled))
+        module_path = bundled;
+      else if (std::filesystem::is_regular_file(user_module))
+        module_path = user_module;
     }
   }
   if (!module_path.empty())
-    config.module = moderngekko::ModuleSource::ForPath(std::move(module_path));
+    config.module = moderngekko::ModuleSource::DynamicPath(std::move(module_path));
 
 #if defined(__linux__) || defined(_WIN32)
   if (!config.headless && config.graphics.backend.empty())

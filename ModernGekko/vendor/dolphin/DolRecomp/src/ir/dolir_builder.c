@@ -1385,13 +1385,13 @@ static bool lower_control(Builder* b, u32 index, u32 count) {
     }
 }
 
-// True when DOLVM_FALLBACK_OPS names this opcode, comma separated.
+// True when DOLIR_FALLBACK_OPS names this opcode, comma separated.
 static bool dolir_op_forced_fallback(PPCOpcode op) {
     // Asked once per guest instruction, so the environment is read once.
     static const char* list;
     static bool looked_up;
     if (!looked_up) {
-        list = getenv("DOLVM_FALLBACK_OPS");
+        list = getenv("DOLIR_FALLBACK_OPS");
         looked_up = true;
     }
     if (!list || !*list)
@@ -1428,7 +1428,7 @@ bool dolir_build_chunk(DolIRModule* module, const PPCInst* insts, u32 count,
     for (u32 n = 0; n < count; n++) {
         Builder b = {function, &function->blocks[n], &insts[n]};
         b.block->cycle_cost = dolir_instruction_cycle_cost(b.inst);
-        // Bisect switch: DOLVM_FALLBACK_OPS=ps_muls0,psq_lu forces those opcodes
+        // Bisect switch: DOLIR_FALLBACK_OPS=ps_muls0,psq_lu forces those opcodes
         // down the same path an unlowered opcode takes, which is the reference
         // interpreter. Naming one opcode at a time is how a miscompile in a
         // function of 147 instructions gets attributed to an instruction.

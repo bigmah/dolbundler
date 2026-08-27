@@ -12,8 +12,8 @@
 // memory: the chassis updates it in place and the module reads it on the
 // emulation thread, so no call crosses the boundary on the hot path.
 //
-// Shared by the chassis and whichever module runtime consumes it (today the
-// DolVM bridge), which is why it is plain C with nothing but fixed-width types.
+// Shared by the chassis and the generated module that consumes it, which is
+// why it is plain C with nothing but fixed-width types.
 
 #ifndef GXRUNTIME_CORE_DISPATCH_GATE_H
 #define GXRUNTIME_CORE_DISPATCH_GATE_H
@@ -49,7 +49,7 @@ typedef struct StaticRecompDispatchGate
 // Native modules publish the chassis-owned pointers here so generated loop
 // guards can read them directly.  A zeroed value means no gate is available.
 // Keeping the small descriptor in module-owned data avoids a helper call on
-// every guest back edge while preserving the same live checks as DolVM.
+// every guest back edge while preserving the chassis's own live checks.
 extern StaticRecompDispatchGate dolrecomp_native_gate;
 
 // True while the charge accumulated since the last chassis flush still fits

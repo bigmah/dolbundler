@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -85,6 +86,7 @@ void run_log(const char* fmt, ...)
 std::mutex s_runtime_mutex;
 std::unique_ptr<moderngekko::Runtime> s_runtime;
 std::atomic<bool> s_running{false};
+std::atomic<bool> s_paused{false};
 
 // Pad 0 is the only one the on-screen controls drive. A physical controller
 // paired over Bluetooth arrives through the SDL backend as its own device and
@@ -242,7 +244,19 @@ void db_set_render_layer(void* ca_metal_layer, float scale)
   Platform::SetIOSRenderLayer(ca_metal_layer, scale);
 }
 
-int db_run_game(const char* game_root, const char* module_path, const char* user_dir,
+int db_has_native_module(const char* disc_id)
+{
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  for (const DolBundlerNativeModuleEntry& native_module : kDolBundlerNativeModules)
+    if (std::strcmp(disc_id, native_module.game_id) == 0)
+      return 1;
+#else
+  (void)disc_id;
+#endif
+  return 0;
+}
+
+int db_run_game(const char* game_root, const char* user_dir,
                 const char* title, char* err, size_t err_size)
 {
   if (s_running.exchange(true))
@@ -250,17 +264,17 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     set_err(err, err_size, "A game is already running.");
     return 0;
   }
+  s_paused.store(false);
 
   s_log_path = std::string(user_dir) + "/dolbundler-run.log";
   run_log("---- run: %s", title ? title : "(untitled)");
   run_log("game_root:  %s", game_root);
-  run_log("module:     %s", module_path);
   mkdir((std::string(user_dir) + "/Logs").c_str(), 0755);
   Platform::SetIOSDiagnosticLog(s_log_path.c_str());
-  // Anything the runtime writes to stderr -- the DolVM sampler's report, most
-  // of all -- goes into the same file, because stderr on a device goes nowhere
-  // a `devicectl copy from` can reach. Only when the perf log is on, so a
-  // normal run is unaffected.
+  // Anything the runtime writes to stderr -- the chassis's dispatch report,
+  // most of all -- goes into the same file, because stderr on a device goes
+  // nowhere a `devicectl copy from` can reach. Only when the perf log is on,
+  // so a normal run is unaffected.
   if (const char* perf = getenv("DOLBUNDLER_PERF_LOG"))
     if (perf[0] == '1')
     {
@@ -277,10 +291,12 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
   moderngekko::RuntimeConfig config;
   config.game_root = game_root;
   config.user_directory = user_dir;
-  bool found_native_module = false;
-#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  // The disc ID is the directory the import extracted into, which is what the
+  // embedded module registry is keyed by.
   const std::string game_id =
       std::filesystem::path(game_root).filename().string();
+  bool found_native_module = false;
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
   for (const DolBundlerNativeModuleEntry& native_module : kDolBundlerNativeModules)
   {
     if (game_id != native_module.game_id)
@@ -292,12 +308,25 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     break;
   }
 #endif
+  // Nothing to fall back to: a module is generated on a Mac and linked in
+  // before signing, so a disc this build was not built for cannot be played
+  // here at all. Say so rather than booting into the chassis's interpreter,
+  // which would run at a few percent of speed and look like a hang.
   if (!found_native_module)
-    config.module = moderngekko::ModuleSource::BytecodePath(module_path);
+  {
+    set_err(err, err_size,
+            "This build has no native module for " +
+                (game_id.empty() ? std::string("this disc") : game_id) +
+                ". Games are compiled on a Mac and linked into the app before "
+                "it is signed.");
+    run_log("no embedded native module for %s", game_id.c_str());
+    s_running = false;
+    return 0;
+  }
   config.graphics.backend = "Metal";
   // Metal implements Dolphin's compute-shader texture decoder. Keep texture
   // conversion off the emulation thread, where it competes directly with the
-  // bytecode VM in this single-core configuration.
+  // guest code in this single-core configuration.
   config.graphics.gpu_texture_decoding = true;
   // AudioCommon's own default resolves to this on iOS too, but naming it means
   // a silent game is a wrong-backend bug rather than an unnoticed fallback.
@@ -344,8 +373,8 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
 
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
-  // A .dvm covers the whole title; letting the chassis fall back to its own
-  // interpreter would silently mask a module that failed to load.
+  // The module covers the whole title; letting the chassis fall back to its
+  // own interpreter would silently mask a module that failed to load.
   config.allow_interpreter = false;
   config.show_fps_in_title = false;
 
@@ -413,6 +442,7 @@ int db_run_game(const char* game_root, const char* module_path, const char* user
     s_runtime.reset();
   }
   s_running.store(false);
+  s_paused.store(false);
   FlushLLVMProfileIfRequested();
 
   if (result.reason == moderngekko::RuntimeExitReason::BootFailed)
@@ -429,6 +459,32 @@ void db_request_stop(void)
   std::lock_guard<std::mutex> lock(s_runtime_mutex);
   if (s_runtime)
     s_runtime->RequestStop();
+}
+
+void db_set_paused(int paused)
+{
+  std::lock_guard<std::mutex> lock(s_runtime_mutex);
+  if (!s_runtime)
+    return;
+
+  // Pause() and Resume() report an error only when the runtime is not running,
+  // which db_is_running() already covers for the caller. Nothing here can act
+  // on a failure beyond not changing the flag, so the flag follows the call.
+  if (paused)
+  {
+    if (!s_runtime->Pause())
+      s_paused.store(true);
+  }
+  else
+  {
+    if (!s_runtime->Resume())
+      s_paused.store(false);
+  }
+}
+
+int db_is_paused(void)
+{
+  return s_paused.load() ? 1 : 0;
 }
 
 int db_is_running(void)

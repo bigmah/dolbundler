@@ -1,0 +1,695 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# RecompIOS - put library games on an iPhone, native code and all.
+#
+#   recompios [--porcelain] devices
+#   recompios [--porcelain] teams [--device <id>]
+#   recompios [--porcelain] send [--device <id>] [--team <id>]
+#                                [--disc-id <id>]... [--force] [--no-launch]
+#   recompios [--porcelain] drop --disc-id <id> [--device <id>]
+#   recompios [--porcelain] adopt --disc-id <id> --generated <dir>
+#
+# `send` is the whole iPhone pipeline, and it is what the window's "Send to
+# iPhone" button runs:
+#
+#   1. recompile each game's DOL to arm64 iPhone objects, here on the Mac
+#   2. link every recompiled game into DolBundler.app and sign it
+#   3. install that app on the phone
+#   4. copy each game's extracted disc into the app's Documents folder
+#
+# Step 2 is why this cannot be one game at a time. Guest code has to be part of
+# the signed binary -- iOS will not map a page executable without a valid
+# signature behind it -- so adding a game means relinking and reinstalling the
+# app with every game in it. Steps 1 and 4 are the slow ones and both are
+# skipped when nothing changed, so sending the same library twice is a relink
+# and an install rather than an afternoon.
+#
+# Games come from the same library.json the window shows, so a disc has to be
+# added on the Mac first. With no --disc-id, every game in it that still has
+# its extracted disc is sent.
+#
+# `devices` and `teams` print the pickers' contents, one per line, tab
+# separated. `teams` is ordered best-first: a team whose provisioning profile
+# covers this app *and* the chosen phone comes before one that only has a
+# signing certificate, because the difference is a twenty-minute build that
+# fails at the last step.
+#
+# `drop` removes a game's iPhone module, so the next send links an app without
+# it. With --device it also empties that game's folder on the phone.
+#
+# `adopt` takes a DolRecomp output directory produced by hand -- a PGO build, or
+# anything else from ios/README.md's command-line route -- and puts it in the
+# store so `send` links it in and leaves it alone. Without this, the first send
+# after such a build would quietly produce an app missing that game.
+#
+# --porcelain adds machine-readable event lines for the GUI and drops the
+# colour codes, exactly as in recompgc:
+#
+#   @@step <index> <total> <title>
+#   @@info <key>=<value>        key in: device device_name team
+#                                       module=<disc-id> pushed=<disc-id>
+#   @@ok
+#   @@fail <message>
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONF="$SELF_DIR/toolchain.conf"
+
+MODE=''
+case "${1-}" in
+  devices|teams|send|drop|adopt) MODE="$1"; shift ;;
+  *)
+    echo "usage: $(basename "$0") devices|teams|send|drop|adopt [options]" >&2
+    exit 2
+    ;;
+esac
+
+PORCELAIN=0
+FORCE=0
+LAUNCH=1
+ARG_DEVICE="${DOLBUNDLER_DEVICE:-}"
+ARG_TEAM="${DOLBUNDLER_TEAM:-}"
+ARG_GENERATED=''
+WANTED=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --porcelain) PORCELAIN=1 ;;
+    --device)    ARG_DEVICE="${2-}"; shift ;;
+    --team)      ARG_TEAM="${2-}"; shift ;;
+    --disc-id)   WANTED+=("${2-}"); shift ;;
+    --generated) ARG_GENERATED="${2-}"; shift ;;
+    --force)     FORCE=1 ;;
+    --no-launch) LAUNCH=0 ;;
+    -*)          echo "unknown option: $1" >&2; exit 2 ;;
+    *)           echo "unexpected argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$PORCELAIN" -eq 1 ]; then
+  bold=''; dim=''; red=''; green=''; off=''
+else
+  bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; green=$'\033[32m'; off=$'\033[0m'
+fi
+
+emit()  { [ "$PORCELAIN" -eq 1 ] && printf '@@%s\n' "$*"; return 0; }
+step()  { emit "step $1 $2 $3"
+          [ "$PORCELAIN" -eq 1 ] && return 0
+          printf '\n%s==> %s/%s  %s%s\n' "$bold" "$1" "$2" "$3" "$off"; }
+info()  { emit "info $1=$2"; }
+note()  { printf '%s    %s%s\n' "$dim" "$*" "$off"; }
+ok()    { printf '%s    %s%s\n' "$green" "$*" "$off"; }
+die()   { emit "fail $*"; printf '\n%serror: %s%s\n' "$red" "$*" "$off" >&2; exit 1; }
+
+# ios/build.sh writes its headings with the same escape codes this script
+# suppresses in porcelain mode, and the window renders raw text.
+strip_colour() { sed $'s/\033\\[[0-9;]*m//g'; }
+
+[ -f "$CONF" ] || die "missing $CONF; re-run DolBundler/build.sh"
+# shellcheck source=/dev/null
+source "$CONF"
+: "${MG_SRC:?toolchain.conf did not set MG_SRC}"
+# REPO_ROOT was added to toolchain.conf after this script; a conf written by an
+# older build.sh still has MG_SRC, which sits one level down from the root.
+REPO_ROOT="${REPO_ROOT:-$(dirname "$MG_SRC")}"
+
+BUNDLE_ID="${DOLBUNDLER_BUNDLE_ID:-com.bigmah.dolbundler}"
+SUPPORT_DIR="$HOME/Library/Application Support/DolBundler"
+LIBRARY="$SUPPORT_DIR/library.json"
+IOS_DIR="$SUPPORT_DIR/iphone"
+MODULES_DIR="$IOS_DIR/modules"
+DEVICES_DIR="$IOS_DIR/devices"
+LLVM_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/Library/Caches}/DolBundler/iphone-llvm"
+
+# The deployment target, the triple and the CPU have to agree with what the app
+# itself is built with: ios/build.sh passes 17.0, and ModernGekko compiles
+# GXRuntime's guest CPU helpers with -mcpu=apple-a16 so a lane computed in a
+# helper matches one the generated code inlined. Changing either here alone
+# produces a module that links and then behaves differently from the runtime
+# it calls into.
+LLVM_TARGET="${DOLRECOMP_LLVM_TARGET:-arm64-apple-ios17.0}"
+LLVM_CPU="${DOLRECOMP_LLVM_CPU:-apple-a16}"
+
+# One object per guest-code chunk, and a GameCube game has thousands of them.
+# dolrecomp emits them one at a time unless it is told otherwise -- the default
+# is -j1, not a core count -- and each is an independent LLVM invocation, so
+# this is the difference between minutes and the better part of an hour. The
+# workers are short-lived fork children of a process holding the whole DolIR,
+# which is copy-on-write and read-only in the child, so the cost is CPU rather
+# than another copy of the game per core.
+JOBS="${DOLBUNDLER_IOS_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+# Phones whose chip is at least an A16, which is what LLVM_CPU names. Anything
+# else gets a warning rather than a refusal: the list is a list, not a
+# capability query, and a wrong entry should not stop someone building.
+A16_OR_BETTER='iPhone15,2 iPhone15,3 iPhone15,4 iPhone15,5 iPhone16,1 iPhone16,2 iPhone17,1 iPhone17,2 iPhone17,3 iPhone17,4 iPhone17,5 iPhone18,1 iPhone18,2 iPhone18,3 iPhone18,4'
+
+# --- devices -----------------------------------------------------------------
+
+# identifier \t name \t marketing name \t product type \t udid
+device_list() {
+  local json; json="$(mktemp -t recompios-devices)"
+  xcrun devicectl list devices --json-output "$json" >/dev/null 2>&1
+  /usr/bin/python3 - "$json" <<'PY'
+import json, sys
+try:
+    devices = json.load(open(sys.argv[1]))["result"]["devices"]
+except Exception:
+    devices = []
+for d in devices:
+    hardware = d.get("hardwareProperties", {})
+    properties = d.get("deviceProperties", {})
+    print("\t".join([
+        d.get("identifier", ""),
+        properties.get("name", ""),
+        hardware.get("marketingName", ""),
+        hardware.get("productType", ""),
+        hardware.get("udid", ""),
+    ]))
+PY
+  rm -f "$json"
+}
+
+DEVICE_ID=''; DEVICE_NAME=''; DEVICE_MODEL=''; DEVICE_PRODUCT=''; DEVICE_UDID=''
+
+# Never guesses between phones. The wrong guess is a locked phone on a desk
+# while the one in your hand gets nothing.
+resolve_device() {
+  local all matched count
+  all="$(device_list)"
+  [ -n "$all" ] || die "no paired iPhone. Plug it in, unlock it, and tap Trust."
+
+  if [ -n "$ARG_DEVICE" ]; then
+    matched="$(awk -F'\t' -v want="$(printf '%s' "$ARG_DEVICE" | tr '[:upper:]' '[:lower:]')" '
+      tolower($1) == want || index(tolower($2), want) > 0' <<<"$all")"
+  else
+    matched="$all"
+  fi
+
+  count="$(printf '%s' "$matched" | grep -c . || true)"
+  if [ "$count" -ne 1 ]; then
+    {
+      if [ -n "$ARG_DEVICE" ] && [ "$count" -eq 0 ]; then
+        printf 'no paired device matches %s. Paired now:\n' "$ARG_DEVICE"
+        matched="$all"
+      elif [ -n "$ARG_DEVICE" ]; then
+        printf '%s matches more than one paired device:\n' "$ARG_DEVICE"
+      else
+        printf 'more than one iPhone is paired; choose one in Settings:\n'
+      fi
+      awk -F'\t' '{ printf "  %s  %s (%s)\n", $1, $2, $3 }' <<<"$matched"
+    } >&2
+    die "pick which iPhone to send to"
+  fi
+
+  IFS=$'\t' read -r DEVICE_ID DEVICE_NAME DEVICE_MODEL DEVICE_PRODUCT DEVICE_UDID \
+    <<<"$matched"
+  info device "$DEVICE_ID"
+  info device_name "$DEVICE_NAME"
+}
+
+# --- signing teams -----------------------------------------------------------
+
+# team id \t label, best first. A team that can actually reach this phone comes
+# ahead of one that merely has a certificate, because the difference only shows
+# up after the build.
+team_list() {
+  /usr/bin/python3 - "$BUNDLE_ID" "${DEVICE_UDID:-}" <<'PY'
+import glob, os, plistlib, re, subprocess, sys
+
+bundle_id, udid = sys.argv[1], sys.argv[2]
+teams = {}
+
+def record(team, name, rank, label):
+    known = teams.get(team)
+    if known is None or rank < known[0]:
+        teams[team] = (rank, name, label)
+
+profiles = os.path.expanduser(
+    "~/Library/Developer/Xcode/UserData/Provisioning Profiles/*.mobileprovision")
+for path in glob.glob(profiles):
+    try:
+        raw = open(path, "rb").read()
+        start, end = raw.find(b"<?xml"), raw.find(b"</plist>")
+        profile = plistlib.loads(raw[start:end + len(b"</plist>")])
+    except Exception:
+        continue
+    identifiers = profile.get("TeamIdentifier") or []
+    if not identifiers:
+        continue
+    team = identifiers[0]
+    name = profile.get("TeamName") or team
+    app_id = (profile.get("Entitlements") or {}).get("application-identifier", "")
+    if app_id not in (f"{team}.{bundle_id}", f"{team}.*"):
+        continue
+    expires = profile.get("ExpirationDate")
+    expiry = f", expires {expires:%-d %b %Y}" if expires else ""
+    devices = profile.get("ProvisionedDevices") or []
+    if udid and udid in devices:
+        record(team, name, 0, f"{name} - ready for this iPhone{expiry}")
+    elif udid:
+        record(team, name, 1,
+               f"{name} - its profile does not list this iPhone{expiry}")
+    else:
+        record(team, name, 1, f"{name} - has a profile for this app{expiry}")
+
+# A team with a signing certificate but no profile is still worth offering:
+# Xcode can make the profile itself, given an account to make it with.
+try:
+    listing = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"],
+                             capture_output=True, text=True).stdout
+except Exception:
+    listing = ""
+for line in listing.splitlines():
+    common_name = re.search(r'"([^"]+)"', line)
+    if not common_name:
+        continue
+    try:
+        pem = subprocess.run(["security", "find-certificate", "-c", common_name.group(1), "-p"],
+                             capture_output=True, text=True).stdout
+        subject = subprocess.run(["openssl", "x509", "-noout", "-subject"],
+                                 input=pem, capture_output=True, text=True).stdout
+    except Exception:
+        continue
+    unit = re.search(r"OU\s*=\s*([A-Z0-9]+)", subject)
+    org = re.search(r"O\s*=\s*([^,/]+)", subject)
+    if not unit:
+        continue
+    name = (org.group(1).strip() if org else unit.group(1))
+    record(unit.group(1), name, 2,
+           f"{name} - signing certificate only, no profile for this app yet")
+
+for team, (_, _, label) in sorted(teams.items(), key=lambda kv: (kv[1][0], kv[1][1])):
+    print(f"{team}\t{label}")
+PY
+}
+
+TEAM=''; TEAM_LABEL=''
+
+resolve_team() {
+  local teams; teams="$(team_list)"
+
+  if [ -n "$ARG_TEAM" ]; then
+    TEAM="$ARG_TEAM"
+    TEAM_LABEL="$(awk -F'\t' -v team="$TEAM" '$1 == team { print $2 }' <<<"$teams")"
+    [ -n "$TEAM_LABEL" ] || TEAM_LABEL="no signing certificate for this team in the keychain"
+  else
+    IFS=$'\t' read -r TEAM TEAM_LABEL <<<"$(head -1 <<<"$teams")"
+  fi
+
+  [ -n "$TEAM" ] || die "no Apple Developer team to sign with. Open Xcode, add your Apple ID under Settings > Accounts, then choose the team in DolBundler's Settings."
+  info team "$TEAM"
+  note "signing as $TEAM ($TEAM_LABEL)"
+  case "$TEAM_LABEL" in
+    *"ready for this iPhone"*) ;;
+    *) note "if the install is refused at the end, this is why: Xcode has to add $DEVICE_NAME to the team's profile, which needs an Apple ID in Xcode > Settings > Accounts" ;;
+  esac
+}
+
+# --- the library -------------------------------------------------------------
+
+# disc id \t name \t game root, for the games asked for, or all of them.
+library_games() {
+  /usr/bin/python3 - "$LIBRARY" "$@" <<'PY'
+import json, os, sys
+
+path, wanted = sys.argv[1], sys.argv[2:]
+try:
+    games = json.load(open(path)).get("games", [])
+except Exception:
+    games = []
+by_id = {game.get("disc_id", ""): game for game in games if game.get("disc_id")}
+for disc_id in (wanted or sorted(by_id)):
+    game = by_id.get(disc_id)
+    if game is None:
+        continue
+    root = game.get("game_root", "")
+    if not os.path.isfile(os.path.join(root, "sys", "main.dol")):
+        continue
+    print("\t".join([disc_id, game.get("name") or disc_id, root]))
+PY
+}
+
+# --- recompiling for the phone -----------------------------------------------
+
+DOLRECOMP_IOS="$REPO_ROOT/build-dolrecomp-llvm20/dolrecomp"
+
+ensure_recompiler() {
+  if [ -x "$DOLRECOMP_IOS" ] && [ "$FORCE" -eq 0 ]; then
+    note "$DOLRECOMP_IOS"
+    return 0
+  fi
+  [ -x "$REPO_ROOT/ios/build-dolrecomp-llvm20.sh" ] \
+    || die "missing $REPO_ROOT/ios/build-dolrecomp-llvm20.sh; the checkout DolBundler was built from has moved or is incomplete"
+  note "building the pinned LLVM 20 recompiler; the first one takes a few minutes"
+  "$REPO_ROOT/ios/build-dolrecomp-llvm20.sh" 2>&1 | strip_colour
+  [ "${PIPESTATUS[0]}" -eq 0 ] || die "could not build the iPhone recompiler (see the log above)"
+  [ -x "$DOLRECOMP_IOS" ] || die "the recompiler build did not produce $DOLRECOMP_IOS"
+}
+
+# What a built module was built from. A module is reused only when the DOL, the
+# triple and the CPU all still match; anything else and the objects would be
+# linked against a runtime that no longer agrees with them.
+module_stamp() {
+  printf '%s %s %s\n' "$(shasum -a 256 "$1" | cut -d' ' -f1)" "$LLVM_TARGET" "$LLVM_CPU"
+}
+
+recompile_game() {
+  local disc_id="$1" name="$2" root="$3"
+  local out="$MODULES_DIR/$disc_id"
+  local generated="$out/generated"
+  local dol="$root/sys/main.dol"
+  local want; want="$(module_stamp "$dol")"
+
+  if [ "$FORCE" -eq 0 ] && [ -f "$generated/generated.h" ] \
+     && [ "$(cat "$out/dol.sha256" 2>/dev/null)" = "$want" ]; then
+    ok "$name is already recompiled for iPhone"
+    info module "$disc_id"
+    return 0
+  fi
+
+  note "PowerPC -> DolIR -> arm64 iPhone objects across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
+  rm -rf "$out"
+  mkdir -p "$out" "$LLVM_CACHE_DIR/$disc_id"
+
+  # Every game in the app exports the same handful of module symbols, so each
+  # one needs its own C-identifier prefix or the second to be linked collides
+  # with the first.
+  DOLRECOMP_LLVM_TARGET="$LLVM_TARGET" \
+  DOLRECOMP_LLVM_CPU="$LLVM_CPU" \
+  DOLRECOMP_LLVM_CACHE="$LLVM_CACHE_DIR/$disc_id" \
+  DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
+    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$out" \
+      </dev/null 2>&1 | strip_colour
+  if [ "${PIPESTATUS[0]}" -ne 0 ] || [ ! -f "$generated/generated.h" ]; then
+    rm -rf "$out"
+    die "recompiling $name for iPhone failed (see the log above)"
+  fi
+
+  # module-template validates the module against the DOL it came from, so the
+  # DOL travels with the objects.
+  cp -f "$dol" "$generated/main.dol" \
+    || { rm -rf "$out"; die "could not copy $name's main.dol beside its module"; }
+  printf '%s' "$name" > "$out/title"
+  printf '%s\n' "$want" > "$out/dol.sha256"
+  info module "$disc_id"
+  ok "$(du -sh "$generated" | cut -f1 | tr -d ' ') of arm64 iPhone code"
+}
+
+# Every module that is whole, not only the ones being sent now: a game already
+# on the phone has to stay linked in or this build would take it away.
+embedded_modules() {
+  local spec='' dir disc_id
+  for dir in "$MODULES_DIR"/*; do
+    [ -d "$dir" ] || continue
+    disc_id="$(basename "$dir")"
+    [ -f "$dir/generated/generated.h" ] || continue
+    [ -f "$dir/dol.sha256" ] || continue
+    spec="${spec:+$spec;}$disc_id=$dir/generated"
+  done
+  printf '%s' "$spec"
+}
+
+# --- the app -----------------------------------------------------------------
+
+APP_BUNDLE="$REPO_ROOT/build-ios/Release-iphoneos/DolBundler.app"
+
+# ios/build.sh is the command-line entry point for the same thing and stays the
+# one place that knows how the app is configured; only the install is done
+# here, because the phone was already chosen above and build.sh would go
+# looking for it a second time.
+build_app() {
+  local modules; modules="$(embedded_modules)"
+  [ -n "$modules" ] || die "no game has been recompiled for iPhone yet"
+
+  # Xcode drops a removed copy phase from the regenerated project but leaves
+  # what that phase already copied in the product directory, which is how a
+  # build once reported success while still shipping 300 MB of stale
+  # frameworks. The product is cheap to rebuild; the objects behind it are not
+  # touched.
+  rm -rf "$APP_BUNDLE"
+
+  DOLBUNDLER_TEAM="$TEAM" \
+  DOLBUNDLER_DEVICE="$DEVICE_ID" \
+  DOLBUNDLER_BUNDLE_ID="$BUNDLE_ID" \
+  DOLBUNDLER_NATIVE_MODULES="$modules" \
+  DOLBUNDLER_NATIVE_GAME_ID='' \
+  DOLBUNDLER_NATIVE_GENERATED_DIR='' \
+    "$REPO_ROOT/ios/build.sh" 2>&1 | strip_colour
+  [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
+  [ -d "$APP_BUNDLE" ] || return 1
+}
+
+install_app() {
+  if xcrun devicectl device install app --device "$DEVICE_ID" "$APP_BUNDLE" 2>&1 | strip_colour
+  then
+    return 0
+  fi
+  {
+    echo "The usual causes, in order:"
+    echo "  * the phone is locked, or not plugged in and not on this Wi-Fi"
+    echo "  * Developer Mode is off under Settings > Privacy & Security"
+    echo "  * the signing team's profile does not cover $DEVICE_NAME, which"
+    echo "    Xcode can fix only with an Apple ID in Xcode > Settings > Accounts"
+  } >&2
+  return 1
+}
+
+# --- getting the disc onto the phone ------------------------------------------
+
+copy_to_device() {  # <local source> <remote destination> [extra devicectl args]
+  local source="$1" destination="$2"; shift 2
+  xcrun devicectl device copy to \
+    --device "$DEVICE_ID" \
+    --domain-type appDataContainer --domain-identifier "$BUNDLE_ID" \
+    --source "$source" --destination "$destination" "$@" \
+    </dev/null 2>&1 | strip_colour
+  return "${PIPESTATUS[0]}"
+}
+
+# Whether `copy to --destination Documents/games/GXXE01` writes the source
+# directory's contents there ("exact") or the directory itself inside it
+# ("parent"). Both readings of the flag are defensible and getting it wrong
+# puts a gigabyte where the app will never look, so it is measured once per
+# phone with a file small enough that being wrong costs nothing.
+device_copy_layout() {
+  local recorded="$DEVICES_DIR/$DEVICE_ID/layout"
+  if [ "$FORCE" -eq 0 ] && [ -s "$recorded" ]; then
+    cat "$recorded"
+    return 0
+  fi
+
+  local work; work="$(mktemp -d -t recompios-probe)"
+  mkdir -p "$work/probe"
+  printf 'probe' > "$work/probe/probe.txt"
+  copy_to_device "$work/probe" "Documents/.dolbundler-probe" >/dev/null 2>&1 \
+    || { rm -rf "$work"; return 1; }
+
+  local layout=''
+  if xcrun devicectl device copy from --device "$DEVICE_ID" \
+       --domain-type appDataContainer --domain-identifier "$BUNDLE_ID" \
+       --source "Documents/.dolbundler-probe/probe.txt" \
+       --destination "$work/back" >/dev/null 2>&1; then
+    layout=exact
+  elif xcrun devicectl device copy from --device "$DEVICE_ID" \
+       --domain-type appDataContainer --domain-identifier "$BUNDLE_ID" \
+       --source "Documents/.dolbundler-probe/probe/probe.txt" \
+       --destination "$work/back" >/dev/null 2>&1; then
+    layout=parent
+  fi
+  rm -rf "$work"
+
+  [ -n "$layout" ] || return 1
+  # Overwriting with an empty directory is the only delete devicectl offers.
+  local gone; gone="$(mktemp -d -t recompios-empty)"
+  copy_to_device "$gone" "Documents/.dolbundler-probe" \
+    --remove-existing-content true >/dev/null 2>&1
+  rmdir "$gone" 2>/dev/null
+
+  mkdir -p "$DEVICES_DIR/$DEVICE_ID"
+  printf '%s\n' "$layout" > "$recorded"
+  printf '%s' "$layout"
+}
+
+push_game() {
+  local disc_id="$1" name="$2" root="$3"
+  local stamp="$DEVICES_DIR/$DEVICE_ID/games/$disc_id"
+
+  # The phone caches the title beside the game because it has no ISO to re-read
+  # it from. Writing it here rather than into a staged copy is what keeps this
+  # a single transfer of the extracted disc -- and it happens before the size
+  # is taken, because the file is inside what is being measured.
+  printf '%s' "$name" > "$root/dolbundler-title.txt"
+
+  local size; size="$(du -sk "$root" 2>/dev/null | cut -f1)"
+  if [ "$FORCE" -eq 0 ] && [ "$(cat "$stamp" 2>/dev/null)" = "$size" ]; then
+    ok "$name is already on $DEVICE_NAME"
+    info pushed "$disc_id"
+    return 0
+  fi
+
+  local layout; layout="$(device_copy_layout)" \
+    || die "could not reach $DEVICE_NAME's copy of DolBundler. Unlock the phone, keep it plugged in, and make sure the app installed."
+  local destination="Documents/games/$disc_id"
+  [ "$layout" = parent ] && destination="Documents/games"
+
+  note "$(du -sh "$root" | cut -f1 | tr -d ' ') over the cable; this is the slow half"
+  copy_to_device "$root" "$destination" \
+    || die "copying $name to $DEVICE_NAME failed. A transfer over Wi-Fi drops often enough that retrying is the first thing to try; over USB it should not."
+
+  mkdir -p "$(dirname "$stamp")"
+  printf '%s' "$size" > "$stamp"
+  info pushed "$disc_id"
+  ok "$name is on $DEVICE_NAME"
+}
+
+# --- subcommands --------------------------------------------------------------
+
+if [ "$MODE" = devices ]; then
+  device_list
+  exit 0
+fi
+
+if [ "$MODE" = teams ]; then
+  # The phone decides which teams count as ready, so resolve it when one was
+  # named and stay quiet when it cannot be found: a team list is still useful
+  # with no phone plugged in.
+  if [ -n "$ARG_DEVICE" ]; then
+    all="$(device_list)"
+    IFS=$'\t' read -r _ _ _ _ DEVICE_UDID <<<"$(awk -F'\t' -v want="$(printf '%s' "$ARG_DEVICE" | tr '[:upper:]' '[:lower:]')" '
+      tolower($1) == want || index(tolower($2), want) > 0' <<<"$all" | head -1)"
+  fi
+  team_list
+  exit 0
+fi
+
+if [ "$MODE" = adopt ]; then
+  [ "${#WANTED[@]}" -eq 1 ] || die "adopt takes exactly one --disc-id"
+  disc_id="${WANTED[0]}"
+  [ -n "$ARG_GENERATED" ] || die "adopt needs --generated <dolrecomp output dir>"
+  [ -f "$ARG_GENERATED/generated.h" ] \
+    || die "$ARG_GENERATED is not a DolRecomp output directory (no generated.h in it)"
+  [ -f "$ARG_GENERATED/main.dol" ] \
+    || die "$ARG_GENERATED has no main.dol beside it; module-template validates the module against the DOL it came from, so copy it in first"
+
+  # The triple and CPU are stamped into generated.h by the emitter, so the
+  # module says what it was built for rather than being taken on trust.
+  adopted_triple="$(sed -n 's/^#define DOLRECOMP_NATIVE_TARGET_TRIPLE "\(.*\)"$/\1/p' \
+    "$ARG_GENERATED/generated.h" | head -1)"
+  adopted_cpu="$(sed -n 's/^#define DOLRECOMP_NATIVE_TARGET_CPU "\(.*\)"$/\1/p' \
+    "$ARG_GENERATED/generated.h" | head -1)"
+  [ -n "$adopted_triple" ] \
+    || die "$ARG_GENERATED/generated.h names no target triple, so it was not built for a phone"
+  case "$adopted_triple" in
+    arm64-apple-ios*) ;;
+    *) die "that module was built for $adopted_triple, not an iPhone" ;;
+  esac
+
+  # Copied rather than referenced. These directories are usually written under
+  # /tmp, and a link into one that has been cleared fails at link time with
+  # nothing to say which game went missing.
+  out="$MODULES_DIR/$disc_id"
+  rm -rf "$out"
+  mkdir -p "$out"
+  cp -R "$ARG_GENERATED" "$out/generated" || { rm -rf "$out"; die "could not copy $ARG_GENERATED"; }
+  printf '%s' "$disc_id" > "$out/title"
+  printf '%s %s %s\n' "$(shasum -a 256 "$out/generated/main.dol" | cut -d' ' -f1)" \
+    "$adopted_triple" "$adopted_cpu" > "$out/dol.sha256"
+  info module "$disc_id"
+  ok "$disc_id adopted ($adopted_triple, $adopted_cpu); it will be linked into the next iPhone build"
+  emit ok
+  exit 0
+fi
+
+if [ "$MODE" = drop ]; then
+  [ "${#WANTED[@]}" -eq 1 ] || die "drop takes exactly one --disc-id"
+  disc_id="${WANTED[0]}"
+  rm -rf "${MODULES_DIR:?}/$disc_id"
+  ok "$disc_id will not be linked into the next iPhone build"
+
+  if [ -n "$ARG_DEVICE" ]; then
+    resolve_device
+    # There is no delete over devicectl, so the folder is overwritten with an
+    # empty one. The phone lists a game by finding sys/main.dol under it, so an
+    # empty folder is the same as no game.
+    empty="$(mktemp -d -t recompios-empty)"
+    if copy_to_device "$empty" "Documents/games/$disc_id" \
+         --remove-existing-content true >/dev/null 2>&1; then
+      ok "removed $disc_id's disc from $DEVICE_NAME"
+    else
+      note "could not clear $disc_id off $DEVICE_NAME; delete it in the app or in Files"
+    fi
+    rmdir "$empty" 2>/dev/null
+    rm -f "$DEVICES_DIR/$DEVICE_ID/games/$disc_id"
+  else
+    rm -f "$DEVICES_DIR"/*/games/"$disc_id"
+  fi
+  emit ok
+  exit 0
+fi
+
+# --- send ---------------------------------------------------------------------
+
+command -v xcrun >/dev/null || die "Xcode's command line tools are required"
+xcodebuild -version >/dev/null 2>&1 \
+  || die "xcodebuild cannot run. Install Xcode, then point the tools at it: sudo xcode-select -s /Applications/Xcode.app"
+
+games="$(library_games "${WANTED[@]+"${WANTED[@]}"}")"
+[ -n "$games" ] || die "no game to send. Add a disc image first; a game whose extracted disc has been deleted cannot be sent either."
+count="$(printf '%s' "$games" | grep -c .)"
+# checks, toolchain, one recompile and one copy per game, build, install
+total=$((4 + 2 * count))
+
+printf '%s%s%s\n' "$bold" "RecompIOS - $count game(s) to iPhone" "$off"
+
+step 1 "$total" "Checking the iPhone"
+resolve_device
+ok "$DEVICE_NAME ($DEVICE_MODEL)"
+case " $A16_OR_BETTER " in
+  *" $DEVICE_PRODUCT "*) ;;
+  *) note "warning: games are compiled for $LLVM_CPU and $DEVICE_MODEL is not on the list of phones known to have it. If a game quits the moment it starts, that is the first thing to suspect." ;;
+esac
+resolve_team
+
+step 2 "$total" "Preparing the iPhone recompiler"
+ensure_recompiler
+
+index=2
+while IFS=$'\t' read -r disc_id name root; do
+  [ -n "$disc_id" ] || continue
+  index=$((index + 1))
+  step "$index" "$total" "Recompiling $name for iPhone"
+  recompile_game "$disc_id" "$name" "$root"
+done <<<"$games"
+
+index=$((index + 1))
+step "$index" "$total" "Building DolBundler for iPhone"
+note "the first build compiles all of Dolphin and takes a while; later ones relink"
+build_app || die "the iPhone app did not build (see the log above)"
+ok "$(du -sh "$APP_BUNDLE" | cut -f1 | tr -d ' ') signed app"
+
+index=$((index + 1))
+step "$index" "$total" "Installing on $DEVICE_NAME"
+install_app || die "installing on $DEVICE_NAME failed (see the log above)"
+mkdir -p "$DEVICES_DIR/$DEVICE_ID"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$DEVICES_DIR/$DEVICE_ID/installed"
+printf '%s' "$DEVICE_NAME" > "$DEVICES_DIR/$DEVICE_ID/name"
+
+while IFS=$'\t' read -r disc_id name root; do
+  [ -n "$disc_id" ] || continue
+  index=$((index + 1))
+  step "$index" "$total" "Copying $name to $DEVICE_NAME"
+  push_game "$disc_id" "$name" "$root"
+done <<<"$games"
+
+if [ "$LAUNCH" -eq 1 ]; then
+  xcrun devicectl device process launch --device "$DEVICE_ID" \
+    --terminate-existing "$BUNDLE_ID" >/dev/null 2>&1 \
+    && note "opened DolBundler on $DEVICE_NAME"
+fi
+
+printf '\n%sDone.%s %sOpen DolBundler on %s; the games are in its library.%s\n' \
+  "$green" "$off" "$dim" "$DEVICE_NAME" "$off"
+printf '%sOn the first install, trust the certificate under Settings > General > VPN & Device Management.%s\n' \
+  "$dim" "$off"
+emit ok

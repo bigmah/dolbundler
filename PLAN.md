@@ -1,5 +1,12 @@
 # LLVM ARM64 iOS AOT Plan
 
+> **Status note (2026-08-26).** Milestones 1-4 are done and merged, and the
+> DolVM bytecode path this plan was written alongside has since been removed
+> from the tree -- native AOT is now the only way a game runs. References below
+> to comparing against, or falling back to, DolVM are kept for the reasoning
+> they record; the comparison baseline no longer exists in the tree, and
+> Milestone 5's A/B is against an earlier commit or not at all.
+
 ## Objective
 
 Make DolRecomp's existing LLVM backend emit relocatable Mach-O objects for
@@ -213,10 +220,10 @@ prove equal offsets.
 
 The emitter must write the fingerprint into generated metadata. The module
 loader or generated module glue must compare it with a fingerprint compiled
-against GXRuntime's `CPUState` and reject a mismatch before dispatch. Reuse the
-approach in `dolvm_state.h`, extending it for the memory/hook fields LLVM also
-addresses. Ideally the LLVM emitter and DolVM share the state-slot offset
-implementation instead of maintaining two switches.
+against GXRuntime's `CPUState` and reject a mismatch before dispatch.
+*(Done: `GXRuntime/include/core/native_state_layout.h`, whose
+`dolnative_state_layout_hash()` is written into generated metadata by
+`llvm_backend.cpp` and checked in `module_export.c`.)*
 
 Also add build-time ABI fixtures compiled with:
 
@@ -266,8 +273,8 @@ Use the existing embedded static-module path:
    `DOLBUNDLER_NATIVE_GENERATED_DIR=<generated-dir>` at that output.
 4. Let `module-template` add the objects as external objects and build a static
    `gGEXE52_recomp` target.
-5. Link that target into `DolBundler`; resolve helper calls against the existing
-   `moderngekko_dolvm` GXRuntime CPU implementation plus the module's exception
+5. Link that target into `DolBundler`; resolve helper calls against the
+   `moderngekko_gxcpu` GXRuntime CPU implementation plus the module's exception
    source.
 6. Ensure dead stripping does not discard generated chunks. The generated
    dispatcher should make every required chunk live; verify this in the final
@@ -295,7 +302,8 @@ Acceptance:
 - Xcode links the complete GEXE52 object set without platform warnings,
   duplicate helper definitions, missing symbols, or branch-range failures.
 - The signed app installs and launches on the iPhone.
-- Other disc IDs continue to use their `.dvm` files.
+- A disc with no embedded module is reported as unplayable by the library
+  rather than booted into a fallback.
 
 ## Milestone 4: Prove the LLVM Code Executes Correctly
 
@@ -348,7 +356,8 @@ Those calls skip the chassis's per-dispatch SMC/mod/timing gate. Resolve this
 before calling the backend generally correct:
 
 - Publish a native equivalent of the DolVM gate, or provide generated code a
-  cheap target-open table plus live cycle/exception state.
+  cheap target-open table plus live cycle/exception state. *(Done:
+  `dolrecomp_native_gate` in `GXRuntime/include/core/dispatch_gate.h`.)*
 - Check the gate at cross-chunk direct edges and indirect edges that can remain
   native.
 - Preserve the current carried budget so this does not regress to one chassis
@@ -371,14 +380,16 @@ Acceptance:
 
 ## Milestone 5: Measure Before Optimizing Further
 
-Compare the LLVM build against the shipping DolVM build from the same commit,
-with the same game data, settings, and Olliewood savestate.
+Compare the LLVM build against a baseline build, with the same game data,
+settings, and Olliewood savestate. The DolVM arm this was written for no longer
+exists in the tree; a comparison now means an earlier commit, or an A/B of two
+LLVM builds.
 
 Measurement protocol:
 
 - Use `% speed`, not guest FPS.
 - Use the same 60-second window after savestate load.
-- Cool the phone before the first run and interleave DolVM/LLVM runs to control
+- Cool the phone before the first run and interleave the two arms to control
   for the already observed thermal decline.
 - Keep Metal, audio, internal resolution, and thread configuration identical.
 - Capture shutdown counters and a device Time Profiler trace for each arm.
@@ -419,7 +430,7 @@ Implement in this order so each step has a small, falsifiable result:
 7. Prove LLVM symbols execute on device.
 8. Run lockstep and long-session correctness checks.
 9. Implement safe cross-chunk gating.
-10. Measure LLVM versus DolVM on the fixed Olliewood workload.
+10. Measure against the baseline on the fixed Olliewood workload.
 11. Only then begin NEON/helper/PGO optimization.
 
 ## Likely Files to Change
@@ -432,8 +443,7 @@ Implement in this order so each step has a small, falsifiable result:
 - `ModernGekko/vendor/dolphin/DolRecomp/src/app/pipeline.c`
 - `ModernGekko/vendor/dolphin/DolRecomp/tests/test_llvm_backend.cpp`
 - `ModernGekko/vendor/dolphin/DolRecomp/tests/test_llvm_pipeline.c`
-- `ModernGekko/vendor/dolphin/DolRecomp/src/vm/dolvm_state.h` or a new shared
-  native state-layout header
+- `ModernGekko/vendor/dolphin/GXRuntime/include/core/native_state_layout.h`
 - `ModernGekko/vendor/dolphin/module-template/CMakeLists.txt`
 - `ModernGekko/vendor/dolphin/module-template/module_export.c`
 - `ModernGekko/vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompABI.h`
@@ -459,6 +469,6 @@ This project is complete when all of these are true:
 - Lockstep and gameplay tests find no unexplained correctness divergence.
 - Cross-chunk execution respects SMC/mod/timing closures without returning to
   per-chunk chassis dispatch.
-- A controlled Olliewood comparison quantifies the speedup over DolVM.
+- A controlled Olliewood comparison quantifies the speedup over the baseline.
 - No compiler, JIT, unsigned module loading, or executable-memory generation is
   present in the iOS app.

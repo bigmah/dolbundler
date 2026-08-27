@@ -1,13 +1,19 @@
 # DolBundler for iOS
 
-A GameCube disc goes in, the app recompiles it to DolVM bytecode on the device,
-and it shows up in a library you tap to play. No Mac in the loop, and nothing
-the app produces is ever mapped executable.
+A GameCube disc is recompiled to native arm64 on a Mac and linked into the app
+before it is signed. On the phone the disc goes in, gets extracted, and shows up
+in a library you tap to play against the module already inside the binary.
 
 ```
-   .iso  ──▶  extract  ──▶  recompile  ──▶  .dvm  ──▶  ▶ play
-              (DolRecomp)    (DolVM)                    (ModernGekko + Metal)
+   on a Mac:   main.dol ──▶ DolRecomp --backend llvm ──▶ .o ──▶ link ──▶ sign
+   on the phone:  .iso ──▶ extract ──▶ game root ──▶ ▶ play
+                          (DolRecomp)                (ModernGekko + Metal)
 ```
+
+Nothing is generated or mapped executable at runtime: the guest code is part of
+the signed binary, and the phone only ever reads the disc's data. That is also
+why a disc this build was not compiled for can be imported and stored but not
+played -- the library says so rather than booting into something unusably slow.
 
 ## Building
 
@@ -28,12 +34,31 @@ Device Management**.
 Requirements: Xcode 15+, an iOS 17+ device with an A-series chip. Built and
 tested against an iPhone 15 Pro Max.
 
-### Developer-only LLVM AOT build
+### Building a game into the app
 
-The normal app remains the DolVM build described below. For a private,
-pre-signed native experiment, build the host recompiler with the pinned LLVM
-20 wrapper, emit iPhoneOS objects on the Mac, and embed them before Xcode signs
-the app:
+**The short way is the Mac app.** DolBundler's **iPhone** button does every
+step below — recompile, link, sign, install — and copies the extracted disc
+onto the phone afterwards, so the game is in the phone's library rather than
+merely linked into the binary. See
+[DolBundler/README.md](../DolBundler/README.md#on-an-iphone). From a shell:
+
+```sh
+~/Applications/DolBundler.app/Contents/Resources/recompios send
+```
+
+The rest of this section is the same thing by hand, which is what you want when
+you are changing the recompiler, tuning a target, or building with PGO. A
+module built that way is brought into DolBundler's store with
+
+```sh
+recompios adopt --disc-id GEXE52 --generated /tmp/gexe52-llvm-ios/generated
+```
+
+so the next `send` links it in and leaves it alone; without that step the next
+send would produce an app missing that game.
+
+Build the host recompiler with the pinned LLVM 20 wrapper, emit iPhoneOS objects
+on the Mac, and embed them before Xcode signs the app:
 
 ```sh
 ./ios/build-dolrecomp-llvm20.sh
@@ -42,8 +67,8 @@ export DOLRECOMP_LLVM_TARGET=arm64-apple-ios17.0
 export DOLRECOMP_LLVM_CPU=apple-a16
 export DOLRECOMP_LLVM_CACHE=/tmp/dolbundler-gexe52-llvm-cache
 
-build-dolrecomp-llvm20/dolrecomp \
-  --gamecube --backend llvm --game-id GEXE52 \
+build-dolrecomp-llvm20/dolrecomp -j"$(sysctl -n hw.ncpu)" \
+  --gamecube --backend llvm \
   /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios
 cp /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios/generated/main.dol
 
@@ -53,14 +78,14 @@ export DOLBUNDLER_TEAM=<your Apple Developer team ID>
 ./ios/build.sh --install
 ```
 
-Several AOT titles can coexist in one signed app. Give each generated module a
+Several titles can coexist in one signed app. Give each generated module a
 unique C-identifier prefix while recompiling, then pass all `GAME_ID=directory`
 pairs to the iOS build:
 
 ```sh
 export DOLRECOMP_LLVM_SYMBOL_PREFIX=gG4QE01_
-build-dolrecomp-llvm20/dolrecomp \
-  --gamecube --backend llvm --game-id G4QE01 \
+build-dolrecomp-llvm20/dolrecomp -j"$(sysctl -n hw.ncpu)" \
+  --gamecube --backend llvm \
   /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios
 cp /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios/generated/main.dol
 
@@ -73,6 +98,10 @@ entry. The older `DOLBUNDLER_NATIVE_GAME_ID` and
 `DOLBUNDLER_NATIVE_GENERATED_DIR` variables remain available for a one-title
 build.
 
+`-j` is worth passing every time. dolrecomp emits one object per guest-code
+chunk and a GameCube game has thousands of them, but the default is `-j1`, not
+a core count — the flag reads as being about the split C output and is not.
+
 The wrapper rejects an unversioned or non-20 LLVM and keeps the host tool out
 of `build-ios`. The module configure step validates its target, minimum OS,
 CPUState layout, and complete undefined-symbol inventory; the final app link
@@ -82,8 +111,13 @@ object is added or changed after signing.
 
 ## Getting a disc onto the device
 
-Either tap **+** in the app and pick an `.iso`, or drop one into the DolBundler
-folder in the Files app. `UIFileSharingEnabled` and
+The Mac app does this for you: a `send` copies each game's already-extracted
+disc into `Documents/games/<DISC_ID>` over `devicectl`, which skips the minutes
+the phone would otherwise spend extracting it. The phone builds its library by
+scanning that folder, so a game appears there the next time the app is opened.
+
+By hand, either tap **+** in the app and pick an `.iso`, or drop one into the
+DolBundler folder in the Files app. `UIFileSharingEnabled` and
 `LSSupportsOpeningDocumentsInPlace` are both set, so the app's Documents folder
 is reachable from Files, iCloud Drive, or a Mac over USB.
 
@@ -95,6 +129,42 @@ because they keep the disc header and FST intact.
 `.rvz` and Wii discs do not work: both need the `wit` bridge, which cannot run
 on iOS (see *No subprocesses* below).
 
+The disc is probed before it is extracted — a 0x440-byte read — so a file that
+is not a GameCube image is rejected in a moment rather than after a minute of
+pointless work, and the progress card can name the game rather than the file.
+Import runs beside the library instead of behind a modal: it takes minutes, and
+the one thing there is to do while waiting is look at what is already there.
+
+There is no percentage from the extractor, so the card polls the growing game
+root once a second and shows the bytes written, which is exact. The bar beside
+it is an estimate — a plain `.iso` is a byte-for-byte image so its own size is
+the denominator, a CISO is compressed and its size says nothing so a full
+GameCube disc is used as a ceiling instead — and it is clamped short of the end
+rather than allowed to sit at 100% while the extractor is still working.
+
+## In a game
+
+The corner button opens a panel that pauses the emulated machine rather than
+leaving it running behind a menu, using `Runtime::Pause()`. It carries an
+overlay-opacity slider, a haptics switch, the fps/speed readout's switch, and
+Quit. It exists because the alternative was a bare ✕ that quit without asking,
+on a screen whose entire surface is a controller — a mis-tap in the corner
+ended the session.
+
+The button and the readout sit at the top *centre*. The corners are where L and
+R are, and those belong under the index fingers and cannot move.
+
+Backgrounding the app pauses the game and returning resumes it, unless the
+panel is open — someone who opened it before switching away still has it open,
+and resuming underneath it is what the panel exists to prevent.
+
+There is no "Starting <game>…" placeholder. The one that used to be here was a
+label on an eighteen-second timer, sized for the twelve seconds the removed
+bytecode path spent verifying a module against the DOL. Native AOT boots
+straight into the game, and a fixed timer that outlives what it was measuring
+is worse than nothing: it covers the first frames of a game that has already
+started.
+
 ## Why this is allowed on the App Store
 
 Two separate rules matter, and the architecture answers both.
@@ -104,9 +174,11 @@ game console emulators, including ones that run user-provided games, since
 April 2024.
 
 **Nothing here generates executable code.** Guideline 2.5.2 forbids an app from
-generating or running code. DolBundler never does: `dolrecomp` lowers the
-disc's PowerPC to *bytecode*, and `dolvm_interp.c` reads that bytecode as data.
-There is no JIT and no executable memory. Verified against the built binary:
+generating or running code, or loading code it did not ship with. DolBundler
+does neither: every instruction the guest runs was compiled on a Mac and signed
+as part of the binary, and the only thing the phone produces is the extracted
+disc's *data*. There is no JIT, no `dlopen`, and no executable memory allocated
+at runtime. Verified against the built binary:
 
 ```sh
 APP=build-ios/Release-iphoneos/DolBundler.app/DolBundler
@@ -139,13 +211,13 @@ The macOS pipeline is four binaries wired together by a shell script
 bash script that `exec`s `moderngekko-run`. None of that survives on iOS.
 
 **No subprocesses.** iOS marks `system()` unavailable at compile time and has no
-`fork`/`exec` at all. Both halves of the pipeline are linked into the app and
-called in-process instead:
+`fork`/`exec` at all. What remains of the pipeline on the phone is linked into
+the app and called in-process instead:
 
 | macOS | iOS |
 |---|---|
 | `ModernGekko --extract` | `disc_extract_gamecube()` |
-| `moderngekko-port` → `popen(dolrecomp)` | `emit_dol_split(..., BACKEND_VM, ...)` |
+| `moderngekko-port` → `popen(dolrecomp)` | done on the Mac, linked in before signing |
 | launcher script → `exec moderngekko-run` | `Runtime::Create()` / `Run()` |
 
 `ios/bridge/dolbundler_core.h` is the import half, `dolbundler_run.h` the play
@@ -165,7 +237,35 @@ thread.
 SDL3 builds for iOS and handles MFi and Bluetooth pads. The on-screen pad feeds
 `ciface::Touch`, the same input overrider the Android overlay uses, which
 carries no Android dependencies. The overlay hides itself whenever a real
-controller is connected.
+controller is connected, and drops whatever it was holding as it goes.
+
+Every control the hardware has is on screen: both analog sticks, the D-pad, A,
+B, X, Y, Z, L, R and Start. They are laid out and coloured the way a GameCube
+pad is, because the point of colouring them at all is that someone who has held
+one can find A without reading the letter.
+
+Three things about it are less obvious than they look:
+
+- **The main stick floats.** A touch anywhere in the lower left that misses
+  every button picks the stick up and re-centres it under the thumb. Finding an
+  exact circle without looking is the thing people get wrong, and a stick that
+  has to be found is a stick that is not being used. The C stick does not float
+  — the right side is crowded with buttons and a floating stick there would fire
+  on stray taps — so it stays put with a generous hit radius instead.
+- **The triggers report twice.** Pressing L sets both `GCPAD_L_ANALOG` and
+  `GCPAD_L_DIGITAL`. A game may read either the analog depth or the click at
+  the bottom of the throw, and which one it uses is not knowable from here.
+- **The outlines are light, not dark.** A dark outline disappears into the dark
+  scenes games spend most of their time in, and a translucent fill is too faint
+  to carry a control on its own there. Against a bright scene the fill is what
+  separates the shape, so the pale line can afford to lose that fight.
+
+Nothing is drawn with `-drawRect:`. Each control owns a `CAShapeLayer`, so
+pressing a button repaints that button rather than rasterising the whole
+overlay — which sits on top of a Metal layer that is the thing being measured.
+Overlay opacity is applied per layer for the same reason: a translucent *view*
+with this many sublayers forces Core Animation into an offscreen group-opacity
+pass every frame.
 
 **Dolphin's `Sys` folder rides inside the app.** The desktop build copies
 `Data/Sys` next to `moderngekko-run`; `ios/CMakeLists.txt` copies the same tree
@@ -206,7 +306,7 @@ left ducked.
 
 | Dropped | Reason |
 |---|---|
-| All JIT backends | `ENABLE_GENERIC`; the whole point of DolVM |
+| All JIT backends | `ENABLE_GENERIC`; guest code is AOT-compiled and signed, so nothing needs to be generated |
 | cubeb (audio) | The vendored copy declares macOS-only CoreAudio globals at file scope with no iOS guard -- 164 compile errors spread through the file, which is a fork of a third-party library rather than a patch. Replaced by `IOSSoundStream`, a RemoteIO audio unit. |
 | libusb, hidapi | Both need IOKit. The devices they drive can't attach to an iPhone anyway |
 | Quartz input | Carbon key codes and CoreGraphics mouse events |
@@ -254,53 +354,43 @@ DEVICECTL_CHILD_DOLBUNDLER_AUTOPLAY=GLME01 xcrun devicectl device process launch
 Crash reports land in `~/Library/Logs/DiagnosticReports/DolBundler-*.ips`.
 
 One more loop worth knowing: a macOS build with `ENABLE_GENERIC=ON` runs the
-same JIT-less StaticRecomp/DolVM path against the same `.dvm`, in seconds, with
-a debugger. It will not reproduce anything iOS-specific, but it tells you
-straight away whether the interpreter or the module is at fault.
+same JIT-less StaticRecomp path against a module recompiled for the Mac, with a
+debugger. It will not reproduce anything iOS-specific, but it tells you straight
+away whether the chassis or the generated code is at fault.
 
 ## Known limitations
 
-**Speed is the real constraint, not the port.** Measured on an M4 Pro (cpu
-time over each title's first six billion guest cycles), DolVM runs Mario Party
-4 at 3.80× realtime, the SpongeBob movie game at 12.36×, Disney's Extreme Skate
-Adventure at 1.43× and Melee at 1.41×. An A17 Pro core has roughly three
-quarters of that single-thread throughput and throttles under sustained load.
+**Only games built into this app can be played.** A module is generated on a
+Mac and linked in before signing, so an imported disc the build does not cover
+shows in the library as "not in this build" and refuses to boot. That is not a
+policy choice: iOS will not map a page executable unless a valid code signature
+backs it, which needs the `dynamic-codesigning` entitlement (WebKit's), and a
+dylib produced on the phone could not be signed by anything on it -- so `dlopen`
+refuses it too. "Just AOT-compile any ISO on the phone" cannot be made to work.
 
-Those are boot windows, and how much of a boot is spent waiting on hardware
-varies enormously by title -- which is also where most of the 2026-08-22 gain
-came from. Over a fixed *gameplay* window Disney skate went from 1.055× to
-2.92×, because the game's idle thread polls the command processor's status
-register for 45% of every frame and the interpreter now recognises that as a
-wait. `ModernGekko/vendor/dolphin/DolRecomp/src/vm/README.md` says how, where
-the rest of the time goes, and what each change bought.
-
-[`PERFORMANCE.md`](PERFORMANCE.md) is the device-side companion to that: how to
+**Speed.** [`PERFORMANCE.md`](PERFORMANCE.md) is the device-side record: how to
 measure emulation speed on a phone without a console attached, and what a
 week's worth of measuring found -- including which plausible-sounding fixes
-(dual core, the DSP, graphics settings) are already done or worth nothing.
+(dual core, the DSP, graphics settings) are already done or worth nothing. Dual
+core in particular is worth **-15% on the phone** and +19% on a desktop, so the
+desktop does not predict the phone here.
 
-Three things in the build matter for it and are easy to lose: the interpreter
-is compiled with one indirect branch per handler (`-mllvm -tail-dup-*-size`),
-with LTO over the cpu helpers (and the same `-mllvm` flags handed to the
-linker, or LTO undoes the first), and with `-mcpu=apple-a16` rather than
-`native`, which on a cross build would name whatever Mac did the compiling.
-All three live in `ModernGekko/CMakeLists.txt` under `moderngekko_dolvm`.
+Two things in the build matter and are easy to lose: GXRuntime's guest CPU
+helpers are compiled with `-ffp-contract=off -fno-fast-math` so a lane computed
+in a helper matches one the generated code inlined, and with `-mcpu=apple-a16`
+rather than `native`, which on a cross build would name whatever Mac did the
+compiling. Both live in `ModernGekko/CMakeLists.txt` under `moderngekko_gxcpu`,
+and module-template applies the same two flags to the generated objects.
 
-**A module from an older build is rebuilt, not refused.** The bytecode ABI
-changes as the interpreter does, and the library checks each `.dvm`'s header
-on load. A stale one shows as "needs a quick update" and is recompiled from
-the extracted disc the next time it is played -- seconds, since nothing is
-extracted again.
-
-**Memory during import.** Peak RSS scales at roughly 1.5 KB per guest
+**Memory during recompilation.** Peak RSS scales at roughly 1.5 KB per guest
 instruction: 423 MB for Mario Party 4, 796 MB for Luigi's Mansion, 1.44 GB for
-Melee. An 8 GB device handles all three; smaller devices will be tight on the
-largest games, because the whole DolIR is held in memory at once.
+Melee, because the whole DolIR is held in memory at once. This is now the Mac's
+problem rather than the phone's.
 
 **Storage.** A disc costs its ISO plus roughly the same again extracted —
 about 2.7 GB for Melee. The importer refuses to start with under 3 GB free.
-Deleting the `.iso` after import is safe; the game root and `.dvm` are what
-the app plays from.
+Deleting the `.iso` after import is safe; the extracted game root is what the
+app plays from.
 
 **GameCube only.** Wii discs need the `wit` bridge to extract, which cannot run
 here.

@@ -8,18 +8,11 @@
 typedef enum {
     DOLRECOMP_BACKEND_C,
     DOLRECOMP_BACKEND_LLVM,
-    // Lowers to DolVM bytecode instead of machine code, for hosts that may not
-    // create executable pages at runtime.
-    DOLRECOMP_BACKEND_VM,
 } DolRecompBackend;
 
 typedef struct {
     const char* input_path;
     const char* title_id_arg;
-    // Six-character disc ID stamped into a --backend vm module, so a chassis
-    // can refuse one built for a different game. GameCube DOLs carry no ID of
-    // their own, so it has to come from the caller.
-    const char* game_id;
     const char* output_arg;
     const char* map_path;
     DolRecompCPU cpu;
