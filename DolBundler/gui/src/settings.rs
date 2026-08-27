@@ -148,6 +148,21 @@ impl Overrides {
     }
 }
 
+/// Which iPhone games are sent to, and which Apple Developer team signs the
+/// app that carries them. Not a per-game setting: one app holds every game, so
+/// there is one phone and one team to choose.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Iphone {
+    /// A devicectl identifier. Empty means "the only one paired", which is
+    /// what all but one setup has.
+    #[serde(default)]
+    pub device: String,
+    /// An Apple Developer team ID. Empty means "whichever recompios ranks
+    /// first", which is the one whose profile already covers the phone.
+    #[serde(default)]
+    pub team: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     #[serde(default)]
@@ -161,6 +176,8 @@ pub struct Store {
     /// Keyed by disc ID. Games with nothing overridden are dropped on save.
     #[serde(default)]
     pub games: BTreeMap<String, Overrides>,
+    #[serde(default)]
+    pub iphone: Iphone,
 }
 
 impl Default for Store {
@@ -169,6 +186,7 @@ impl Default for Store {
             defaults: Defaults::default(),
             backend: default_backend(),
             games: BTreeMap::new(),
+            iphone: Iphone::default(),
         }
     }
 }

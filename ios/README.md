@@ -36,6 +36,27 @@ tested against an iPhone 15 Pro Max.
 
 ### Building a game into the app
 
+**The short way is the Mac app.** DolBundler's **iPhone** button does every
+step below — recompile, link, sign, install — and copies the extracted disc
+onto the phone afterwards, so the game is in the phone's library rather than
+merely linked into the binary. See
+[DolBundler/README.md](../DolBundler/README.md#on-an-iphone). From a shell:
+
+```sh
+~/Applications/DolBundler.app/Contents/Resources/recompios send
+```
+
+The rest of this section is the same thing by hand, which is what you want when
+you are changing the recompiler, tuning a target, or building with PGO. A
+module built that way is brought into DolBundler's store with
+
+```sh
+recompios adopt --disc-id GEXE52 --generated /tmp/gexe52-llvm-ios/generated
+```
+
+so the next `send` links it in and leaves it alone; without that step the next
+send would produce an app missing that game.
+
 Build the host recompiler with the pinned LLVM 20 wrapper, emit iPhoneOS objects
 on the Mac, and embed them before Xcode signs the app:
 
@@ -46,7 +67,7 @@ export DOLRECOMP_LLVM_TARGET=arm64-apple-ios17.0
 export DOLRECOMP_LLVM_CPU=apple-a16
 export DOLRECOMP_LLVM_CACHE=/tmp/dolbundler-gexe52-llvm-cache
 
-build-dolrecomp-llvm20/dolrecomp \
+build-dolrecomp-llvm20/dolrecomp -j"$(sysctl -n hw.ncpu)" \
   --gamecube --backend llvm \
   /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios
 cp /path/to/GEXE52/sys/main.dol /tmp/gexe52-llvm-ios/generated/main.dol
@@ -63,7 +84,7 @@ pairs to the iOS build:
 
 ```sh
 export DOLRECOMP_LLVM_SYMBOL_PREFIX=gG4QE01_
-build-dolrecomp-llvm20/dolrecomp \
+build-dolrecomp-llvm20/dolrecomp -j"$(sysctl -n hw.ncpu)" \
   --gamecube --backend llvm \
   /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios
 cp /path/to/G4QE01/sys/main.dol /tmp/g4qe01-llvm-ios/generated/main.dol
@@ -77,6 +98,10 @@ entry. The older `DOLBUNDLER_NATIVE_GAME_ID` and
 `DOLBUNDLER_NATIVE_GENERATED_DIR` variables remain available for a one-title
 build.
 
+`-j` is worth passing every time. dolrecomp emits one object per guest-code
+chunk and a GameCube game has thousands of them, but the default is `-j1`, not
+a core count — the flag reads as being about the split C output and is not.
+
 The wrapper rejects an unversioned or non-20 LLVM and keeps the host tool out
 of `build-ios`. The module configure step validates its target, minimum OS,
 CPUState layout, and complete undefined-symbol inventory; the final app link
@@ -86,8 +111,13 @@ object is added or changed after signing.
 
 ## Getting a disc onto the device
 
-Either tap **+** in the app and pick an `.iso`, or drop one into the DolBundler
-folder in the Files app. `UIFileSharingEnabled` and
+The Mac app does this for you: a `send` copies each game's already-extracted
+disc into `Documents/games/<DISC_ID>` over `devicectl`, which skips the minutes
+the phone would otherwise spend extracting it. The phone builds its library by
+scanning that folder, so a game appears there the next time the app is opened.
+
+By hand, either tap **+** in the app and pick an `.iso`, or drop one into the
+DolBundler folder in the Files app. `UIFileSharingEnabled` and
 `LSSupportsOpeningDocumentsInPlace` are both set, so the app's Documents folder
 is reachable from Files, iCloud Drive, or a Mac over USB.
 

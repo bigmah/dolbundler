@@ -24,3 +24,7 @@ build/
 # ios/build.sh and the simulator recipe in ios/README.md
 build-ios/
 build-sim/
+# ios/build-dolrecomp-llvm20.sh, which recompios runs on the first send
+build-dolrecomp-llvm20/
+# Anything else built out of tree by hand: fixtures, simulator variants.
+build-*/

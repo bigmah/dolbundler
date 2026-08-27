@@ -6,7 +6,9 @@ code — the game runs as compiled code, not as interpreted instructions.
 
 ```
 mario_party_4.iso  ──▶  DolBundler  ──▶  ▶ Mario Party 4   in the library
-                                    └──▶  ~/Applications/Mario Party 4.app
+                                    ├──▶  ~/Applications/Mario Party 4.app
+                                    │     (opt in, per game)
+                                    └──▶  📱 an iPhone
                                           (opt in, per game)
 ```
 
@@ -14,12 +16,18 @@ Recompiling adds the game to DolBundler's library, and that is enough to play
 it. Turning one into a standalone `.app` in `~/Applications` is a separate,
 per-game step — press **Create App**, or pass `--app` on the command line.
 
-A disc is recompiled to **bytecode** by default: that path takes seconds rather
-than minutes because nothing is compiled — the runtime interprets the result —
-and it is the one an iOS build has to use, since an App Store binary may not
-generate or load executable code. It costs some speed; how much depends on the
-game. **Settings → Recompile discs to**, or `--backend c`, opts into native code
-instead. See [`DolBundler/README.md`](DolBundler/README.md#recompiler).
+Two recompiler backends produce the native code: `c` goes PowerPC → C → arm64
+through the host compiler and is the default and the reference, and `llvm` goes
+straight from DolIR to objects in process. **Settings → Recompile discs to**
+picks between them. See [`DolBundler/README.md`](DolBundler/README.md#recompiler).
+
+**iPhone** in the top right recompiles the library a second time — for
+`arm64-apple-ios17.0` — links every game into the phone app, signs it, installs
+it, and copies the discs over. Nothing is compiled on the phone: iOS will not
+map a page executable without a valid code signature behind it, so guest code
+has to be inside the signature before the app is installed. See
+[On an iPhone](DolBundler/README.md#on-an-iphone), and
+[`ios/README.md`](ios/README.md) for what the phone app is.
 
 DolBundler is the glue layer. The heavy lifting is done by two projects it
 drives, both vendored directly into this repo:

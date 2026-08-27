@@ -3,11 +3,16 @@
 //!
 //! Pick or drop a GameCube or Wii disc image; the app extracts it, statically
 //! recompiles its PowerPC code to native machine code, and adds it to the
-//! library. Building a per-game .app is opt-in, per game. All of the actual work
-//! happens in `recompgc`, which lives beside this binary in Contents/Resources.
+//! library. Building a per-game .app is opt-in, per game. So is sending a game
+//! to an iPhone, which recompiles it a second time — for arm64 iOS — and
+//! rebuilds, signs and installs the phone app around it.
+//!
+//! All of the actual work happens in `recompgc` and `recompios`, which live
+//! beside this binary in Contents/Resources.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod iphone;
 mod library;
 mod pipeline;
 mod settings;
@@ -107,11 +112,13 @@ struct Job {
     error: Option<String>,
 }
 
-/// What the settings panel is open on. The panel is modal, so at most one.
+/// What the modal over the window is open on. There is at most one.
 #[derive(Clone, PartialEq)]
 enum Editing {
     Global,
     Game(Game),
+    /// The iPhone panel: which phone, which signing team, and what is on it.
+    Iphone,
 }
 
 /// The settings form. Every field is a string so one panel can serve both the
@@ -196,6 +203,17 @@ impl Line {
     }
 }
 
+/// Appends a line of tool output, dropping the oldest once the console is
+/// full. Every long-running tool's output arrives this way.
+fn push_output(log: &mut Signal<Vec<Line>>, text: String) {
+    let mut lines = log.write();
+    lines.push(Line::from_output(text));
+    let overflow = lines.len().saturating_sub(MAX_LOG_LINES);
+    if overflow > 0 {
+        lines.drain(..overflow);
+    }
+}
+
 fn app() -> Element {
     let resources = use_hook(resources_dir);
     // Held in a signal so the closures below stay Copy and can be shared
@@ -204,6 +222,15 @@ fn app() -> Element {
         resources
             .clone()
             .map(|dir| dir.join("recompgc"))
+            .unwrap_or_default()
+    });
+    // Not part of resources_dir()'s existence check: a bundle built before the
+    // iPhone pipeline existed is a working macOS install, and should say so
+    // when the iPhone button is pressed rather than claim nothing is set up.
+    let recompios = use_signal(|| {
+        resources
+            .clone()
+            .map(|dir| dir.join("recompios"))
             .unwrap_or_default()
     });
     let mut games = use_signal(library::load);
@@ -221,6 +248,14 @@ fn app() -> Element {
     // Disc ID of a game waiting on its controller driver, so Play cannot be
     // pressed twice into two driver starts.
     let mut launching = use_signal(|| None::<String>);
+    // The paired iPhones and the teams that could sign for them, refreshed
+    // whenever the panel opens: a phone plugged in while the window was up has
+    // to show up in the picker.
+    let mut phones = use_signal(Vec::<iphone::Device>::new);
+    let mut teams = use_signal(Vec::<iphone::Team>::new);
+    // A game's iPhone state is read off the filesystem, so nothing tells the
+    // cards it changed. Bumping this after a send does.
+    let mut phone_epoch = use_signal(|| 0u32);
 
     // Keep the console pinned to the newest line.
     use_effect(move || {
@@ -305,6 +340,162 @@ fn app() -> Element {
         });
     };
 
+    // Listing paired phones goes through devicectl, which takes a moment when
+    // a phone is reachable over Wi-Fi rather than the cable, so it happens off
+    // the UI thread the same way the gamepad scan does.
+    let refresh_phone = move || {
+        let tool = recompios.peek().clone();
+        if !tool.is_file() {
+            return;
+        }
+        let saved = store.peek().iphone.device.clone();
+        let (tx, mut rx) =
+            futures_channel::mpsc::unbounded::<(Vec<iphone::Device>, Vec<iphone::Team>)>();
+        std::thread::spawn(move || {
+            let devices = iphone::list_devices(&tool);
+            // Whether a team is ready is a fact about a particular phone, so
+            // the phone is settled before the teams are asked for.
+            let device = if devices.iter().any(|device| device.id == saved) {
+                saved
+            } else if devices.len() == 1 {
+                devices[0].id.clone()
+            } else {
+                String::new()
+            };
+            let teams = iphone::list_teams(&tool, &device);
+            let _ = tx.unbounded_send((devices, teams));
+        });
+        spawn(async move {
+            let Some((found, signing)) = rx.next().await else {
+                return;
+            };
+            {
+                // One phone and one usable team is every setup but a rare one,
+                // and a picker with one entry in it teaches nobody anything. A
+                // saved phone that is merely unplugged is kept: swapping it for
+                // whatever else is paired would send a game to the wrong one.
+                let mut current = store.write();
+                if current.iphone.device.is_empty() && found.len() == 1 {
+                    current.iphone.device = found[0].id.clone();
+                }
+                if current.iphone.team.is_empty() {
+                    if let Some(first) = signing.first() {
+                        current.iphone.team = first.id.clone();
+                    }
+                }
+            }
+            phones.set(found);
+            teams.set(signing);
+        });
+    };
+
+    // The whole iPhone pipeline, in one child process: recompile each game's
+    // DOL to arm64 iPhone objects, relink and sign the phone app around every
+    // game that has a module, install it, and copy the extracted discs over.
+    // An empty `targets` means the whole library.
+    let mut send_to_phone = move |targets: Vec<String>, subject: String| {
+        if job.read().as_ref().is_some_and(|current| current.running) {
+            return;
+        }
+        let tool = recompios.peek().clone();
+        if !tool.is_file() {
+            log.write().push(Line {
+                text: "This DolBundler.app was built before the iPhone pipeline existed. \
+                       Re-run DolBundler/build.sh to add it."
+                    .into(),
+                kind: "bad",
+            });
+            return;
+        }
+
+        let mut args = vec!["send".to_string()];
+        let phone = store.peek().iphone.clone();
+        if !phone.device.is_empty() {
+            args.push("--device".into());
+            args.push(phone.device);
+        }
+        if !phone.team.is_empty() {
+            args.push("--team".into());
+            args.push(phone.team);
+        }
+        for disc_id in &targets {
+            args.push("--disc-id".into());
+            args.push(disc_id.clone());
+        }
+        log.write().push(Line {
+            text: format!("$ recompios {}", args.join(" ")),
+            kind: "dim",
+        });
+        args.insert(1, "--porcelain".into());
+
+        job.set(Some(Job {
+            image: subject,
+            step: 0,
+            total: 0,
+            title: "Starting".into(),
+            running: true,
+            error: None,
+        }));
+
+        let (tx, mut rx) = futures_channel::mpsc::unbounded::<Msg>();
+        pipeline::run_args(tool, args, tx);
+
+        spawn(async move {
+            while let Some(message) = rx.next().await {
+                match message {
+                    Msg::Line(text) => {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        push_output(&mut log, text);
+                    }
+                    Msg::Step { index, total, title } => {
+                        log.write().push(Line {
+                            text: format!("==> {index}/{total}  {title}"),
+                            kind: "head",
+                        });
+                        if let Some(current) = job.write().as_mut() {
+                            current.step = index;
+                            current.total = total;
+                            current.title = title;
+                        }
+                    }
+                    Msg::Info { key, value } => {
+                        // The phone names itself once it has been found, which
+                        // beats a label guessed before anything was plugged in.
+                        if key == "device_name" {
+                            if let Some(current) = job.write().as_mut() {
+                                current.image = value;
+                            }
+                        }
+                    }
+                    Msg::Failed(reason) => {
+                        if let Some(current) = job.write().as_mut() {
+                            current.error = Some(reason);
+                        }
+                    }
+                    Msg::Finished(success) => {
+                        if let Some(current) = job.write().as_mut() {
+                            current.running = false;
+                            if !success && current.error.is_none() {
+                                current.error = Some("the iPhone pipeline exited early".into());
+                            }
+                            if success {
+                                current.step = current.total;
+                                current.title = "Done".into();
+                            }
+                        }
+                        // Every card reads its iPhone state off the filesystem,
+                        // and a finished send is the one moment that changes.
+                        let next = *phone_epoch.peek() + 1;
+                        phone_epoch.set(next);
+                        break;
+                    }
+                }
+            }
+        });
+    };
+
     let mut start = move |image: PathBuf| {
         if job.read().as_ref().is_some_and(|current| current.running) {
             return;
@@ -338,12 +529,7 @@ fn app() -> Element {
                         if text.trim().is_empty() {
                             continue;
                         }
-                        let mut lines = log.write();
-                        lines.push(Line::from_output(text));
-                        let overflow = lines.len().saturating_sub(MAX_LOG_LINES);
-                        if overflow > 0 {
-                            lines.drain(..overflow);
-                        }
+                        push_output(&mut log, text);
                     }
                     Msg::Step { index, total, title } => {
                         log.write().push(Line {
@@ -406,6 +592,10 @@ fn app() -> Element {
     });
 
     let busy = job.read().as_ref().is_some_and(|current| current.running);
+    // Read so a finished send re-renders the cards: a game's iPhone state is
+    // read off the filesystem, which nothing else would notice changing.
+    let _ = phone_epoch();
+    let phone_device = store.read().iphone.device.clone();
 
     let pick = move || {
         spawn(async move {
@@ -454,6 +644,14 @@ fn app() -> Element {
                 }
                 div { class: "spacer" }
                 button {
+                    title: "Recompile the library for an iPhone and install it",
+                    onclick: move |_| {
+                        refresh_phone();
+                        editing.set(Some(Editing::Iphone));
+                    },
+                    "iPhone"
+                }
+                button {
                     title: "Defaults every game starts from",
                     onclick: move |_| {
                         rescan();
@@ -492,6 +690,7 @@ fn app() -> Element {
                             making_app: making_app.read().as_deref() == Some(game.disc_id.as_str()),
                             launching: launching.read().as_deref() == Some(game.disc_id.as_str()),
                             customised: !store.read().overrides(&game.disc_id).is_empty(),
+                            phone: iphone::state(&game.disc_id, &phone_device),
                             on_settings: move |target: Game| {
                                 rescan();
                                 editing.set(Some(Editing::Game(target)));
@@ -623,6 +822,12 @@ fn app() -> Element {
                                     }
                                 });
                             },
+                            on_send_phone: move |target: Game| {
+                                send_to_phone(
+                                    vec![target.disc_id.clone()],
+                                    target.name.clone(),
+                                );
+                            },
                             on_log: move |target: Game| {
                                 let mut lines = log.write();
                                 lines.push(Line {
@@ -700,19 +905,109 @@ fn app() -> Element {
                 }
             }
 
-            if let Some(target) = editing.read().clone() {
+            if editing.read().as_ref().is_some_and(|open| matches!(open, Editing::Iphone)) {
+                IPhonePanel {
+                    devices: phones.read().clone(),
+                    teams: teams.read().clone(),
+                    device: phone_device.clone(),
+                    team: store.read().iphone.team.clone(),
+                    games: games
+                        .read()
+                        .iter()
+                        .map(|game| {
+                            (game.clone(), iphone::state(&game.disc_id, &phone_device))
+                        })
+                        .collect::<Vec<(Game, iphone::State)>>(),
+                    installed: iphone::last_install(&phone_device),
+                    busy,
+                    on_rescan: move |_| refresh_phone(),
+                    on_device: move |value: String| {
+                        store.write().iphone.device = value;
+                        if let Err(err) = settings::save(&store.read()) {
+                            log.write().push(Line {
+                                text: format!("Could not save settings: {err}"),
+                                kind: "bad",
+                            });
+                        }
+                        // Which teams are ready is a fact about the phone that
+                        // was just chosen, so the labels are asked for again.
+                        refresh_phone();
+                    },
+                    on_team: move |value: String| {
+                        store.write().iphone.team = value;
+                        if let Err(err) = settings::save(&store.read()) {
+                            log.write().push(Line {
+                                text: format!("Could not save settings: {err}"),
+                                kind: "bad",
+                            });
+                        }
+                    },
+                    on_send: move |_| {
+                        editing.set(None);
+                        let phone = phones
+                            .read()
+                            .iter()
+                            .find(|device| device.id == *store.peek().iphone.device)
+                            .map(|device| device.name.clone())
+                            .unwrap_or_else(|| "iPhone".to_string());
+                        send_to_phone(Vec::new(), phone);
+                    },
+                    on_drop: move |target: Game| {
+                        let tool = recompios.peek().clone();
+                        let mut args = vec![
+                            "drop".to_string(),
+                            "--porcelain".into(),
+                            "--disc-id".into(),
+                            target.disc_id.clone(),
+                        ];
+                        let chosen = store.peek().iphone.device.clone();
+                        if !chosen.is_empty() {
+                            args.push("--device".into());
+                            args.push(chosen);
+                        }
+                        let (tx, mut rx) = futures_channel::mpsc::unbounded::<Msg>();
+                        pipeline::run_args(tool, args, tx);
+                        let name = target.name.clone();
+                        spawn(async move {
+                            while let Some(message) = rx.next().await {
+                                match message {
+                                    Msg::Line(text) if !text.trim().is_empty() => {
+                                        push_output(&mut log, text);
+                                    }
+                                    Msg::Failed(reason) => log.write().push(Line {
+                                        text: format!("Could not take {name} off the iPhone: {reason}"),
+                                        kind: "bad",
+                                    }),
+                                    Msg::Finished(_) => {
+                                        let next = *phone_epoch.peek() + 1;
+                                        phone_epoch.set(next);
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        });
+                    },
+                    on_close: move |_| editing.set(None),
+                }
+            }
+
+            if let Some(target) = editing
+                .read()
+                .clone()
+                .filter(|open| !matches!(open, Editing::Iphone))
+            {
                 SettingsPanel {
                     title: match &target {
-                        Editing::Global => "Default settings".to_string(),
                         Editing::Game(game) => game.name.clone(),
+                        _ => "Default settings".to_string(),
                     },
                     subtitle: match &target {
-                        Editing::Global =>
-                            "What every game starts from. A game can override any of it."
-                                .to_string(),
                         Editing::Game(game) => format!(
                             "{} · {} — only this game", game.disc_id, game.platform,
                         ),
+                        _ => "What every game starts from. A game can override any of it."
+                            .to_string(),
                     },
                     per_game: matches!(target, Editing::Game(_)),
                     defaults: store.read().defaults.clone(),
@@ -727,19 +1022,15 @@ fn app() -> Element {
                         }
                     },
                     initial: match &target {
-                        Editing::Global => Draft::from_defaults(&store.read().defaults),
                         Editing::Game(game) =>
                             Draft::from_overrides(&store.read().overrides(&game.disc_id)),
+                        _ => Draft::from_defaults(&store.read().defaults),
                     },
                     pads: pads.read().clone(),
                     on_rescan: move |_| rescan(),
                     on_close: move |_| editing.set(None),
                     on_save: move |draft: Draft| {
                         let saved = match &target {
-                            Editing::Global => {
-                                store.write().defaults = draft.into_defaults();
-                                "Default settings saved.".to_string()
-                            }
                             Editing::Game(game) => {
                                 let overrides = draft.into_overrides();
                                 let count = overrides.count();
@@ -762,6 +1053,10 @@ fn app() -> Element {
                                     1 => format!("{}: 1 setting overridden.", game.name),
                                     n => format!("{}: {n} settings overridden.", game.name),
                                 }
+                            }
+                            _ => {
+                                store.write().defaults = draft.into_defaults();
+                                "Default settings saved.".to_string()
                             }
                         };
                         match settings::save(&store.read()) {
@@ -834,9 +1129,11 @@ fn GameCard(
     making_app: bool,
     launching: bool,
     customised: bool,
+    phone: iphone::State,
     on_play: EventHandler<Game>,
     on_settings: EventHandler<Game>,
     on_make_app: EventHandler<Game>,
+    on_send_phone: EventHandler<Game>,
     on_log: EventHandler<Game>,
     on_reveal: EventHandler<Game>,
     on_forget: EventHandler<Game>,
@@ -854,6 +1151,9 @@ fn GameCard(
                     "{game.disc_id} · {game.platform}"
                     if customised {
                         span { class: "tag", "custom settings" }
+                    }
+                    if !phone.chip().is_empty() {
+                        span { class: "tag phone", "{phone.chip()}" }
                     }
                 }
                 if !game.ready {
@@ -888,6 +1188,18 @@ fn GameCard(
                         },
                         if making_app { "Building…" } else { "Create App" }
                     }
+                }
+                button {
+                    disabled: !game.ready || busy,
+                    // Deliberately the same button in all three states: sending
+                    // one game relinks and reinstalls the app around every game
+                    // that has a module, so there is nothing else it could do.
+                    title: "{phone.detail()} Sending recompiles it for arm64, rebuilds the phone app around it, and copies the disc over.",
+                    onclick: {
+                        let game = game.clone();
+                        move |_| on_send_phone.call(game.clone())
+                    },
+                    "iPhone"
                 }
                 button {
                     onclick: {
@@ -1169,6 +1481,168 @@ fn SettingsPanel(
                         class: "primary",
                         onclick: move |_| on_save.call(draft.read().clone()),
                         "Save"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The iPhone panel: which phone, which team signs for it, and what is on it.
+///
+/// One signed app carries every game, so there is one phone and one team here
+/// rather than a setting per game — and sending a single game still relinks and
+/// reinstalls that app with every other game in it. Guest code has to be inside
+/// the signature: iOS will not map a page executable without one, so nothing
+/// can be added to the app after it is installed.
+#[component]
+fn IPhonePanel(
+    devices: Vec<iphone::Device>,
+    teams: Vec<iphone::Team>,
+    device: String,
+    team: String,
+    games: Vec<(Game, iphone::State)>,
+    installed: Option<String>,
+    busy: bool,
+    on_device: EventHandler<String>,
+    on_team: EventHandler<String>,
+    on_rescan: EventHandler<()>,
+    on_send: EventHandler<()>,
+    on_drop: EventHandler<Game>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let sendable = games.iter().filter(|(game, _)| game.ready).count();
+
+    // A phone that is saved but not reachable right now is still offered, the
+    // same way an unplugged gamepad is: dropping it from the list would quietly
+    // send the next game to a different phone.
+    let mut device_options: Vec<(String, String)> = devices
+        .iter()
+        .map(|found| (found.id.clone(), found.label()))
+        .collect();
+    if !device.is_empty() && !devices.iter().any(|found| found.id == device) {
+        device_options.push((device.clone(), format!("{device} (not connected)")));
+    }
+    if device.is_empty() {
+        device_options.insert(0, (String::new(), "Choose an iPhone…".to_string()));
+    }
+
+    let mut team_options: Vec<(String, String)> = teams
+        .iter()
+        .map(|signing| (signing.id.clone(), format!("{} · {}", signing.label, signing.id)))
+        .collect();
+    if !team.is_empty() && !teams.iter().any(|signing| signing.id == team) {
+        team_options.push((
+            team.clone(),
+            format!("{team} · no signing certificate for it in this keychain"),
+        ));
+    }
+    if team.is_empty() {
+        team_options.insert(0, (String::new(), "Choose a team…".to_string()));
+    }
+
+    let installed_hint = match installed.as_deref() {
+        // The stamp is a full UTC timestamp; the day is the part that answers
+        // "is what is on the phone the build I am looking at".
+        Some(when) => format!(
+            "DolBundler was last installed on it on {}.",
+            when.split('T').next().unwrap_or(when)
+        ),
+        None => "DolBundler has not been installed on it yet.".to_string(),
+    };
+
+    rsx! {
+        div { class: "modal-veil", onclick: move |_| on_close.call(()),
+            div {
+                class: "modal",
+                onclick: move |event| event.stop_propagation(),
+
+                div { class: "modal-head",
+                    div { class: "modal-title", "DolBundler on iPhone" }
+                    div { class: "modal-sub",
+                        "Recompiled to arm64 here, linked into the phone app, signed, installed."
+                    }
+                }
+
+                div { class: "modal-body",
+                    if devices.is_empty() {
+                        div { class: "notice",
+                            "No iPhone is paired. Plug one in, unlock it, tap Trust, and turn
+                             Developer Mode on under Settings › Privacy & Security. Then press
+                             Rescan."
+                        }
+                    }
+
+                    div { class: "modal-section",
+                        span { class: "section-label", style: "margin: 0;", "Phone" }
+                        div { class: "spacer" }
+                        button { onclick: move |_| on_rescan.call(()), "Rescan" }
+                    }
+                    SettingRow {
+                        label: "iPhone",
+                        hint: installed_hint,
+                        Choice {
+                            value: device.clone(),
+                            options: device_options,
+                            on_pick: move |value| on_device.call(value),
+                        }
+                    }
+                    SettingRow {
+                        label: "Signing team",
+                        hint: "The app is signed before it is installed, so a team whose
+                               provisioning profile does not list this phone cannot reach it.
+                               The list is ordered so the one that can comes first.",
+                        Choice {
+                            value: team.clone(),
+                            options: team_options,
+                            on_pick: move |value| on_team.call(value),
+                        }
+                    }
+
+                    p { class: "section-label", "Games" }
+                    if games.is_empty() {
+                        div { class: "notice",
+                            "Add a disc image on this Mac first. The phone plays what was built
+                             into the app; it cannot recompile a disc itself."
+                        }
+                    }
+                    for (game, state) in games.iter().cloned() {
+                        div { key: "{game.disc_id}", class: "setting",
+                            div { class: "setting-label",
+                                div { "{game.name}" }
+                                div { class: "setting-hint", "{state.detail()}" }
+                            }
+                            div { class: "setting-control",
+                                if state != iphone::State::Absent {
+                                    button {
+                                        disabled: busy,
+                                        title: "Drop this game's module, so the next send builds an app without it",
+                                        onclick: {
+                                            let game = game.clone();
+                                            move |_| on_drop.call(game.clone())
+                                        },
+                                        "Remove"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "notice",
+                        "The first send builds the whole phone app and takes a while; later ones
+                         relink it. Recompiling a game and copying its disc are both skipped when
+                         neither has changed."
+                    }
+                }
+
+                div { class: "modal-foot",
+                    div { class: "spacer" }
+                    button { onclick: move |_| on_close.call(()), "Close" }
+                    button {
+                        class: "primary",
+                        disabled: busy || device.is_empty() || sendable == 0,
+                        onclick: move |_| on_send.call(()),
+                        if sendable == 1 { "Send 1 game to iPhone" } else { "Send {sendable} games to iPhone" }
                     }
                 }
             }

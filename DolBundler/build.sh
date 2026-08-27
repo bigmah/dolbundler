@@ -131,12 +131,16 @@ mkdir -p "$MACOS" "$RES"
 
 install -m 755 "$GUI_BIN" "$MACOS/DolBundler"
 install -m 755 "$HERE/src/recompgc" "$RES/recompgc"
+install -m 755 "$HERE/src/recompios" "$RES/recompios"
 install -m 644 "$HERE/src/make_game_app.py" "$RES/make_game_app.py"
 python3 "$HERE/src/make_app_icon.py" --out "$RES/icon.icns" >/dev/null
 
 cat > "$RES/toolchain.conf" <<CONF
 # Written by DolBundler/build.sh. Absolute paths to the ModernGekko build that
 # extracts, recompiles, and runs discs. Re-run build.sh if the checkout moves.
+# REPO_ROOT is the checkout itself: recompios builds the iPhone app out of it,
+# which needs ios/ and the sources beneath it, not only the built tools.
+REPO_ROOT=$(printf '%q' "$ROOT")
 MG_SRC=$(printf '%q' "$MG_SRC")
 MG_BUILD=$(printf '%q' "$MG_BUILD")
 APPS_DIR=$(printf '%q' "$INSTALL_DIR")
@@ -201,3 +205,4 @@ fi
 printf '\n%sDone.%s Open DolBundler and add a disc image, or from a shell:\n' "$bold" "$off"
 printf '  open -a DolBundler "<disc.iso>"      # window, live log, library\n'
 printf '  %s "<disc.iso>"   # same pipeline, no window\n' "$RES/recompgc"
+printf '  %s send                # every library game onto a connected iPhone\n' "$RES/recompios"
