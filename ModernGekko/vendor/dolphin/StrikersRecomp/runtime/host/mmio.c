@@ -83,7 +83,43 @@ static bool aram_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
     return true;
 }
 
-#ifdef STRIKERSRECOMP_AURORA
+#if defined(STRIKERSRECOMP_AURORA) || defined(STRIKERSRECOMP_WEB)
+// GXDrawDone() writes BP 0x45 (PE_DONE) with 0x02 and then sleeps the calling
+// thread on the GX finish queue, waiting for the PE FINISH interrupt. Nothing
+// else raises that interrupt here -- there is no real GP to finish -- so
+// without this the game's main thread sleeps at its first frame and never
+// runs again, leaving the OS idle loop as the only thing executing.
+//
+// The opcode/payload split mirrors the Aurora backend's own FIFO peek: GX
+// writes the 0x61 command as a byte store and the register word as a 32-bit
+// store into the same gather pipe.
+static u8 g_fifo_last_opcode;
+// Counters, not logging: a browser build has no stderr worth watching in a hot
+// loop, and "did the FIFO reach us at all" is the first question when a port
+// renders nothing.
+unsigned long long g_mmio_fifo_writes;
+unsigned long long g_mmio_bp_writes;
+unsigned long long g_mmio_pe_finishes;
+
+static void gx_fifo_peek(u8 size, u64 value) {
+    ++g_mmio_fifo_writes;
+    if (size == 1u) {
+        g_fifo_last_opcode = (u8)value;
+        return;
+    }
+    if (size == 4u && g_fifo_last_opcode == 0x61u) {
+        const u32 word = (u32)value;
+        const u8 reg = (u8)(word >> 24);
+        ++g_mmio_bp_writes;
+        // Dolphin BPMemory: BPMEM_SETDRAWDONE fires the interrupt only for 0x02;
+        // the SDK's other value is a plain sync with no interrupt.
+        if (reg == 0x45u && (word & 0xFFu) == 0x02u) {
+            ++g_mmio_pe_finishes;
+            interrupt_commit_pe_finish();
+        }
+    }
+}
+
 static bool gx_fifo_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
                              u64 value) {
     (void)user;
@@ -92,6 +128,7 @@ static bool gx_fifo_write_cb(void* user, CPUState* cpu, u32 ea, u8 size,
     // The write-gather pipe occupies one 32-byte cache line. Paired-single
     // stores write their second element at base+4, and every write in the line
     // is appended to the same FIFO stream.
+    gx_fifo_peek(size, value);
     dol_platform_gx_write(value, size);
     return true;
 }
@@ -280,7 +317,7 @@ bool mmio_install(CPUState* cpu) {
                    &g_guest_memory);
     ok = ok && dol_mmio_bus_register(&g_mmio_bus, ARAM_BASE, ARAM_SIZE,
                                      aram_read_cb, aram_write_cb, NULL);
-#ifdef STRIKERSRECOMP_AURORA
+#if defined(STRIKERSRECOMP_AURORA) || defined(STRIKERSRECOMP_WEB)
     ok = ok && dol_mmio_bus_register(&g_mmio_bus, WGPIPE_BASE, WGPIPE_SIZE,
                                      NULL, gx_fifo_write_cb, NULL);
 #endif
@@ -318,7 +355,7 @@ bool mmio_install(CPUState* cpu) {
     cpu->external_read32 = mmio_read32;
     cpu->external_write32 = mmio_write32;
     cpu->external_pointer = mmio_pointer;
-#ifdef STRIKERSRECOMP_AURORA
+#if defined(STRIKERSRECOMP_AURORA) || defined(STRIKERSRECOMP_WEB)
     dol_platform_set_guest_address_resolver(
         graphics_guest_address_resolver_cb, cpu);
 #endif
@@ -331,7 +368,7 @@ void mmio_set_disc_present(bool present) {
 }
 
 void mmio_shutdown(void) {
-#ifdef STRIKERSRECOMP_AURORA
+#if defined(STRIKERSRECOMP_AURORA) || defined(STRIKERSRECOMP_WEB)
     dol_platform_set_guest_address_resolver(NULL, NULL);
 #endif
     dol_guest_memory_shutdown(&g_guest_memory);

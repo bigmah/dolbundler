@@ -26,7 +26,7 @@ void notify_SorLcp(CPUState* cpu);
 void notify_SorLcpReturn(CPUState* cpu);
 void notify_dxStepBody(CPUState* cpu);
 
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
 void notify_DrawableBallRender(CPUState* cpu);
 #endif
 

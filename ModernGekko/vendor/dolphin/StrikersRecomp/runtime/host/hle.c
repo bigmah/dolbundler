@@ -49,7 +49,7 @@ static double g_movie_cadence_start_time;
 static s32 g_movie_cadence_last_texframe;
 static bool g_movie_cadence_started;
 
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
 static u32 g_gx_begin_count;
 #endif
 
@@ -313,7 +313,7 @@ static void notify_LCDisable(CPUState* cpu) {
 }
 
 static void notify_GXBegin(CPUState* cpu) {
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
     ++g_gx_begin_count;
     if (ball_state_log_enabled() && guest_backchain_contains(cpu, STRIKERS_BALL_DRAW_FUN_START, STRIKERS_BALL_DRAW_FUN_END)) {
         fprintf(stderr, "[ball-draw] guest-frame=%llu begin=%u prim=%u fmt=%u count=%u lr=0x%08X\n",
@@ -354,7 +354,7 @@ static void notify_GXLoadPosMtxImm(CPUState* cpu) {
                     "  % .7g % .7g % .7g % .7g\n",
                     ball_matrix_count,
                     (unsigned long long)(cpu->timebase / 675000ull),
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
                     g_gx_begin_count,
 #else
                     0u,
@@ -504,7 +504,7 @@ static const HleAddrEntry kAddrHandlers[] = {
     { 0x80254C54u, dol_hle_LCStoreBlocks,             "LCStoreBlocks" },
     { 0x80254C78u, dol_hle_LCStoreData,               "LCStoreData" },
     { 0x80254D24u, dol_hle_noop,                      "LCQueueWait" },
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
     { 0x80252680u, dol_hle_PSMTXConcat,                "PSMTXConcat" },
     { 0x8024D240u, dol_hle_GXSetArray,                "GXSetArray" },
     { 0x8024DD20u, strikers_hle_GXBegin,               "GXBegin" },
@@ -546,7 +546,7 @@ static const HleAddrEntry kNotify[] = {
     { 0x80254BF4u, notify_LCEnable,          "LCEnable" },
     { 0x80254C2Cu, notify_LCDisable,         "LCDisable" },
     { 0x80255360u, notify_OSLoadContext,     "OSLoadContext" },
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
     { 0x8024E974u, notify_GXCopyDisp,      "GXCopyDisp" },
     { 0x8024EADCu, notify_GXCopyTex,       "GXCopyTex" },
     { 0x8024F89Cu, notify_GXLoadTexObj,    "GXLoadTexObj" },
@@ -639,8 +639,16 @@ static bool hle_dispatch(CPUState* cpu, u32 address) {
             fprintf(stderr, "[hle] %-28s 0x%08X -> host\n",
                     name != NULL ? name : "(unnamed)", address);
         }
+        // Some intercepts tail-call into guest code instead of returning a
+        // value -- dol_hle_aramUploadData jumps to the caller's completion
+        // routine, which is what its "the host dispatch loop checks cpu->pc"
+        // comment means. Returning unconditionally would overwrite that jump
+        // with lr and the callback would silently never run, so only return
+        // when the intercept left the pc where it found it.
+        const u32 entry_pc = cpu->pc;
         entry->intercept(cpu);
-        hle_return(cpu);
+        if (cpu->pc == entry_pc)
+            hle_return(cpu);
         return true;
     }
 
@@ -772,7 +780,7 @@ void hle_install(CPUState* cpu) {
 
     parse_input_script(getenv("STRIKERS_INPUT_SCRIPT"));
 
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
     g_gx_begin_count = 0;
 #endif
 

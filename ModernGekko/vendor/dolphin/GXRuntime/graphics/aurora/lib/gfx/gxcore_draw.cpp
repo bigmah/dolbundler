@@ -546,9 +546,15 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     // Hash the actual source texels (+ TLUT for CI) so a content change under an
     // unchanged guest identity is a distinct cache entry — see TextureKey.
     uint64_t content_hash = XXH3_64bits(bytes, size);
-    if (gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr)
+    // Only the palette itself: tlut_available is whatever the resolver could
+    // still reach from the TLUT's address (the rest of MEM1 in practice), so
+    // hashing it costs megabytes per CI draw and makes an unrelated write
+    // nearby invalidate the entry.
+    if (gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr) {
+      const uint32_t tlut_bytes = std::min(tlut_entries * 2u, tlut_available);
       content_hash =
-          XXH3_64bits_withSeed(tlut_data, tlut_available, content_hash);
+          XXH3_64bits_withSeed(tlut_data, tlut_bytes, content_hash);
+    }
     const TextureKey key{address,     tsize,        format,      width,
                          height,      tlut_address, tlut_format, tlut_entries,
                          content_hash};

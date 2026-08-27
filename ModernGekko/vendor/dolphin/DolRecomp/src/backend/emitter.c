@@ -329,6 +329,19 @@ void emit_set_hle_outcalls(bool enabled) {
     g_hle_outcalls = enabled;
 }
 
+// Chunked emission puts many guest functions in one C function, so a `bl` to a
+// neighbour becomes a plain `goto` and never passes the chassis dispatcher --
+// which is where a host installs its SDK intercepts (ppc_host_call). A runtime
+// that HLEs SDK functions at their guest addresses therefore misses every call
+// that happens to land inside the caller's own chunk. This flag restores the
+// intercept point without giving up the goto: check the host first, and fall
+// through to the goto when it declines, which is the common case.
+static bool g_hle_local_calls;
+
+void emit_set_hle_local_calls(bool enabled) {
+    g_hle_local_calls = enabled;
+}
+
 // The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
 // the text sections but the first one does not start on the common stride, so
 // this binary-searches rather than dividing.
@@ -389,6 +402,19 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     if (inst->lk) {
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
         if (local_target) {
+            if (g_hle_local_calls &&
+                branch_target_is_local(func_start, func_end, inst->address + 4u)) {
+                fprintf(out,
+                        "            if (ctx->host_call && "
+                        "ppc_host_call(ctx, 0x%08Xu)) {\n",
+                        inst->branch_target);
+                fprintf(out,
+                        "                if (ctx->pc == 0x%08Xu && "
+                        "!ctx->exception) goto label_%08X;\n",
+                        inst->address + 4u, inst->address + 4u);
+                fprintf(out, "                return;\n");
+                fprintf(out, "            }\n");
+            }
             if (local_backward) {
                 fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
                 fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);

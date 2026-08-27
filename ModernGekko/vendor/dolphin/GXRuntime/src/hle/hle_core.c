@@ -155,6 +155,9 @@ bool dol_hle_poll_callback(CPUState* cpu) {
 
 bool dol_hle_handle_callback_return(CPUState* cpu, u32 address) {
     if (address == HLE_CALLBACK_RETURN && g_callback_active) {
+        if (g_card_log)
+            fprintf(stderr, "[card] callback returned (queue depth %u)\n",
+                    g_callback_count);
         restore_callback_context(cpu, &g_callback_context);
         g_callback_active = false;
         return true;
@@ -322,8 +325,16 @@ void dol_hle_ARQPostRequest(CPUState* cpu) {
     else
         aram_dma_to_ram(cpu->ram, destination, source, length);
     if (callback) {
-        cpu->gpr[3] = request;
-        cpu->pc = callback;
+        // Queue it rather than jumping: hle_dispatch runs hle_return() straight
+        // after every intercept, so a pc written here is overwritten before the
+        // guest ever sees it -- the callback simply never ran, and any game that
+        // busy-waits on a flag its ARQ callback clears (Strikers' aramInit does)
+        // hangs forever. The queue is the mechanism that survives hle_return:
+        // the run loop's dol_hle_poll_callback dispatches it at a safe block
+        // boundary with r3 = the request, which is the ARQCallback signature.
+        if (!queue_guest_callback(callback, (s32)request, 0))
+            fprintf(stderr, "[aram] ARQ callback 0x%08X dropped (queue full)\n",
+                    callback);
     }
 }
 

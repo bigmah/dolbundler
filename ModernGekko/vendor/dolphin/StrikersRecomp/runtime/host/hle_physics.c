@@ -738,7 +738,7 @@ void notify_PhysicsWorldUpdate(CPUState* cpu) {
                               mem_read32(cpu, cpu->gpr[3]));
 }
 
-#ifdef STRIKERSRECOMP_AURORA
+#ifdef STRIKERSRECOMP_HAS_BACKEND
 void notify_DrawableBallRender(CPUState* cpu) {
     if (!ball_state_log_enabled())
         return;

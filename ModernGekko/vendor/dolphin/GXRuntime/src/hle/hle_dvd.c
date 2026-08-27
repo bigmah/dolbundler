@@ -70,8 +70,13 @@ void dol_hle_DVDReadAsyncPrio(CPUState* cpu) {
     mem_write32(cpu, fi + DVD_CB_STATE, DVD_STATE_END);
     mem_write32(cpu, fi + DVD_CB_CURRXFER, length);
     mem_write32(cpu, fi + DVD_CB_XFERRED, length);
-    if (callback)
-        fprintf(stderr, "[dvd] note: read completion callback 0x%08X not invoked\n",
+    // The transfer above already finished, but the guest's asynchronous loader
+    // does not learn that from the command block -- it waits for the completion
+    // callback, and without one every resource load stalls forever. Queue it so
+    // the run loop dispatches it at a block boundary with the DVDCallback
+    // signature (r3 = bytes transferred, r4 = the DVDFileInfo).
+    if (callback && !dol_hle_queue_guest_callback(callback, (s32)length, (s32)fi))
+        fprintf(stderr, "[dvd] read completion callback 0x%08X dropped\n",
                 callback);
     hle_set_u32(cpu, 1);  // TRUE (queued)
 }

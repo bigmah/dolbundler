@@ -238,6 +238,32 @@ static void deliver_external(CPUState* cpu) {
 
 static u32 interrupt_poll_accum;
 
+// Delivery telemetry (STRIKERS_IRQ_LOG). A guest that idles in SelectThread is
+// either never getting a retrace, never being allowed to take one, or taking
+// one with no OSContext to save into -- three different bugs that look
+// identical from outside. Off by default and costing nothing when off.
+static unsigned long long irq_retraces, irq_delivered, irq_blocked_ee,
+    irq_no_pending, irq_no_context;
+static int irq_log = -1;
+
+static bool irq_logging(void) {
+    if (irq_log < 0)
+        irq_log = getenv("STRIKERS_IRQ_LOG") != NULL ? 1 : 0;
+    return irq_log != 0;
+}
+
+static void irq_report(void) {
+    static unsigned long long last;
+    if (irq_retraces == last || (irq_retraces % 120ull) != 0ull)
+        return;
+    last = irq_retraces;
+    fprintf(stderr,
+            "[irq] retraces=%llu delivered=%llu blocked_ee=%llu "
+            "no_pending=%llu no_context=%llu\n",
+            irq_retraces, irq_delivered, irq_blocked_ee, irq_no_pending,
+            irq_no_context);
+}
+
 void interrupt_poll(CPUState* cpu) {
     audio_poll(cpu);
 
@@ -255,6 +281,7 @@ void interrupt_poll(CPUState* cpu) {
     u64 ticks = 0;
     while (dol_vi_clock_pop_retrace(&vi_clock, &ticks)) {
         cpu->timebase += ticks;
+        ++irq_retraces;
         dol_interrupts_assert_vi_retrace(&interrupts);
         dol_si_latch_poll(&si, 0xFu);
         sync_si_interrupt();
@@ -263,10 +290,24 @@ void interrupt_poll(CPUState* cpu) {
     // Deliver only when the guest can take an external interrupt and at least one
     // pending source is unmasked in the PI. One delivery drains every pending,
     // unmasked source: __OSDispatchInterrupt loops over the PI cause bits.
-    if (!(cpu->msr & MSR_EE))
-        return;  // interrupts disabled; stay pending until the guest enables them
-    if (!dol_interrupts_external_pending(&interrupts))
+    const bool logging = irq_logging();
+    if (!(cpu->msr & MSR_EE)) {
+        // Interrupts disabled; the source stays pending until the guest enables
+        // them.
+        if (logging) { ++irq_blocked_ee; irq_report(); }
+        return;
+    }
+    if (!dol_interrupts_external_pending(&interrupts)) {
+        if (logging) { ++irq_no_pending; irq_report(); }
         return;  // no pending source is unmasked yet; wait
-
+    }
+    if (logging) {
+        const u32 ctx = mem_read32(cpu, STRIKERS_OS_CONTEXT_POINTER);
+        if (ctx < GC_RAM_BASE || ctx >= GC_RAM_BASE + cpu->ram_size)
+            ++irq_no_context;   // deliver_external will bail for the same reason
+        else
+            ++irq_delivered;
+        irq_report();
+    }
     deliver_external(cpu);
 }

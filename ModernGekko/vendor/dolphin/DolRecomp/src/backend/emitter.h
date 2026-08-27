@@ -30,6 +30,13 @@ void emit_set_chunk_table(const u32* starts, u32 count);
 // overlap, so nothing may bind at build time.
 void emit_set_hle_outcalls(bool enabled);
 
+// Give the host a chance to intercept a `bl` whose target sits inside the same
+// emitted chunk. Off by default: it costs one predictable branch per intra-chunk
+// call, and a runtime with no SDK intercepts (ctx->host_call == NULL) gains
+// nothing. Required by any host that HLEs SDK functions by guest address --
+// without it a chunked build silently runs the guest's own SDK code instead.
+void emit_set_hle_local_calls(bool enabled);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 

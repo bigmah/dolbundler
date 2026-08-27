@@ -72,8 +72,15 @@ def extract_dol(dolrecomp: Path, iso: Path, work: Path) -> Path:
 def recompile(dolrecomp: Path, dol: Path, output_dir: Path, jobs: int):
     with tempfile.TemporaryDirectory(prefix="strikersrecomp_gen_") as tmp:
         tmp_out = Path(tmp)
+        # DolRecomp emits one C function per ~16 KB chunk, and a `bl` inside a
+        # chunk becomes a plain `goto` -- which never reaches the chassis
+        # dispatcher, and therefore never reaches this host's SDK intercepts.
+        # A build without this silently runs the game's own SDK code for every
+        # call that happens to land in the caller's chunk, and hangs at the
+        # first hardware wait. Not optional here.
+        env = dict(os.environ, DOLRECOMP_HLE_LOCAL_CALLS="1")
         # --gamecube <dol> <dir> writes <dir>/generated/{generated.c,.h,chunks/}
-        run([dolrecomp, "--gamecube", dol, tmp_out, "-j", str(jobs)])
+        run([dolrecomp, "--gamecube", dol, tmp_out, "-j", str(jobs)], env=env)
         produced = tmp_out / "generated"
         if not (produced / "generated.h").is_file():
             sys.exit("error: DolRecomp did not produce generated/generated.h")

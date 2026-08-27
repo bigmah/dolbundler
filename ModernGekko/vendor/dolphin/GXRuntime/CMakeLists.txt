@@ -65,6 +65,38 @@ if(GXRUNTIME_ENABLE_AURORA_RECOMP)
     add_subdirectory(graphics/gxcore)
 endif()
 
+option(GXRUNTIME_ENABLE_WEB
+       "Build the browser (WebGPU/WASM) backend" OFF)
+
+if(GXRUNTIME_ENABLE_WEB)
+    if(NOT GXRUNTIME_ENABLE_AURORA_RECOMP)
+        message(FATAL_ERROR
+            "GXRUNTIME_ENABLE_WEB needs GXRUNTIME_ENABLE_AURORA_RECOMP: the "
+            "browser backend consumes gxcore and the retail GX frontend.")
+    endif()
+    enable_language(CXX)
+    # No Aurora, no wgpu, no windowing: this backend's whole GPU surface is a
+    # byte stream JavaScript reads once a frame (backends/web/web_backend.cpp).
+    add_library(gxruntime_web STATIC
+        backends/web/web_backend.cpp
+        backends/web/web_gfx.cpp
+    )
+    add_library(GXRuntime::web ALIAS gxruntime_web)
+    target_compile_features(gxruntime_web PUBLIC cxx_std_20)
+    target_include_directories(gxruntime_web
+        PUBLIC
+            "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/backends/web"
+    )
+    target_link_libraries(gxruntime_web
+        PUBLIC
+            gxruntime
+            GXRuntime::gxcore
+            GXRuntime::retail_gx_frontend
+    )
+endif()
+
 if(GXRUNTIME_ENABLE_AURORA)
     if(NOT EXISTS "${GXRUNTIME_AURORA_DIR}/include/aurora/aurora.h")
         message(FATAL_ERROR

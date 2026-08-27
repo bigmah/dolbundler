@@ -1204,6 +1204,15 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         // so only emit them after an explicit opt-in for controlled benchmarks.
         // funcs accumulates across sections; targets in a later section still
         // fall back to the dispatcher because their symbols are not known yet.
+        // Hosts that intercept SDK functions at their guest addresses need the
+        // dispatcher reachable from intra-chunk calls too; see
+        // emit_set_hle_local_calls.
+        const char* hle_local = getenv("DOLRECOMP_HLE_LOCAL_CALLS");
+        if (hle_local && strcmp(hle_local, "1") == 0) {
+            printf("  HLE-visible intra-chunk calls enabled\n");
+            emit_set_hle_local_calls(true);
+        }
+
         const char* direct = getenv("DOLRECOMP_UNSAFE_DIRECT_CALLS");
         u32* chunk_starts = NULL;
         if (direct && strcmp(direct, "1") == 0) {

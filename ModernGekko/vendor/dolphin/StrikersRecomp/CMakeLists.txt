@@ -18,6 +18,15 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(STRIKERSRECOMP_ENABLE_AURORA
        "Build with the Aurora graphics/input/audio backend" ON)
+# The browser build: emcc, GXRuntime::web instead of GXRuntime::aurora, and the
+# non-blocking entry point in runtime/host/main_web.c. Same generated code, same
+# host policy files -- only the backend and the run loop differ.
+option(STRIKERSRECOMP_ENABLE_WEB
+       "Build for the browser (emscripten + WebGPU) instead of Aurora" OFF)
+if(STRIKERSRECOMP_ENABLE_WEB)
+    set(STRIKERSRECOMP_ENABLE_AURORA OFF CACHE BOOL "" FORCE)
+    set(GXRUNTIME_ENABLE_WEB ON CACHE BOOL "" FORCE)
+endif()
 set(STRIKERSRECOMP_GXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/../GXRuntime"
     CACHE PATH "Path to a GXRuntime checkout")
 set(STRIKERSRECOMP_AURORA_DIR "${STRIKERSRECOMP_GXRUNTIME_DIR}/graphics/aurora"
@@ -47,9 +56,13 @@ if(NOT EXISTS "${STRIKERSRECOMP_GENERATED_DIR}/generated.h")
         "  python3 tools/generate.py --iso /path/to/strikers.iso")
 endif()
 
+# Constant-time chunk dispatch. Either tools/fix_generated.py rewrote the
+# linear range chain (leaving its marker comment), or DolRecomp's emitter
+# already emits indexed dispatch itself -- this tree's emitter does, as
+# `dolrecomp_find_original` with a static chunk_functions[] table. Accept both.
 file(STRINGS "${STRIKERSRECOMP_GENERATED_DIR}/generated.h"
      STRIKERSRECOMP_FAST_DISPATCH_MARKER
-     REGEX "DolRecomp constant-time chunk dispatch"
+     REGEX "DolRecomp constant-time chunk dispatch|static const DolRecompFunction chunk_functions"
      LIMIT_COUNT 1)
 if(NOT STRIKERSRECOMP_FAST_DISPATCH_MARKER)
     message(FATAL_ERROR
@@ -62,6 +75,12 @@ file(GLOB STRIKERSRECOMP_CHUNKS CONFIGURE_DEPENDS
 list(LENGTH STRIKERSRECOMP_CHUNKS STRIKERSRECOMP_CHUNK_COUNT)
 message(STATUS "StrikersRecomp: ${STRIKERSRECOMP_CHUNK_COUNT} recompiled chunk(s)")
 
+if(STRIKERSRECOMP_ENABLE_WEB)
+    set(STRIKERSRECOMP_ENTRY runtime/host/main_web.c)
+else()
+    set(STRIKERSRECOMP_ENTRY runtime/host/main.c)
+endif()
+
 add_executable(StrikersRecomp
     runtime/host/mmio.c
     runtime/host/audio.c
@@ -70,7 +89,7 @@ add_executable(StrikersRecomp
     runtime/host/hle_input.c
     runtime/host/hle_physics.c
     runtime/host/sdk_map.c
-    runtime/host/main.c
+    ${STRIKERSRECOMP_ENTRY}
     "${STRIKERSRECOMP_GENERATED_DIR}/generated.c"
     ${STRIKERSRECOMP_CHUNKS}
 )
@@ -97,10 +116,53 @@ if(STRIKERSRECOMP_HAVE_LIBM)
     target_link_libraries(StrikersRecomp PRIVATE m)
 endif()
 
-if(STRIKERSRECOMP_ENABLE_AURORA)
+if(STRIKERSRECOMP_ENABLE_WEB)
+    enable_language(CXX)
+    target_link_libraries(StrikersRecomp PRIVATE GXRuntime::web)
+    target_compile_features(StrikersRecomp PRIVATE cxx_std_20)
+    # HAS_BACKEND gates every part of the host policy that needs a graphics
+    # backend at all -- the GXBegin/GXCallDisplayList/GXSetArray intercepts and
+    # the GXCopyDisp/GXLoadTexObj/VIConfigure notifies. It used to be spelled
+    # STRIKERSRECOMP_AURORA, which silently left the browser build with no
+    # present, no textures and no display lists.
+    target_compile_definitions(StrikersRecomp PRIVATE
+        STRIKERSRECOMP_WEB=1 STRIKERSRECOMP_HAS_BACKEND=1)
+    set_target_properties(StrikersRecomp PROPERTIES
+        LINKER_LANGUAGE CXX
+        OUTPUT_NAME "strikers"
+        SUFFIX ".js")
+    # MODULARIZE so the page controls when the module instantiates; INVOKE_RUN=0
+    # because boot is explicit (the user supplies a disc first). ALLOW_MEMORY_
+    # GROWTH because guest RAM (24 MB MEM1 + 16 MB ARAM) plus the frame arenas
+    # exceed the default heap.
+    # Binaryen's wasm-opt over a ~30 MB module costs minutes and LLVM has
+    # already optimised each translation unit (experiments/wasm/README.md
+    # measured 373 s on a 29 MB link). Link at -O1 for iteration; turn this OFF
+    # for a shipping build and measure whether the extra pass pays.
+    option(STRIKERSRECOMP_WEB_FAST_LINK
+           "Skip Binaryen's heavy link-time pass (much faster rebuilds)" ON)
+    if(STRIKERSRECOMP_WEB_FAST_LINK)
+        target_link_options(StrikersRecomp PRIVATE "-O1")
+    endif()
+    target_link_options(StrikersRecomp PRIVATE
+        "-sENVIRONMENT=web,worker"
+        "-sMODULARIZE=1"
+        "-sEXPORT_NAME=StrikersWeb"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sINITIAL_MEMORY=128MB"
+        "-sMAXIMUM_MEMORY=2GB"
+        "-sSTACK_SIZE=4MB"
+        "-sINVOKE_RUN=0"
+        "-sEXIT_RUNTIME=0"
+        "-sFORCE_FILESYSTEM=1"
+        "-sEXPORTED_RUNTIME_METHODS=['UTF8ToString','HEAPU8','HEAPU16','HEAPU32','HEAPF32','HEAP16','FS','ENV','callMain']"
+        "-sEXPORTED_FUNCTIONS=['_main','_malloc','_free']"
+    )
+elseif(STRIKERSRECOMP_ENABLE_AURORA)
     enable_language(CXX)
     target_link_libraries(StrikersRecomp PRIVATE GXRuntime::aurora)
     target_compile_features(StrikersRecomp PRIVATE cxx_std_20)
-    target_compile_definitions(StrikersRecomp PRIVATE STRIKERSRECOMP_AURORA=1)
+    target_compile_definitions(StrikersRecomp PRIVATE
+        STRIKERSRECOMP_AURORA=1 STRIKERSRECOMP_HAS_BACKEND=1)
     set_target_properties(StrikersRecomp PROPERTIES LINKER_LANGUAGE CXX)
 endif()
