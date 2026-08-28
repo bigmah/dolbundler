@@ -37,6 +37,23 @@ LTO="${DOLWEB_LTO:-OFF}"
 # kernels measured identical with and without it, and with the renderer costing
 # almost nothing there is no texture-decode wall for it to move either.
 SIMD="${DOLWEB_SIMD:-}"
+# Extra C flags, which reach the generated chunks as well as Dolphin's C. The
+# knobs worth sweeping live there as #defines with -D overrides:
+# DOLRECOMP_C_MAX_CALL_DEPTH (how deep cross-chunk calls nest before falling
+# back to the dispatcher) and DOLRECOMP_C_LOOP_CYCLE_BUDGET (how long an inlined
+# loop runs before side-exiting). Raising the budget past the chassis's
+# LOOP_GUARD_YIELD_CYCLES would reintroduce the ARAM-init livelock, so keep it
+# well under 4096.
+# Measured on GEXE52, Null backend, throttle off, guest cycles over a fixed
+# wall-clock window: call depth 24 -> 64 is +6.9%, and the loop budget 256 ->
+# 1024 on top of it is +10.1% cumulative, with native dispatches down 10%. Both
+# work the same way -- a dispatch is a switch and an indirect call and a charge
+# flush, and there were five and a half million a second.
+#
+# 1024 and not more: the chassis rescues a spinning loop by charging
+# LOOP_GUARD_YIELD_CYCLES (4096) so the guard trips, and a budget at or above
+# that would bring back the ARAM-init livelock.
+CFLAGS_EXTRA="${DOLWEB_CFLAGS:--DDOLRECOMP_C_MAX_CALL_DEPTH=64 -DDOLRECOMP_C_LOOP_CYCLE_BUDGET=1024}"
 EXTRA=()
 
 while [ $# -gt 0 ]; do
@@ -87,7 +104,7 @@ export CMAKE_NINJA_FORCE_RESPONSE_FILE=1
 # the cause.
 emcmake cmake -S "$HERE" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS="-pthread $SIMD" \
+  -DCMAKE_C_FLAGS="-pthread $SIMD $CFLAGS_EXTRA" \
   -DCMAKE_CXX_FLAGS="-pthread $SIMD" \
   -DENABLE_GENERIC=ON \
   -DENABLE_QT=OFF -DENABLE_NOGUI=OFF -DENABLE_TESTS=OFF \
