@@ -1,0 +1,16 @@
+# Hand-verified against Super Mario Strikers' decomp-derived table, by reading
+# both disassemblies side by side. Every one of these is structurally identical
+# to the reference function -- same prologue, same SDK constants, same
+# write-gather-pipe opcodes -- differing only in the small-data base register
+# (r13 here, r2 there) and the offsets inside __GXData.
+#
+# They are here rather than in the automatic output because no signature
+# database carries them and the September 2002 SDK changed them enough that an
+# exact fingerprint does not transfer.
+GXBegin           0x8019DA28
+GXSetArray        0x8019CAD8
+GXCopyDisp        0x8019E8AC
+GXCopyTex         0x8019EA08
+GXCallDisplayList 0x801A2A50
+GXLoadTexObj      0x801A0114
+GXLoadTlut        0x801A01F4

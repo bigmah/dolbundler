@@ -437,8 +437,21 @@ void dol_hle_PSMTXConcat(CPUState* cpu) {
 
 #define HLE_DISPLAY_LIST_RETURN 0x7FFF0010u
 #define HLE_GX_BEGIN_RETURN     0x7FFF0020u
+// Defaults, used when the client leaves the config fields zero.
 #define GX_DATA_SDA_OFFSET      (-20664)
 #define GX_DIRTY_STATE_OFFSET   1452u
+
+static u32 gx_data_pointer(CPUState* cpu) {
+    const u32 reg = g_hle_config.gx_data_base_reg ? g_hle_config.gx_data_base_reg : 2u;
+    const s32 off = g_hle_config.gx_data_sda_offset ? g_hle_config.gx_data_sda_offset
+                                                    : GX_DATA_SDA_OFFSET;
+    return mem_read32(cpu, cpu->gpr[reg] + (u32)off);
+}
+
+static u32 gx_dirty_state_offset(void) {
+    return g_hle_config.gx_dirty_state_offset ? g_hle_config.gx_dirty_state_offset
+                                              : GX_DIRTY_STATE_OFFSET;
+}
 #define GX_MAX_TEXTURES 8u
 #define GX_MAX_TLUTS    20u
 
@@ -785,9 +798,9 @@ static void finish_GXCallDisplayList(CPUState* cpu) {
 }
 
 static void continue_GXCallDisplayList(CPUState* cpu) {
-    const u32 gx_data = mem_read32(cpu, cpu->gpr[2] + (u32)(s32)GX_DATA_SDA_OFFSET);
+    const u32 gx_data = gx_data_pointer(cpu);
     if (g_display_list_call.stage == 0u &&
-        mem_read32(cpu, gx_data + GX_DIRTY_STATE_OFFSET) != 0u) {
+        mem_read32(cpu, gx_data + gx_dirty_state_offset()) != 0u) {
         g_display_list_call.stage = 1u;
         cpu->lr = HLE_DISPLAY_LIST_RETURN;
         cpu->pc = g_hle_config.gx_dirty_state_helper_addr;
@@ -827,9 +840,9 @@ static void finish_GXBegin(CPUState* cpu) {
 }
 
 static void continue_GXBegin(CPUState* cpu) {
-    const u32 gx_data = mem_read32(cpu, cpu->gpr[2] + (u32)(s32)GX_DATA_SDA_OFFSET);
+    const u32 gx_data = gx_data_pointer(cpu);
     if (g_gx_begin.stage == 0u &&
-        mem_read32(cpu, gx_data + GX_DIRTY_STATE_OFFSET) != 0u) {
+        mem_read32(cpu, gx_data + gx_dirty_state_offset()) != 0u) {
         g_gx_begin.stage = 1u;
         cpu->lr = HLE_GX_BEGIN_RETURN;
         cpu->pc = g_hle_config.gx_dirty_state_helper_addr;

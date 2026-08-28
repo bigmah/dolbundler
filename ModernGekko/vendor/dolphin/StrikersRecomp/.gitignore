@@ -1,6 +1,7 @@
 # Recompiled output is derived from the user's own ISO and is large.
 # Reproduce it with: python3 tools/generate.py --iso <your-melee.iso>
 /generated/
+/generated-*/
 
 # Never commit copyrighted game data.
 *.iso

@@ -19,6 +19,16 @@ typedef struct DolHleConfig {
     u32 thp_simple_control_addr;
     u32 gx_dirty_state_helper_addr;
     u32 gx_flush_prim_helper_addr;
+    // Where the SDK's __GXData pointer lives, and where the dirty-state word
+    // sits inside it. Both are per-title: the linker picks the small-data base
+    // register and the offset, and the structure grew between SDK revisions.
+    // Super Mario Strikers (April 2004 SDK) has it at r2 - 20664 with the
+    // dirty state at +1452; Disney's Extreme Skate Adventure (September 2002)
+    // at r13 - 24448 with the dirty state at +1268. Leave zero to keep the
+    // 2004 defaults.
+    u32 gx_data_base_reg;          // 2 or 13
+    s32 gx_data_sda_offset;
+    u32 gx_dirty_state_offset;
     char game_code[4];
     char company[2];
 } DolHleConfig;
