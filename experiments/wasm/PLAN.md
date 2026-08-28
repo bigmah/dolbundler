@@ -19,7 +19,8 @@ history for it.
 gameplay at a frame rate a person would accept, on an iPhone, in Safari.
 
 **Reached 2026-08-27.** See the status section below for the numbers, on the
-phone and off it.
+phone and off it. Disney skate reached the screen the same day -- boot, SDK,
+first frames -- and is stalled on a loading screen; see "A second disc".
 
 ## Why this shape and not the obvious one
 
@@ -58,6 +59,77 @@ installed.
 | 6 — iOS device bring-up | **Done.** On an iPhone 15 Pro Max in Safari: WebGPU renders through the real backend, the 106 MB module loads in 1.5 s, and the game runs 4 000 frames at 31.7 fps. In-match on the device is the one figure still unmeasured. |
 | 7 — recompile on the device | Not started. |
 | 8 — make it fast enough | Measured, and better than forecast: **~0.5x of native on V8, ~1.0x on WebKit** (14-16M guest block dispatches/s against native's ~15M). One texture-cache fix was worth 2.8x on texture-heavy scenes. |
+
+### Playable, not just running (2026-08-27)
+
+Three things stood between "a game renders in Safari" and "a game you can play
+in Safari", all in the page rather than the runtime.
+
+- **The pad.** Each control was its own element with its own pointer capture,
+  positioned as a percentage of a 4:3 canvas. No second finger, no roll-off, no
+  D-pad, and a stick with a third of its travel dead. It is one hit-tested
+  surface now: multi-touch, roll-on/roll-off, lost-pointer recovery, a rescaled
+  radial deadzone, and D-pad bits from the stick past a threshold with
+  hysteresis (plenty of menus read only those). A gamepad no longer clobbers
+  the touch state -- attaching any HID device used to disable the on-screen pad.
+- **Zoom and scroll.** `user-scalable=no` has been advisory on iOS since 10, so
+  double-tap zoomed the game and a drag rubber-banded the page. `touch-action`,
+  refused `gesture*`/`dblclick`, and a fixed non-scrolling body stop all of it.
+- **Orientation.** There was one layout, and in landscape on a phone its 4:3
+  canvas was taller than the screen. The picture is fitted to the viewport now
+  and the pad placed against it -- over the screen edges in landscape, in the
+  free area below the picture in portrait -- with safe-area insets and an
+  immersive mode. Control positions are offsets from an anchored corner rather
+  than fractions of the box, followed by a collision-relaxation pass, so one
+  table serves both orientations.
+- **Audio was wired and never heard**, and the reason was the unlock: a single
+  `{once: true}` pointerdown listener that fired on the first tap of the page --
+  the disc picker, before a session exists. It did nothing and removed itself.
+  It retries on every gesture now. Three further iOS fixes: the context runs at
+  the *hardware* rate with the worklet resampling (asking for the guest's
+  32 kHz is the fragile path), `navigator.audioSession.type = 'playback'` so
+  the ring switch does not silently mute a game, and a suspended context is
+  resumed on `visibilitychange`. The worklet primes before its first sample and
+  re-primes on a starve rather than clicking per sample.
+
+`drive.mjs` is a CDP harness that emulates a phone with a real touch screen and
+asserts the pad: every button, two fingers at once, stick-to-D-pad, rolling
+B->A, no zoom, no scroll, nothing off-screen. Passing in both orientations.
+
+### A second disc: Disney's Extreme Skate Adventure (2026-08-27)
+
+**It boots and renders.** GEXE52 compiles to an 82.7 MB module, brings up the
+September 2002 SDK (OS, VI, ARQ, AI, AX, DSP all announce themselves) and puts
+18 draws and 2 presented frames on screen, 0 skipped. It then stalls on a
+loading screen.
+
+The client was Strikers all the way down and is per-title now: everything one
+disc knows lives in `runtime/host/game_<ID>.h`, every intercept with an SDK name
+registers *by name* through the generated table, and hooks a title has not had
+identified are zero -- which installs nothing rather than something wrong.
+`web/build.sh --game GEXE52`; the page picks its module from the disc's ID.
+
+**The gate was the SDK intercept table**, which came from a decomp symbol map
+that exists for Strikers and for nothing else. `tools/sdk_signatures.py` derives
+it from the binary -- see that file, and the commit, for the method and its
+measured accuracy (371/371 on Strikers against itself, 0 wrong; 315 intercepts
+for GEXE52). Two findings shaped it: the naive "matches must increase in both
+address spaces" constraint is wrong, because whole libraries move between games
+(Strikers links `os.a` after `gx.a`, Skate 200 KB earlier), and Dolphin's
+`totaldb.dsy` collides so badly it "matches" 90% of a game -- usable only after
+dropping any name it claims twice.
+
+Four defects stood between "it compiles" and "it renders", all in the hardware
+model, all latent for Strikers because Strikers replaces its whole audio init:
+the DSP reset bit was stored rather than honoured; the DSPCR interrupt status
+bits are write-1-clear and were not; there were no mailboxes at all; and the
+command processor was unmapped, so its status register read "still busy".
+
+**What is left**, in order: the loading-screen stall (the guest is scheduling
+threads and waiting, so it is a completion the host never delivers -- the same
+shape as the five Strikers defects below); then audio, which needs an AX
+stand-in the way Strikers needed a MusyX one; then whatever the rest of the
+game asks for.
 
 ### What it took, beyond the plan
 
