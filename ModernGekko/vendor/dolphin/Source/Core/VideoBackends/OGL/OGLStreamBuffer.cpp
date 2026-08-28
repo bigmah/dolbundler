@@ -349,11 +349,22 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
   // without basevertex support, only streaming methods whith uploads everything to zero works fine:
   if (!g_ogl_config.bSupportsGLBaseVertex)
   {
+#ifdef __EMSCRIPTEN__
+    // WebGL is one of the drivers the comment on BufferData is about, and it is
+    // not a small effect. BufferSubData writes over a buffer the pending draws
+    // still reference, so every upload waits for them; measured in Disney skate,
+    // 150 uploads a frame at about 6 ms each -- 0.9 s of a 1.4 s frame, with the
+    // draw calls themselves too cheap to appear. glBufferData with a size
+    // orphans the old storage instead, which is the streaming pattern WebGL
+    // implementations are built around.
+    return std::make_unique<BufferData>(type, size);
+#else
     if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_BUFFER_STREAM))
       return std::make_unique<BufferSubData>(type, size);
 
     // BufferData is by far the worst way, only use it if needed
     return std::make_unique<BufferData>(type, size);
+#endif
   }
 
   // Prefer the syncing buffers over the orphaning one

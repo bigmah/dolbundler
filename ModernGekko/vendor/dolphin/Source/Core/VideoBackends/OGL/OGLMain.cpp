@@ -75,8 +75,21 @@ std::string VideoBackend::GetDisplayName() const
 
 void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
 {
+  WindowSystemInfo probe_wsi(wsi);
+#ifdef __EMSCRIPTEN__
+  // This probe runs before the emulation thread exists, on whichever thread
+  // started the core, and it only wants to ask the driver what it supports. A
+  // browser will not transfer a canvas that has ever had a rendering context,
+  // and the emulation thread has to be given the real one -- so probe a
+  // throwaway canvas instead of poisoning it. The page provides #dolweb-probe;
+  // if it does not, context creation fails, the probe is skipped, and the same
+  // capabilities are filled in on the emulation thread a moment later.
+  static const char kProbeCanvas[] = "#dolweb-probe";
+  probe_wsi.render_surface = const_cast<char*>(kProbeCanvas);
+  probe_wsi.render_window = const_cast<char*>(kProbeCanvas);
+#endif
   std::unique_ptr<GLContext> temp_gl_context =
-      GLContext::Create(wsi, g_Config.stereo_mode == StereoMode::QuadBuffer, true,
+      GLContext::Create(probe_wsi, g_Config.stereo_mode == StereoMode::QuadBuffer, true,
                         Config::Get(Config::GFX_PREFER_GLES));
 
   if (!temp_gl_context)

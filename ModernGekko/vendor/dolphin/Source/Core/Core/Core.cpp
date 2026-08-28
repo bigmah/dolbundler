@@ -3,6 +3,11 @@
 
 #include "Core/Core.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/threading.h>
+#include <pthread.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <functional>
@@ -98,6 +103,56 @@ static bool s_wants_determinism;
 
 // Declarations and definitions
 static std::thread s_emu_thread;
+
+#ifdef __EMSCRIPTEN__
+// A browser hands a canvas to exactly one thread, and only at pthread_create.
+// The thread that has to have it is this one: the video backend is initialised
+// on the emulation thread and every GL call it makes comes from there, single
+// core or dual. Without the transfer, the context has to be created on the
+// browser's main thread and every GL call becomes a queued cross-thread call --
+// which for Dolphin's call volume costs about 100 ms a frame, all of it inside
+// the present. std::thread cannot carry a pthread attribute, so on this one
+// platform the emulation thread is a pthread and the two places that join it go
+// through the helpers below.
+static pthread_t s_emu_pthread{};
+static bool s_emu_pthread_running = false;
+
+struct EmuThreadArgs
+{
+  Core::System* system;
+  std::unique_ptr<BootParameters> boot;
+  WindowSystemInfo wsi;
+};
+
+static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,
+                      WindowSystemInfo wsi);
+
+static void* EmuThreadTrampoline(void* raw)
+{
+  std::unique_ptr<EmuThreadArgs> args(static_cast<EmuThreadArgs*>(raw));
+  EmuThread(*args->system, std::move(args->boot), args->wsi);
+  return nullptr;
+}
+#endif
+
+static bool EmuThreadJoinable()
+{
+#ifdef __EMSCRIPTEN__
+  return s_emu_pthread_running;
+#else
+  return s_emu_thread.joinable();
+#endif
+}
+
+static void EmuThreadJoin()
+{
+#ifdef __EMSCRIPTEN__
+  pthread_join(s_emu_pthread, nullptr);
+  s_emu_pthread_running = false;
+#else
+  s_emu_thread.join();
+#endif
+}
 static Common::HookableEvent<Core::State> s_state_changed_event;
 
 static bool s_is_throttler_temp_disabled = false;
@@ -215,7 +270,7 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
 {
   std::lock_guard lock(s_core_mutex);
 
-  if (s_emu_thread.joinable())
+  if (EmuThreadJoinable())
   {
     if (!IsUninitialized(system))
     {
@@ -224,7 +279,7 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
     }
 
     // The Emu Thread was stopped, synchronize with it.
-    s_emu_thread.join();
+    EmuThreadJoin();
   }
 
   // Drain any left over jobs
@@ -246,8 +301,40 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
 
   // Start the emu thread
   s_state.store(State::Starting);
+#ifdef __EMSCRIPTEN__
+  {
+    auto* args = new EmuThreadArgs{&system, std::move(boot), prepared_wsi};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    // Named the same way the page and GLContextEmscripten name it. If the
+    // calling thread does not hold the canvas -- which is what happens when the
+    // build was linked without OFFSCREENCANVAS_SUPPORT -- pthread_create fails
+    // and the plain thread below still gets a working, proxied context.
+    emscripten_pthread_attr_settransferredcanvases(&attr, "#canvas");
+    const int rc = pthread_create(&s_emu_pthread, &attr, EmuThreadTrampoline, args);
+    pthread_attr_destroy(&attr);
+    if (rc == 0)
+    {
+      s_emu_pthread_running = true;
+      return true;
+    }
+    WARN_LOG_FMT(BOOT, "Emulation thread could not take the canvas ({}); "
+                       "GL calls will be proxied and slow.", rc);
+    boot = std::move(args->boot);
+    prepared_wsi = args->wsi;
+    delete args;
+    if (pthread_create(&s_emu_pthread, nullptr, EmuThreadTrampoline,
+                       new EmuThreadArgs{&system, std::move(boot), prepared_wsi}) == 0)
+    {
+      s_emu_pthread_running = true;
+      return true;
+    }
+    return false;
+  }
+#else
   s_emu_thread = std::thread(EmuThread, std::ref(system), std::move(boot), prepared_wsi);
   return true;
+#endif
 }
 
 static void ResetRumble()
@@ -854,8 +941,8 @@ void Shutdown(Core::System& system)
   // shut down.
   // For more info read "DirectX Graphics Infrastructure (DXGI): Best Practices"
   // on MSDN.
-  if (s_emu_thread.joinable())
-    s_emu_thread.join();
+  if (EmuThreadJoinable())
+    EmuThreadJoin();
 
   // Make sure there's nothing left over in case we're about to exit.
   HostDispatchJobs(system);

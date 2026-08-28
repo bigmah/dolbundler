@@ -37,6 +37,10 @@
 </style>
 
 <div id="stage"><canvas id="canvas" width="640" height="528"></canvas></div>
+<!-- A canvas for the backend's capability probe, and nothing else. A browser
+     refuses to transfer a canvas that has ever had a rendering context, and the
+     emulation thread has to be handed the real one. -->
+<canvas id="dolweb-probe" width="1" height="1" style="display:none"></canvas>
 <div id="bar">
   <button id="start">Start</button>
   <button id="logtoggle">Log</button>

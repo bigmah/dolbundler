@@ -121,6 +121,13 @@ while (Date.now() < deadline && !done) {
     writeFileSync(name, Buffer.from(png.data, 'base64'));
     console.log(`[shot] ${name}`);
   }
+  // Hold START (control 5, InputOverrider.h) down for a moment every few seconds. An attract loop is menus
+  // and logos, and the scene worth measuring is the one after them.
+  if (opt.press) {
+    await cdp.eval(`(() => { const c = window.dolweb && window.cwrapSetControl;
+      if (!c) return 'no'; c(5, 1); setTimeout(() => c(5, 0), 120); return 'ok'; })()`)
+      .catch(() => {});
+  }
   done = lines.some((l) => l.includes('Run() returned'));
 }
 

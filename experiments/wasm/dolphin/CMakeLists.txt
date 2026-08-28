@@ -221,6 +221,15 @@ else()
     -sEXPORT_ES6=0
     -sEXPORT_NAME=createDolWeb
     -sEXPORTED_RUNTIME_METHODS=[ccall,cwrap,HEAPU8,HEAPU32]
+    # OffscreenCanvas first, the proxied framebuffer as the fallback. The
+    # difference is not subtle: a proxied context turns every GL call into a
+    # queued cross-thread call, and Dolphin issues enough of them per frame that
+    # the present alone measured 99 ms. With the canvas transferred to the
+    # emulation thread the calls are local and the present is a no-op.
+    -sOFFSCREENCANVAS_SUPPORT=1
+    # Quoted: an unquoted # starts a CMake comment, and the setting reaches
+    # emscripten empty.
+    "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas,#dolweb-probe"
     -sOFFSCREEN_FRAMEBUFFER=1
     -sMIN_WEBGL_VERSION=2
     -sMAX_WEBGL_VERSION=2

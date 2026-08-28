@@ -40,5 +40,10 @@ protected:
 
 private:
   EMSCRIPTEN_WEBGL_CONTEXT_HANDLE m_context = 0;
+  // A context created on another thread cannot be destroyed from here: the
+  // teardown runs partly on the calling thread and reads a registry the calling
+  // thread does not have. Leaking one is better than crashing, and this only
+  // ever applies to the fallback path.
+  bool m_proxied = false;
   std::string m_target;
 };

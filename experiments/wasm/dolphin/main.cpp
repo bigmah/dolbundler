@@ -329,6 +329,11 @@ int main(int argc, char** argv)
   // ios/PERFORMANCE.md, which learned this the hard way.
   if (const char* state = std::getenv("DOLWEB_STATE"))
     config.load_state_path = state;
+  // Internal resolution, so a run can ask whether the renderer is fill-bound or
+  // call-bound: if halving it does not move the number, the GPU is not the
+  // thing that is busy.
+  if (const char* scale = std::getenv("DOLWEB_EFB_SCALE"))
+    config.graphics.internal_resolution_scale = std::atoi(scale);
 
   const std::string disc_id = ReadDiscId(game_root);
   const ModernGekkoModuleDesc* module = FindModule(disc_id);

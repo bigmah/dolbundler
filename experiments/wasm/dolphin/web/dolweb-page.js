@@ -37,36 +37,48 @@ document.getElementById('logtoggle').onclick = () => logEl.classList.toggle('hid
 //
 // Dolphin's own touch overrider, the same one the iOS app drives. Control IDs
 // come from InputCommon/ControllerInterface/Touch/InputOverrider.h.
+// InputCommon/ControllerInterface/Touch/InputOverrider.h. The sticks are axes
+// with a value in [-1, 1], not four buttons; the earlier version of this table
+// was copied from a different pad ABI and pressed X when it meant START.
 const CONTROL = {
-  BUTTON_A: 0, BUTTON_B: 1, BUTTON_START: 2, BUTTON_X: 3, BUTTON_Y: 4,
-  BUTTON_Z: 5, BUTTON_UP: 6, BUTTON_DOWN: 7, BUTTON_LEFT: 8, BUTTON_RIGHT: 9,
-  STICK_UP: 10, STICK_DOWN: 11, STICK_LEFT: 12, STICK_RIGHT: 13,
-  C_STICK_UP: 14, C_STICK_DOWN: 15, C_STICK_LEFT: 16, C_STICK_RIGHT: 17,
-  TRIGGER_L: 18, TRIGGER_R: 19,
+  A: 0, B: 1, X: 2, Y: 3, Z: 4, START: 5,
+  UP: 6, DOWN: 7, LEFT: 8, RIGHT: 9,
+  L_DIGITAL: 10, R_DIGITAL: 11, L_ANALOG: 12, R_ANALOG: 13,
+  STICK_X: 14, STICK_Y: 15, C_STICK_X: 16, C_STICK_Y: 17,
 };
-const KEYS = {
-  KeyJ: CONTROL.BUTTON_A, KeyK: CONTROL.BUTTON_B,
-  KeyU: CONTROL.BUTTON_X, KeyI: CONTROL.BUTTON_Y,
-  KeyQ: CONTROL.BUTTON_Z, Enter: CONTROL.BUTTON_START,
-  KeyE: CONTROL.TRIGGER_L, KeyR: CONTROL.TRIGGER_R,
-  ArrowUp: CONTROL.BUTTON_UP, ArrowDown: CONTROL.BUTTON_DOWN,
-  ArrowLeft: CONTROL.BUTTON_LEFT, ArrowRight: CONTROL.BUTTON_RIGHT,
-  KeyW: CONTROL.STICK_UP, KeyS: CONTROL.STICK_DOWN,
-  KeyA: CONTROL.STICK_LEFT, KeyD: CONTROL.STICK_RIGHT,
+const BUTTONS = {
+  KeyJ: CONTROL.A, KeyK: CONTROL.B, KeyU: CONTROL.X, KeyI: CONTROL.Y,
+  KeyQ: CONTROL.Z, Enter: CONTROL.START,
+  KeyE: CONTROL.L_DIGITAL, KeyR: CONTROL.R_DIGITAL,
+  ArrowUp: CONTROL.UP, ArrowDown: CONTROL.DOWN,
+  ArrowLeft: CONTROL.LEFT, ArrowRight: CONTROL.RIGHT,
+};
+const AXES = {
+  KeyW: [CONTROL.STICK_Y, 1], KeyS: [CONTROL.STICK_Y, -1],
+  KeyA: [CONTROL.STICK_X, -1], KeyD: [CONTROL.STICK_X, 1],
+  KeyT: [CONTROL.C_STICK_Y, 1], KeyG: [CONTROL.C_STICK_Y, -1],
+  KeyF: [CONTROL.C_STICK_X, -1], KeyH: [CONTROL.C_STICK_X, 1],
 };
 
 let setControl = null;
 
 function wireKeyboard(module) {
   setControl = module.cwrap('dolweb_set_control', null, ['number', 'number']);
-  const press = (e, value) => {
-    const control = KEYS[e.code];
-    if (control === undefined || !setControl) return;
-    e.preventDefault();
-    setControl(control, value);
+  const press = (e, down) => {
+    const button = BUTTONS[e.code];
+    if (button !== undefined) {
+      e.preventDefault();
+      setControl(button, down ? 1 : 0);
+      return;
+    }
+    const axis = AXES[e.code];
+    if (axis) {
+      e.preventDefault();
+      setControl(axis[0], down ? axis[1] : 0);
+    }
   };
-  addEventListener('keydown', (e) => { if (!e.repeat) press(e, 1); });
-  addEventListener('keyup', (e) => press(e, 0));
+  addEventListener('keydown', (e) => { if (!e.repeat) press(e, true); });
+  addEventListener('keyup', (e) => press(e, false));
 }
 
 // --- boot -------------------------------------------------------------------
@@ -94,5 +106,6 @@ startBtn.onclick = async () => {
   // in linear memory, so this is the only way to read what Dolphin wrote there.
   window.dolweb = module;
   window.cat = module.cwrap('dolweb_cat', null, ['string']);
+  window.cwrapSetControl = setControl;
   status('running');
 };
