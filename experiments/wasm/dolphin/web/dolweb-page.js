@@ -49,11 +49,17 @@ function report(payload) {
 
 // One report a second is plenty, and the log is the last few lines only: a
 // Dolphin boot is thousands and the point is to see where it stopped.
+let heapBytes = () => 0;
+
 if (REPORT) {
   let ticks = 0;
   setInterval(() => {
     const perf = lines.filter((l) => l.startsWith('[perf]')).slice(-3);
-    report({ tick: ++ticks, perf, tail: lines.slice(-8) });
+    // Linear memory is the number that decides whether a phone can run this at
+    // all: the module is 91.6 MB of code on top of whatever the heap grows to,
+    // and a WebContent process that crosses its jetsam limit just disappears.
+    report({ tick: ++ticks, perf, heapMB: +(heapBytes() / 1048576).toFixed(1),
+             tail: lines.slice(-8) });
   }, 5000);
 }
 
@@ -276,7 +282,8 @@ async function boot() {
     printErr: log,
     onTitle: (t) => { document.title = t; status(t); },
   });
-  report({ phase: 'module-created' });
+  heapBytes = () => module.HEAPU8.length;
+  report({ phase: 'module-created', heapMB: +(module.HEAPU8.length / 1048576).toFixed(1) });
   wireKeyboard(module);
   wirePad();
   wireImmersive();

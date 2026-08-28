@@ -106,7 +106,7 @@ cdp.on((m) => {
 const env = (opt.env ? String(opt.env).split(';') : [])
   .map((e) => `&env=${encodeURIComponent(e)}`).join('');
 const url = `${opt.host}:${opt.port}/index.html?backend=${opt.backend}` +
-            `&seconds=${opt.seconds}${env}${opt.pad ? '&pad=1' : ''}`;
+            `&seconds=${opt.seconds}&report=1${env}${opt.pad ? '&pad=1' : ''}`;
 await cdp.send('Emulation.setDeviceMetricsOverride',
   { width: +opt.width, height: +opt.height, deviceScaleFactor: 1, mobile: !!opt.pad });
 if (opt.pad)
