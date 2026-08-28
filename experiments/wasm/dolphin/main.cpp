@@ -317,7 +317,13 @@ int main(int argc, char** argv)
   config.graphics.backend = backend;
   config.headless = backend == "Null";
   config.show_fps_in_title = true;
+#ifdef DOLWEB_WEB
+  // The browser build has a real backend; the measurement build deliberately
+  // does not, so a speed figure is never a figure about the audio thread.
+  config.audio.backend = std::getenv("DOLWEB_NO_AUDIO") ? "No Audio Output" : "WebAudio";
+#else
   config.audio.backend = "No Audio Output";
+#endif
   // One thread does the CPU and the GPU unless asked otherwise. Android and iOS
   // both turn the extra thread on because it pays there; in a browser it is
   // worth measuring rather than assuming.

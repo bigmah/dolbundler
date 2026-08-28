@@ -9,6 +9,7 @@
 #include "AudioCommon/AlsaSoundStream.h"
 #include "AudioCommon/CubebStream.h"
 #include "AudioCommon/IOSSoundStream.h"
+#include "AudioCommon/WebSoundStream.h"
 #include "AudioCommon/Mixer.h"
 #include "AudioCommon/NullSoundStream.h"
 #include "AudioCommon/OpenALStream.h"
@@ -43,6 +44,8 @@ static std::unique_ptr<SoundStream> CreateSoundStreamForBackend(std::string_view
     return std::make_unique<PulseAudio>();
   else if (backend == BACKEND_IOSAUDIO && IOSSoundStream::IsValid())
     return std::make_unique<IOSSoundStream>();
+  else if (backend == BACKEND_WEBAUDIO && WebSoundStream::IsValid())
+    return std::make_unique<WebSoundStream>();
   else if (backend == BACKEND_OPENSLES && OpenSLESStream::IsValid())
     return std::make_unique<OpenSLESStream>();
 #ifdef _MSC_VER
@@ -106,6 +109,8 @@ std::string GetDefaultSoundBackend()
 #else
   // Ahead of cubeb because on iOS cubeb is not built at all: its AudioUnit
   // backend cannot compile there.
+  if (WebSoundStream::IsValid())
+    return BACKEND_WEBAUDIO;
   if (IOSSoundStream::IsValid())
     return BACKEND_IOSAUDIO;
   if (CubebStream::IsValid())
@@ -142,6 +147,8 @@ std::vector<std::string> GetSoundBackends()
     backends.emplace_back(BACKEND_OPENSLES);
   if (IOSSoundStream::IsValid())
     backends.emplace_back(BACKEND_IOSAUDIO);
+  if (WebSoundStream::IsValid())
+    backends.emplace_back(BACKEND_WEBAUDIO);
 #ifdef _MSC_VER
   if (WASAPIStream::IsValid())
     backends.emplace_back(BACKEND_WASAPI);

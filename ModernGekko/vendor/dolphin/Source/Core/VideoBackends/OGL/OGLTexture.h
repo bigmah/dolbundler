@@ -96,6 +96,13 @@ private:
   GLuint m_buffer_name;
   size_t m_buffer_size;
   GLsync m_fence = nullptr;
+#ifdef __EMSCRIPTEN__
+  // WebGL2 has no buffer mapping at all. Emscripten emulates the write-only,
+  // invalidating case with a temporary allocation and cannot emulate a readable
+  // one, so a readback maps into this instead and is filled with
+  // glGetBufferSubData. See OGLStagingTexture::Map().
+  std::vector<char> m_shadow;
+#endif
 };
 
 class OGLFramebuffer final : public AbstractFramebuffer

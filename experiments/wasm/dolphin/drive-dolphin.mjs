@@ -97,9 +97,11 @@ cdp.on((m) => {
 const env = (opt.env ? String(opt.env).split(';') : [])
   .map((e) => `&env=${encodeURIComponent(e)}`).join('');
 const url = `http://127.0.0.1:${opt.port}/index.html?backend=${opt.backend}` +
-            `&seconds=${opt.seconds}${env}`;
+            `&seconds=${opt.seconds}${env}${opt.pad ? '&pad=1' : ''}`;
 await cdp.send('Emulation.setDeviceMetricsOverride',
-  { width: +opt.width, height: +opt.height, deviceScaleFactor: 1, mobile: false });
+  { width: +opt.width, height: +opt.height, deviceScaleFactor: 1, mobile: !!opt.pad });
+if (opt.pad)
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
 await cdp.send('Page.navigate', { url });
 await sleep(1500);
 // The page waits for a click so that audio and the module load are user-driven.
@@ -110,6 +112,8 @@ await cdp.eval("document.getElementById('start').click(); 'clicked'");
 const every = opt.shotEvery ? +opt.shotEvery * 1000 : 0;
 let nextShot = every ? Date.now() + every : Infinity;
 let shotIndex = 0;
+const startedAt = Date.now();
+let audioReported = false;
 const deadline = Date.now() + (opt.seconds + 45) * 1000;
 let done = false;
 while (Date.now() < deadline && !done) {
@@ -121,14 +125,34 @@ while (Date.now() < deadline && !done) {
     writeFileSync(name, Buffer.from(png.data, 'base64'));
     console.log(`[shot] ${name}`);
   }
-  // Hold START (control 5, InputOverrider.h) down for a moment every few seconds. An attract loop is menus
-  // and logos, and the scene worth measuring is the one after them.
-  if (opt.press) {
+  // Hold START (control 5, InputOverrider.h) down for a moment every few
+  // seconds, but only while getting through the attract loop: once the game is
+  // running, START pauses it, and a paused game draws a black screen that looks
+  // exactly like a renderer that stopped working.
+  if (opt.press && Date.now() - startedAt < (+opt.press) * 1000) {
     await cdp.eval(`(() => { const c = window.dolweb && window.cwrapSetControl;
       if (!c) return 'no'; c(5, 1); setTimeout(() => c(5, 0), 120); return 'ok'; })()`)
       .catch(() => {});
   }
+  if (opt.audio && !audioReported &&
+      Date.now() - startedAt > (opt.seconds * 1000) * 0.6) {
+    audioReported = true;
+    // While it is running, not after: the producer stops when the guest does,
+    // and a sample taken then measures nothing and looks like silence.
+    await reportAudio();
+  }
   done = lines.some((l) => l.includes('Run() returned'));
+}
+
+async function reportAudio() {
+  const a = await cdp.eval("JSON.stringify(window.audioStats ? audioStats() : null)");
+  await sleep(3000);
+  const b = await cdp.eval("JSON.stringify(window.audioStats ? audioStats() : null)");
+  const x = JSON.parse(a), y = JSON.parse(b);
+  if (!x || !y) console.log('audio: no stats (the worklet never started)');
+  else console.log(`audio: ${y.state}, ${y.contextRate} Hz out / ${y.guestRate} Hz in, ` +
+    `produced ${y.written - x.written} frames and consumed ${y.read - x.read} in 3 s ` +
+    `(${((y.read - x.read) / 3).toFixed(0)}/s against ${y.guestRate} expected)`);
 }
 
 if (opt.cat) {

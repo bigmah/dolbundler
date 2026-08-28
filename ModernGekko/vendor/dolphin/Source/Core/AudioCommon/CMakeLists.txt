@@ -13,6 +13,12 @@ add_library(audiocommon
   WaveFile.h
 )
 
+if(EMSCRIPTEN)
+  # A browser will not call this code from its audio thread, so the direction is
+  # inverted: this fills a ring and an AudioWorklet reads it. See the header.
+  target_sources(audiocommon PRIVATE WebSoundStream.cpp WebSoundStream.h)
+endif()
+
 if(ENABLE_CUBEB)
   message(STATUS "Cubeb found, enabling Cubeb sound backend")
   target_sources(audiocommon PRIVATE

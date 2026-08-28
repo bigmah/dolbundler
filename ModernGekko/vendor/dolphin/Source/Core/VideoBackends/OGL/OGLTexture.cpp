@@ -418,6 +418,10 @@ OGLStagingTexture::~OGLStagingTexture()
 {
   if (m_fence != nullptr)
     glDeleteSync(m_fence);
+#ifdef __EMSCRIPTEN__
+  if (m_map_pointer == m_shadow.data())
+    m_map_pointer = nullptr;
+#endif
   if (m_map_pointer)
   {
     glBindBuffer(GL_PIXEL_PACK_BUFFER, m_buffer_name);
@@ -574,8 +578,20 @@ void OGLStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect,
     // Unmap the buffer before writing when not using persistent mappings.
     if (m_map_pointer)
     {
-      glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-      m_map_pointer = nullptr;
+#ifdef __EMSCRIPTEN__
+      // A Mutable staging texture is mapped through a buffer of ours here, not
+      // through GL, so it has to be unmapped the same way it was mapped.
+      if (m_map_pointer == m_shadow.data())
+      {
+        glBufferSubData(GL_PIXEL_UNPACK_BUFFER, 0, m_buffer_size, m_shadow.data());
+        m_map_pointer = nullptr;
+      }
+      else
+#endif
+      {
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        m_map_pointer = nullptr;
+      }
     }
   }
   else
@@ -630,6 +646,28 @@ bool OGLStagingTexture::Map()
   if (m_map_pointer)
     return true;
 
+#ifdef __EMSCRIPTEN__
+  // WebGL2 has no buffer mapping. Emscripten emulates the one case WebGL can
+  // express -- write the whole range, then upload it -- and returns null for
+  // anything else, which is a staging texture that reads and writes address
+  // zero and a texture upload that silently does nothing. So: an upload maps
+  // through emscripten's emulation with the invalidate bit it insists on, and a
+  // readback maps into a buffer of ours that glGetBufferSubData fills.
+  glBindBuffer(m_target, m_buffer_name);
+  if (m_type == StagingTextureType::Upload)
+  {
+    m_map_pointer = static_cast<char*>(glMapBufferRange(
+        m_target, 0, m_buffer_size, GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT));
+  }
+  else
+  {
+    m_shadow.resize(m_buffer_size);
+    glGetBufferSubData(m_target, 0, m_buffer_size, m_shadow.data());
+    m_map_pointer = m_shadow.data();
+  }
+  glBindBuffer(m_target, 0);
+  return m_map_pointer != nullptr;
+#else
   // Slow path, map the texture, unmap it later.
   GLenum flags;
   if (m_type == StagingTextureType::Readback)
@@ -642,6 +680,7 @@ bool OGLStagingTexture::Map()
   m_map_pointer = static_cast<char*>(glMapBufferRange(m_target, 0, m_buffer_size, flags));
   glBindBuffer(m_target, 0);
   return m_map_pointer != nullptr;
+#endif
 }
 
 void OGLStagingTexture::Unmap()
@@ -649,6 +688,23 @@ void OGLStagingTexture::Unmap()
   // No-op with persistent mapped buffers.
   if (!m_map_pointer || UsePersistentStagingBuffers())
     return;
+
+#ifdef __EMSCRIPTEN__
+  if (m_map_pointer == m_shadow.data())
+  {
+    // A Mutable staging texture may have been written through the shadow; a
+    // Readback one may not, and uploading its contents back would be wrong as
+    // well as wasteful.
+    if (m_type == StagingTextureType::Mutable)
+    {
+      glBindBuffer(m_target, m_buffer_name);
+      glBufferSubData(m_target, 0, m_buffer_size, m_shadow.data());
+      glBindBuffer(m_target, 0);
+    }
+    m_map_pointer = nullptr;
+    return;
+  }
+#endif
 
   glBindBuffer(m_target, m_buffer_name);
   glUnmapBuffer(m_target);

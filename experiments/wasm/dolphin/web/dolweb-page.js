@@ -10,6 +10,11 @@ const SECONDS = params.get('seconds') || '0';
 // ?env=KEY=VALUE&env=KEY2=VALUE2 -- every knob in the emulator is read with
 // getenv(), and a browser has no environment, so they ride in on argv.
 const ENV = params.getAll('env');
+// ?auto=1 starts without a click, and ?report=1 posts progress back to serve.py.
+// Both exist for the same reason: Safari has no headless mode and no way to
+// drive it from outside, so the page has to report on itself.
+const AUTO = params.get('auto') === '1';
+const REPORT = params.get('report') === '1';
 
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
@@ -29,6 +34,27 @@ function log(text) {
 
 function status(text) {
   statusEl.textContent = text;
+}
+
+function report(payload) {
+  if (!REPORT) return;
+  try {
+    fetch('/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ua: navigator.userAgent, ...payload }),
+    });
+  } catch (e) { /* the run matters more than the report */ }
+}
+
+// One report a second is plenty, and the log is the last few lines only: a
+// Dolphin boot is thousands and the point is to see where it stopped.
+if (REPORT) {
+  let ticks = 0;
+  setInterval(() => {
+    const perf = lines.filter((l) => l.startsWith('[perf]')).slice(-3);
+    report({ tick: ++ticks, perf, tail: lines.slice(-8) });
+  }, 5000);
 }
 
 document.getElementById('logtoggle').onclick = () => logEl.classList.toggle('hidden');
@@ -81,9 +107,157 @@ function wireKeyboard(module) {
   addEventListener('keyup', (e) => press(e, false));
 }
 
+// --- the on-screen pad -------------------------------------------------------
+//
+// The same control IDs the keyboard uses, fed the same way. Pointer events
+// rather than touch events so a mouse can exercise it during development, and
+// pointer capture so a finger that slides off a button still releases it --
+// without that a dropped pointerup leaves a button held down forever, which
+// reads as a game that stopped responding.
+
+function wirePad() {
+  const coarse = matchMedia('(pointer: coarse)').matches;
+  if (!coarse && !params.has('pad')) return;
+  document.body.classList.add('pad');
+
+  for (const el of document.querySelectorAll('.btn')) {
+    const control = +el.dataset.control;
+    const set = (down) => {
+      el.classList.toggle('down', down);
+      if (setControl) setControl(control, down ? 1 : 0);
+    };
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      set(true);
+    });
+    const up = (e) => { e.preventDefault(); set(false); };
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  const stick = document.getElementById('stick');
+  const knob = document.getElementById('knob');
+  let stickPointer = null;
+  const moveStick = (e) => {
+    const r = stick.getBoundingClientRect();
+    // Normalised to the circle, clamped to it: a GameCube stick cannot leave
+    // its gate and neither should this.
+    let x = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
+    let y = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
+    const len = Math.hypot(x, y);
+    if (len > 1) { x /= len; y /= len; }
+    knob.style.left = `${33 + x * 33}%`;
+    knob.style.top = `${33 + y * 33}%`;
+    if (setControl) {
+      setControl(CONTROL.STICK_X, x);
+      setControl(CONTROL.STICK_Y, -y);  // screen y grows downward, the stick does not
+    }
+  };
+  stick.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    stickPointer = e.pointerId;
+    stick.setPointerCapture(e.pointerId);
+    moveStick(e);
+  });
+  stick.addEventListener('pointermove', (e) => {
+    if (e.pointerId === stickPointer) { e.preventDefault(); moveStick(e); }
+  });
+  const release = (e) => {
+    if (e.pointerId !== stickPointer) return;
+    e.preventDefault();
+    stickPointer = null;
+    knob.style.left = '33%';
+    knob.style.top = '33%';
+    if (setControl) { setControl(CONTROL.STICK_X, 0); setControl(CONTROL.STICK_Y, 0); }
+  };
+  stick.addEventListener('pointerup', release);
+  stick.addEventListener('pointercancel', release);
+}
+
+// A phone is held in landscape for this, and iOS will not rotate a page that
+// does not ask. Fullscreen has to come from a gesture, so it rides on the first
+// touch rather than on load.
+function wireImmersive() {
+  const enter = async () => {
+    try {
+      if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+        await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+      if (screen.orientation && screen.orientation.lock)
+        await screen.orientation.lock('landscape');
+    } catch (e) { /* iOS Safari refuses both; the page still works */ }
+  };
+  addEventListener('pointerdown', enter, { once: true });
+}
+
+// --- audio -------------------------------------------------------------------
+//
+// The worklet reads the emulator's ring straight out of wasm memory; all this
+// has to do is tell it where. It runs after the module exists because the ring
+// is allocated when the audio backend starts, and it is tolerant of failure:
+// a game with no sound is worth more than a page that does not start.
+
+async function startAudio(module) {
+  try {
+    // The ring is allocated when the audio backend starts, which happens on the
+    // emulator's own thread some way into Runtime::Create -- after this promise
+    // resolved. So wait for it rather than asking once and giving up.
+    let ringPtr = 0;
+    for (let i = 0; i < 240 && !ringPtr; i++) {
+      ringPtr = module._dolweb_audio_ring_ptr();
+      if (!ringPtr) await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!ringPtr) {
+      log('[page] no audio ring after 60 s; the emulator is running without sound');
+      return;
+    }
+    const ctx = new AudioContext({ latencyHint: 'interactive' });
+    await ctx.audioWorklet.addModule('dolweb-audio.js');
+    const node = new AudioWorkletNode(ctx, 'dolweb-audio', {
+      numberOfInputs: 0,
+      outputChannelCount: [2],
+      processorOptions: {
+        memory: module.HEAPU8.buffer,
+        ringPtr,
+        ringFrames: module._dolweb_audio_ring_frames(),
+        readPtr: module._dolweb_audio_read_ptr(),
+        writePtr: module._dolweb_audio_write_ptr(),
+        sampleRate: module._dolweb_audio_sample_rate(),
+      },
+    });
+    node.connect(ctx.destination);
+    // Safari starts a context suspended unless it was created inside a gesture,
+    // and "suspended" here is silence with no error anywhere.
+    if (ctx.state === 'suspended') await ctx.resume();
+    // Both indices count frames forever, so "is the sound actually moving" is
+    // two reads a second apart. Without this the only way to tell a connected
+    // worklet from a working one is to listen.
+    const indices = new Int32Array(module.HEAPU8.buffer);
+    const readIdx = module._dolweb_audio_read_ptr() >> 2;
+    const writeIdx = module._dolweb_audio_write_ptr() >> 2;
+    window.audioStats = () => ({
+      state: ctx.state,
+      contextRate: ctx.sampleRate,
+      guestRate: module._dolweb_audio_sample_rate(),
+      written: Atomics.load(indices, writeIdx) >>> 0,
+      read: Atomics.load(indices, readIdx) >>> 0,
+    });
+    window.dolwebAudio = { ctx, node };
+    log(`[page] audio: ${ctx.state}, context ${ctx.sampleRate} Hz, ` +
+        `guest ${module._dolweb_audio_sample_rate()} Hz`);
+    // A page that loses the gesture (autoplay policy, a background tab) can be
+    // resumed by the next touch.
+    const resume = () => ctx.resume();
+    addEventListener('pointerdown', resume);
+    addEventListener('keydown', resume);
+  } catch (e) {
+    log('[page] audio failed: ' + e.message);
+  }
+}
+
 // --- boot -------------------------------------------------------------------
 
-startBtn.onclick = async () => {
+async function boot() {
   startBtn.disabled = true;
   status('loading module');
 
@@ -91,6 +265,7 @@ startBtn.onclick = async () => {
     log('[page] crossOriginIsolated is false: SharedArrayBuffer is unavailable ' +
         'and the emulator cannot start its threads. Serve with COOP/COEP.');
     status('not cross-origin isolated');
+    report({ phase: 'not-isolated' });
     return;
   }
 
@@ -101,11 +276,23 @@ startBtn.onclick = async () => {
     printErr: log,
     onTitle: (t) => { document.title = t; status(t); },
   });
+  report({ phase: 'module-created' });
   wireKeyboard(module);
+  wirePad();
+  wireImmersive();
+  startAudio(module);
   // Handy from the console and from drive-dolphin.mjs: the user directory is
   // in linear memory, so this is the only way to read what Dolphin wrote there.
   window.dolweb = module;
   window.cat = module.cwrap('dolweb_cat', null, ['string']);
   window.cwrapSetControl = setControl;
   status('running');
-};
+}
+
+startBtn.onclick = boot;
+// Straight away if the document is already up: this script is the last thing in
+// the body, so waiting for `load` is a race with the module's own fetch.
+if (AUTO) {
+  if (document.readyState === 'complete') boot();
+  else addEventListener('load', boot);
+}
