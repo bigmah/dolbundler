@@ -551,6 +551,20 @@ void StaticRecompCore::HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia)
     }
   }
 
+  // Which instructions are actually taking the slow path, and how often. The
+  // slow path is SyncOut + one interpreted step + SyncIn -- two whole register
+  // files copied to execute one instruction -- so a single common opcode here
+  // is worth more than most codegen work. Off unless asked for; the histogram
+  // is printed at shutdown.
+  if (core->m_fallback_histogram_enabled)
+  {
+    const u32 primary = raw >> 26;
+    const u32 key = (primary == 31u || primary == 63u || primary == 59u || primary == 4u)
+                        ? (primary << 16) | ((raw >> 1) & 0x3FFu)
+                        : (primary << 16);
+    ++core->m_fallback_histogram[key];
+  }
+
   // The recompiled segment resumes via the dispatcher at the PC this leaves
   // behind, so this must execute exactly the instruction at cia via
   // Dolphin's interpreter and hand the register state back.

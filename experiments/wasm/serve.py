@@ -29,6 +29,8 @@ do not trust.
 """
 import base64
 import datetime
+import gzip
+import shutil
 import http.server
 import json
 import os
@@ -40,6 +42,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", "8712"))
+CACHE_DIR = os.path.join(HERE, ".gzcache")
 
 
 def make_handler(root, iso_path=None):
@@ -52,7 +55,52 @@ def make_handler(root, iso_path=None):
                 return self.serve_iso()
             if self.headers.get("Range"):
                 return self.serve_range()
+            gz = self.gzipped_path()
+            if gz:
+                return self.serve_gzip(gz)
             return super().do_GET()
+
+        # A phone fetches the module over Wi-Fi, and wasm compresses about four
+        # to one, so this is the difference between a ten-second wait and a
+        # forty-second one. Compressed once and cached beside the file; a
+        # Content-Encoding is transparent to WebAssembly.instantiateStreaming.
+        def gzipped_path(self):
+            path = self.translate_path(self.path)
+            if not path.endswith((".wasm", ".js", ".data")):
+                return None
+            if "gzip" not in self.headers.get("Accept-Encoding", ""):
+                return None
+            if not os.path.isfile(path):
+                return None
+            real = os.path.realpath(path)
+            cache = os.path.join(
+                CACHE_DIR, real.replace(os.sep, "_").lstrip("_") + ".gz")
+            try:
+                if (not os.path.exists(cache) or
+                        os.path.getmtime(cache) < os.path.getmtime(real)):
+                    os.makedirs(CACHE_DIR, exist_ok=True)
+                    with open(real, "rb") as src, gzip.open(cache + ".tmp", "wb",
+                                                            compresslevel=6) as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                    os.replace(cache + ".tmp", cache)
+            except OSError:
+                return None
+            return (path, cache)
+
+        def serve_gzip(self, pair):
+            path, cache = pair
+            size = os.path.getsize(cache)
+            self.send_response(200)
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            with open(cache, "rb") as f:
+                try:
+                    shutil.copyfileobj(f, self.wfile, 1 << 20)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
         def do_HEAD(self):
             if iso_path and self.path.split("?")[0] == "/disc.iso":

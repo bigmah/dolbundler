@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -224,6 +225,9 @@ private:
   bool m_poll_skip_enabled = true;
   u64 m_poll_reads = 0;
   u64 m_poll_yields = 0;
+  // primary<<16 | extended, for the four primaries that have an extended field.
+  bool m_fallback_histogram_enabled = false;
+  std::map<u32, u64> m_fallback_histogram;
 
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;

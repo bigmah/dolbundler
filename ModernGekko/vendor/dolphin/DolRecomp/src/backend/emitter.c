@@ -1650,11 +1650,30 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
     case PPC_OP_DCBI:
-    case PPC_OP_ICBI:
-        fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
-                inst->raw, inst->address);
-        fprintf(out, "    return;\n");
+    case PPC_OP_ICBI: {
+        /* The host has a hook for exactly these -- ctx->cache_control, which
+         * the LLVM backend has always used -- and it does not need the PC
+         * handed back, so the block can carry on. Falling back instead cost a
+         * return to the dispatcher per instruction, and a game that flushes
+         * caches in 32-byte loops does that a lot: Disney skate issues 1.6
+         * million of these a second, and each one was a chassis round trip and
+         * a re-dispatch. */
+        const char* cache_op =
+            inst->op == PPC_OP_DCBST ? "PPC_CACHE_DCBST" :
+            inst->op == PPC_OP_DCBF  ? "PPC_CACHE_DCBF"  :
+            inst->op == PPC_OP_DCBI  ? "PPC_CACHE_DCBI"  : "PPC_CACHE_ICBI";
+        fprintf(out, "    {\n");
+        fprintf(out, "        u32 ea = ");
+        emit_xform_ea(out, inst->rA, inst->rB, false);
+        fprintf(out, ";\n");
+        fprintf(out, "        ppc_cache_control(ctx, %s, ea, 0x%08Xu);\n", cache_op,
+                inst->address);
+        /* dcbi from user mode is a privilege trap, which ppc_cache_control
+         * raises; everything else leaves the CPU state alone. */
+        fprintf(out, "        if (ctx->exception) return;\n");
+        fprintf(out, "    }\n");
         break;
+    }
 
     case PPC_OP_DCBTST:
     case PPC_OP_DCBT:

@@ -36,3 +36,6 @@ web/build-gxr/
 frame-*.png
 ios/build/
 .devcert/
+
+# Cached gzip of the build outputs, made on demand by serve.py.
+.gzcache/

@@ -180,6 +180,14 @@ target_link_options(dolweb PRIVATE
   # A whole recompiled game is tens of megabytes of code; the default table and
   # export handling copes, but the linker needs room for the chunk functions.
   -sALLOW_TABLE_GROWTH=1
+  # WebGL2 for both builds, not only the browser one. The measurement build has
+  # no canvas and never draws, but it links Dolphin's OpenGL backend and the GL
+  # context that times it, and those reference GLES3 entry points that only
+  # exist in the GL library when WebGL2 is on.
+  -sMIN_WEBGL_VERSION=2
+  -sMAX_WEBGL_VERSION=2
+  -sFULL_ES3=1
+  -sGL_ENABLE_GET_PROC_ADDRESS=1
 )
 
 if(DOLWEB_NODE)
@@ -231,9 +239,5 @@ else()
     # emscripten empty.
     "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas,#dolweb-probe"
     -sOFFSCREEN_FRAMEBUFFER=1
-    -sMIN_WEBGL_VERSION=2
-    -sMAX_WEBGL_VERSION=2
-    -sFULL_ES3=1
-    -sGL_ENABLE_GET_PROC_ADDRESS=1
   )
 endif()

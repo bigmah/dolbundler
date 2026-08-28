@@ -16,7 +16,7 @@ import { join } from 'node:path';
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const opt = { seconds: 60, backend: 'OGL', shot: 'frame.png', port: 8712,
+const opt = { seconds: 60, backend: 'OGL', shot: 'frame.png', port: 8712, host: 'http://127.0.0.1',
               width: 960, height: 720, headed: false };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
@@ -96,7 +96,7 @@ cdp.on((m) => {
 
 const env = (opt.env ? String(opt.env).split(';') : [])
   .map((e) => `&env=${encodeURIComponent(e)}`).join('');
-const url = `http://127.0.0.1:${opt.port}/index.html?backend=${opt.backend}` +
+const url = `${opt.host}:${opt.port}/index.html?backend=${opt.backend}` +
             `&seconds=${opt.seconds}${env}${opt.pad ? '&pad=1' : ''}`;
 await cdp.send('Emulation.setDeviceMetricsOverride',
   { width: +opt.width, height: +opt.height, deviceScaleFactor: 1, mobile: !!opt.pad });

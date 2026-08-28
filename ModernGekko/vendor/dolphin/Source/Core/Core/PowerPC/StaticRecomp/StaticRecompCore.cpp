@@ -150,6 +150,7 @@ void StaticRecompCore::Init()
   g_static_recomp_core = this;
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
+  m_fallback_histogram_enabled = std::getenv("STATICRECOMP_FALLBACK_HISTOGRAM") != nullptr;
   const char* poll_skip = std::getenv("STATICRECOMP_POLL_SKIP");
   m_poll_skip_enabled = !poll_skip || poll_skip[0] != '0';
   m_poll_next_site = 0;
@@ -242,6 +243,19 @@ void StaticRecompCore::Shutdown()
                (unsigned long long)m_reverify_events, (unsigned long long)m_bursts,
                (unsigned long long)m_charged_cycles, (unsigned long long)m_poll_reads,
                (unsigned long long)m_poll_yields);
+  if (!m_fallback_histogram.empty())
+  {
+    std::vector<std::pair<u32, u64>> ops(m_fallback_histogram.begin(),
+                                         m_fallback_histogram.end());
+    std::sort(ops.begin(), ops.end(),
+              [](const auto& l, const auto& r) { return l.second > r.second; });
+    for (std::size_t i = 0; i < std::min<std::size_t>(ops.size(), 12); ++i)
+    {
+      std::fprintf(stderr, "[staticrecomp] fallback op primary=%u extended=%u  %llu\n",
+                   ops[i].first >> 16, ops[i].first & 0xFFFFu,
+                   static_cast<unsigned long long>(ops[i].second));
+    }
+  }
   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
                                                     m_dispatch_samples.end());
   std::sort(dispatch_samples.begin(), dispatch_samples.end(),

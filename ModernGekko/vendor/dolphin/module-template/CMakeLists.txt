@@ -263,10 +263,13 @@ if(NOT DEFINED RECOMPCORE_MODULE_OPT_LEVEL)
   set(RECOMPCORE_MODULE_OPT_LEVEL "2" CACHE STRING
       "Optimization level for generated module translation units (0, 1, 2, or 3)")
 endif()
-set_property(CACHE RECOMPCORE_MODULE_OPT_LEVEL PROPERTY STRINGS 0 1 2 3)
-if(NOT RECOMPCORE_MODULE_OPT_LEVEL MATCHES "^[0-3]$")
+# s and z are here because a whole game's recompiled code is the binary: on the
+# wasm target the module is 91.6 MB of a 96 MB module, so what it costs to
+# compile for size instead of speed is a question worth being able to ask.
+set_property(CACHE RECOMPCORE_MODULE_OPT_LEVEL PROPERTY STRINGS 0 1 2 3 s z)
+if(NOT RECOMPCORE_MODULE_OPT_LEVEL MATCHES "^[0-3sz]$")
   message(FATAL_ERROR
-    "RECOMPCORE_MODULE_OPT_LEVEL must be one of 0, 1, 2, or 3")
+    "RECOMPCORE_MODULE_OPT_LEVEL must be one of 0, 1, 2, 3, s, or z")
 endif()
 if(RECOMPCORE_MODULE_ENABLE_IPO AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   include(CheckIPOSupported)
@@ -296,6 +299,8 @@ endif()
 if(MSVC)
   if(RECOMPCORE_MODULE_OPT_LEVEL STREQUAL "0")
     target_compile_options(${MODULE_NAME} PRIVATE /Od /fp:strict)
+  elseif(RECOMPCORE_MODULE_OPT_LEVEL MATCHES "^[sz]$")
+    target_compile_options(${MODULE_NAME} PRIVATE /O1 /fp:strict)
   else()
     target_compile_options(${MODULE_NAME} PRIVATE /O2 /fp:strict)
   endif()
