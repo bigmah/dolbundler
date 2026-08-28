@@ -27,6 +27,16 @@ IPO="${DOLWEB_MODULE_IPO:-OFF}"
 # same reason as the module's own IPO: iterate first, then measure whether it
 # is worth the link time.
 LTO="${DOLWEB_LTO:-OFF}"
+# wasm SIMD is off, and --simd does not currently work. It is a compile flag, so
+# it reaches xxhash.h, which then takes its wasm SIMD path by including
+# <arm_neon.h> -- SIMDe on this toolchain -- from inside its own `extern "C" {`,
+# where SIMDe's C++ headers cannot be declared. Three attempts at working around
+# that failed (XXH_VECTOR does not gate the include, pre-including
+# <emscripten.h> only moves the error to libc++, and the function-like
+# XXH_HAS_INCLUDE escape did not propagate), and the gain is unproven: the guest
+# kernels measured identical with and without it, and with the renderer costing
+# almost nothing there is no texture-decode wall for it to move either.
+SIMD="${DOLWEB_SIMD:-}"
 EXTRA=()
 
 while [ $# -gt 0 ]; do
@@ -38,6 +48,7 @@ while [ $# -gt 0 ]; do
     --opt) OPT="$2"; shift 2 ;;
     --ipo) IPO=ON; shift ;;
     --lto) LTO=ON; shift ;;
+    --simd) SIMD="-msimd128"; shift ;;
     -D*) EXTRA+=("$1"); shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -76,8 +87,8 @@ export CMAKE_NINJA_FORCE_RESPONSE_FILE=1
 # the cause.
 emcmake cmake -S "$HERE" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS="-pthread" \
-  -DCMAKE_CXX_FLAGS="-pthread" \
+  -DCMAKE_C_FLAGS="-pthread $SIMD" \
+  -DCMAKE_CXX_FLAGS="-pthread $SIMD" \
   -DENABLE_GENERIC=ON \
   -DENABLE_QT=OFF -DENABLE_NOGUI=OFF -DENABLE_TESTS=OFF \
   -DENABLE_VULKAN=OFF -DENABLE_SDL=OFF -DUSE_MGBA=OFF \
