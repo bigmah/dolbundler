@@ -686,8 +686,17 @@ bool PopulateConfig(GLContext* m_main_gl_context)
                                                g_ogl_config.bSupportsImageLoadStore;
 
   // Background compiling is supported only when shared contexts aren't broken.
+  // WebGL has no shared contexts at all, so every worker the async compiler
+  // starts fails in WorkerThreadInitMainThread and panics -- on a phone that is
+  // a dialog over the game before the first frame. Saying so up front also
+  // takes GetShaderPrecompilerThreads() to zero, so the cache precompile runs
+  // on the thread that owns the context instead of not at all.
+#ifdef __EMSCRIPTEN__
+  g_backend_info.bSupportsBackgroundCompiling = false;
+#else
   g_backend_info.bSupportsBackgroundCompiling =
       !DriverDetails::HasBug(DriverDetails::BUG_SHARED_CONTEXT_SHADER_COMPILATION);
+#endif
 
   // Program binaries are supported on GL4.1+, ARB_get_program_binary, or ES3.
   if (supports_glsl_cache)

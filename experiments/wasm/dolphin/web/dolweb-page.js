@@ -5,8 +5,8 @@
 
 const params = new URLSearchParams(location.search);
 const GAME = params.get('game') || 'game';
-const BACKEND = params.get('backend') || 'OGL';
-const SECONDS = params.get('seconds') || '0';
+let BACKEND = params.get('backend') || 'OGL';
+let SECONDS = params.get('seconds') || '0';
 // ?env=KEY=VALUE&env=KEY2=VALUE2 -- every knob in the emulator is read with
 // getenv(), and a browser has no environment, so they ride in on argv.
 const ENV = params.getAll('env');
@@ -15,6 +15,34 @@ const ENV = params.getAll('env');
 // drive it from outside, so the page has to report on itself.
 const AUTO = params.get('auto') === '1';
 const REPORT = params.get('report') === '1';
+
+// --- ?ab=N -------------------------------------------------------------------
+//
+// Null against OpenGL on the same scene is the one comparison that says whether
+// a build is held back by the CPU or by the renderer, and it has to be run on
+// the device: this Mac's answer (they measure the same) says nothing about a
+// phone with a different GPU and a different browser. But the two runs need the
+// same scene and the same session, and a phone cannot be driven from outside.
+//
+// So the page runs both itself: Null for N seconds of *running* time -- the
+// budget starts at the first frame, not at load, because boot on a phone takes
+// longer than the measurement does -- then it reloads into OpenGL and does it
+// again. Reports carry `ab` so the two halves separate afterwards.
+const AB = params.get('ab') ? +params.get('ab') : 0;
+const AB_PHASE = +(params.get('abphase') || '1');
+const AB_BACKEND = AB_PHASE === 1 ? 'Null' : 'OGL';
+// The window, in guest seconds since boot. It starts well past the logos so
+// that both halves measure the game rather than a fade.
+const AB_FROM = +(params.get('abfrom') || '45');
+const T0 = performance.now();
+if (AB) {
+  BACKEND = AB_BACKEND;
+  SECONDS = '0';  // the page owns the budget here
+  // Without this both halves read 100% and the comparison says nothing: a
+  // throttled build with headroom is indistinguishable from one with none.
+  if (!ENV.some((e) => e.startsWith('MODERNGEKKO_EMULATION_SPEED')))
+    ENV.push('MODERNGEKKO_EMULATION_SPEED=0');
+}
 
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
@@ -36,6 +64,7 @@ function log(text) {
   logEl.textContent = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
   console.log(text);
+  if (AB) abWatch(text);
 }
 
 function status(text) {
@@ -48,7 +77,9 @@ function report(payload) {
     fetch('/report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ua: navigator.userAgent, ...payload }),
+      body: JSON.stringify({ ua: navigator.userAgent,
+                             ms: Math.round(performance.now() - T0),
+                             ...(AB ? { ab: AB_BACKEND } : {}), ...payload }),
     });
   } catch (e) { /* the run matters more than the report */ }
 }
@@ -73,6 +104,68 @@ if (REPORT) {
 }
 
 document.getElementById('logtoggle').onclick = () => logEl.classList.toggle('hidden');
+
+// The A/B run. The window is anchored to the guest's own clock, not to wall
+// time: Null reaches a given moment of the attract loop sooner than OpenGL
+// does, so equal wall-clock windows measure different scenes and the answer is
+// whatever the game happened to be showing. Equal *tick* ranges are the same
+// scene by construction, which is the discipline a savestate would normally
+// provide -- and savestates do not load on wasm32.
+//
+// Speed is then computed here rather than read off the emulator: guest seconds
+// covered over wall seconds spent is exactly the question, with no smoothing.
+let abState = 0;  // 0 before the window, 2 inside it, 3 done
+let abTps = 0, abStartTicks = 0, abStartWall = 0;
+const abSamples = [];
+
+function abWatch(text) {
+  if (abState === 3) return;
+  const clk = /guest clock (\d+) Hz/.exec(text);
+  if (clk) { abTps = +clk[1]; return; }
+  const m = /^\[perf\].*?(\d+)% speed.*cpu=0 ticks=(\d+)/.exec(text);
+  if (!m || !abTps) return;
+  const ticks = +m[2];
+  const from = abTps * AB_FROM;
+  const to = abTps * (AB_FROM + AB);
+  if (abState === 0) {
+    if (ticks < from) return;
+    abState = 2;
+    abStartTicks = ticks;
+    abStartWall = performance.now();
+    log(`[page] ab: ${AB_BACKEND} window open at guest ${(ticks / abTps).toFixed(1)} s`);
+    return;
+  }
+  abSamples.push(+m[1]);
+  if (ticks >= to) abFinish(ticks);
+}
+
+function abFinish(ticks) {
+  abState = 3;
+  const guest = (ticks - abStartTicks) / abTps;
+  const wall = (performance.now() - abStartWall) / 1000;
+  const s = abSamples.slice().sort((a, b) => a - b);
+  const at = (q) => (s.length ? s[Math.min(s.length - 1, Math.floor(s.length * q))] : 0);
+  const result = {
+    phase: 'ab-result', abBackend: AB_BACKEND,
+    speed: +(100 * guest / wall).toFixed(1),   // the number: guest seconds per wall second
+    guest: +guest.toFixed(1), wall: +wall.toFixed(1),
+    window: `${AB_FROM}-${AB_FROM + AB}s`,
+    samples: s.length, median: at(0.5), p25: at(0.25), p75: at(0.75),
+    min: s[0] ?? 0, max: s[s.length - 1] ?? 0,
+  };
+  log('[page] ab: ' + JSON.stringify(result));
+  report(result);
+  if (AB_PHASE === 1) {
+    const next = new URL(location.href);
+    next.searchParams.set('abphase', '2');
+    next.searchParams.set('auto', '1');
+    status('ab: reloading for OpenGL');
+    // A beat for the report to leave before the page goes away.
+    setTimeout(() => location.replace(next.toString()), 1500);
+  } else {
+    status(`ab done: ${result.speed}%`);
+  }
+}
 
 // --- input ------------------------------------------------------------------
 //

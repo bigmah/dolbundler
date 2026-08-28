@@ -6,6 +6,7 @@
     python3 serve.py game           # the GXRuntime client (web/)
     python3 serve.py dolphin        # Dolphin in wasm (dolphin/web/)
     python3 serve.py bench --lan    # listen on every interface, for a phone
+    python3 serve.py bench --lan --access   # log every request, to time a boot
 
 `game` also accepts --iso <path>, which mounts a disc image at /disc.iso with
 byte-range support.
@@ -33,6 +34,7 @@ import gzip
 import shutil
 import http.server
 import json
+import time
 import os
 import socket
 import socketserver
@@ -90,11 +92,25 @@ def make_handler(root, iso_path=None):
         def serve_gzip(self, pair):
             path, cache = pair
             size = os.path.getsize(cache)
+            # An ETag turns a reload from a 96 MB transfer into a 304. That is
+            # the difference between iterating on a phone and not: without a
+            # validator "no-cache" means refetch, and the A/B run reloads the
+            # page on purpose halfway through. The tag is the source file's
+            # mtime and size, so a rebuild invalidates it and nothing else does.
+            st = os.stat(path)
+            etag = '"%x-%x"' % (int(st.st_mtime), st.st_size)
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header("Content-Type", self.guess_type(path))
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
             self.end_headers()
             with open(cache, "rb") as f:
                 try:
@@ -202,8 +218,22 @@ def make_handler(root, iso_path=None):
             # is why the harness is served over HTTP rather than from a bundle.
             self.send_header("Cross-Origin-Opener-Policy", "same-origin")
             self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
-            self.send_header("Cache-Control", "no-store")
+            # Disc contents do not change while the harness is up, and a phone
+            # that has to re-fetch them on every reload cannot be iterated on.
+            # Everything else stays uncacheable, and anything that already set
+            # its own Cache-Control (the gzip path, with its ETag) keeps it.
+            if not getattr(self, "_cache_set", False):
+                cacheable = (self.path.startswith("/game/") and
+                             not self.path.endswith(".manifest"))
+                self.send_header("Cache-Control",
+                                 "public, max-age=86400" if cacheable else "no-store")
             super().end_headers()
+            if ACCESS_LOG:
+                print("%.3f %s %s %s %s %s"
+                      % (time.time() - T_START, self.client_address[0],
+                         self.command, self.path, getattr(self, "_status", "-"),
+                         getattr(self, "_sent_length", "-")), file=sys.stderr)
+                sys.stderr.flush()
 
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
@@ -227,6 +257,27 @@ def make_handler(root, iso_path=None):
             sys.stdout.flush()
             self.send_response(204)
             self.end_headers()
+
+        # Quiet by default -- a boot is thousands of requests and the reports
+        # are the interesting output. --access turns it on, which is how a
+        # phone's boot gets taken apart: over Wi-Fi a round trip costs what a
+        # whole file costs on this machine, so the count and the shape of the
+        # requests is the thing to look at, not the bytes.
+        # Content-Length is the number that matters -- a boot's cost is bytes
+        # over Wi-Fi, and a request count says nothing about them when one GET
+        # can be 64 KB or 85 MB. The line is written from end_headers because
+        # the base class logs from send_response, before any header exists.
+        def send_response_only(self, code, message=None):
+            self._status = code
+            super().send_response_only(code, message)
+
+        def send_header(self, key, value):
+            k = key.lower()
+            if k == "content-length":
+                self._sent_length = value
+            if k == "cache-control":
+                self._cache_set = True
+            super().send_header(key, value)
 
         def log_message(self, *a):
             pass
@@ -308,7 +359,13 @@ def dev_certificate(addresses):
     return cert, key
 
 
+ACCESS_LOG = False
+T_START = time.time()
+
+
 def main(argv):
+    global ACCESS_LOG
+    ACCESS_LOG = "--access" in argv
     which = argv[1] if len(argv) > 1 else "spike"
     if which not in ("spike", "bench", "game", "dolphin"):
         print(__doc__)

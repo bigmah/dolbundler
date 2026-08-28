@@ -26,8 +26,10 @@
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
 #include "Core/Core.h"
+#include "Core/CoreTiming.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/CPU.h"
+#include "Core/HW/SystemTimers.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
@@ -84,7 +86,27 @@ std::string ReadDiscId(const std::string& game_root)
 // server writes next to the game.
 bool MountFetchTree(const std::string& base_url, const std::string& mount_point)
 {
-  backend_t backend = wasmfs_create_fetch_backend(base_url.c_str(), 0);
+  // The chunk size is the whole story for how a phone boots. Emscripten's
+  // fetch backend downloads a file *in full* on first touch unless it is more
+  // than twice the chunk size -- and the default chunk is 16 MB, so with a
+  // 1.34 GB disc of mostly-small files, Dolphin building the directory FST
+  // pulls the entire disc over Wi-Fi before the CPU starts: 189 files, ~1 GB,
+  // sixty to a hundred seconds, and all of it resident in the JS heap where a
+  // phone's jetsam limit is waiting. A small chunk turns the same walk into a
+  // first-touch read per file: 24 MB at 128 KB, 48 MB at 256 KB.
+  //
+  // Smaller is not free -- a game that streams then pays a round trip per
+  // chunk -- so it is a knob, and the default is the compromise measured on
+  // this disc.
+  uint32_t fetch_chunk = 256 * 1024;
+  if (const char* env = std::getenv("DOLWEB_FETCH_CHUNK"))
+  {
+    const long kb = std::strtol(env, nullptr, 10);
+    if (kb > 0)
+      fetch_chunk = static_cast<uint32_t>(kb) * 1024;
+  }
+  std::printf("[dolweb] fetch chunk %u KB\n", fetch_chunk / 1024);
+  backend_t backend = wasmfs_create_fetch_backend(base_url.c_str(), fetch_chunk);
   if (!backend)
   {
     std::printf("[dolweb] fetch backend failed for %s\n", base_url.c_str());
@@ -214,6 +236,12 @@ void StartPerfLog(double interval_seconds)
   if (interval_seconds <= 0.0)
     return;
   std::thread([interval_seconds] {
+    {
+      auto& system = Core::System::GetInstance();
+      std::printf("[dolweb] guest clock %u Hz\n",
+                  system.GetSystemTimers().GetTicksPerSecond());
+      std::fflush(stdout);
+    }
     while (s_running.load())
     {
       std::this_thread::sleep_for(
@@ -225,10 +253,16 @@ void StartPerfLog(double interval_seconds)
       // pc as well as speed: a boot that stops making progress reports 0%
       // exactly like a boot that never started, and the guest PC is the one
       // thing that tells the two apart without a debugger.
-      std::printf("[perf] %.1f fps  %.0f%% speed  pc=0x%08x lr=0x%08x cpu=%d\n",
+      // ticks is the guest's own clock, and it is here so that two runs can be
+      // compared over the same guest interval rather than the same wall-clock
+      // one. A GameCube game's attract loop is the same every boot, so equal
+      // tick ranges mean equal scenes -- which is the only way to put Null next
+      // to OpenGL honestly when savestates will not load on this target.
+      std::printf("[perf] %.1f fps  %.0f%% speed  pc=0x%08x lr=0x%08x cpu=%d ticks=%llu\n",
                   metrics.GetFPS(), metrics.GetSpeed() * 100.0,
                   system.GetPPCState().pc, system.GetPPCState().spr[SPR_LR],
-                  static_cast<int>(system.GetCPU().GetState()));
+                  static_cast<int>(system.GetCPU().GetState()),
+                  static_cast<unsigned long long>(system.GetCoreTiming().GetTicks()));
       std::fflush(stdout);
     }
   }).detach();

@@ -105,8 +105,11 @@ cdp.on((m) => {
 
 const env = (opt.env ? String(opt.env).split(';') : [])
   .map((e) => `&env=${encodeURIComponent(e)}`).join('');
+// --extra passes query parameters straight through, which is how the page's own
+// modes (?ab=N) are reached without teaching this driver about each of them.
+const extra = opt.extra ? `&${String(opt.extra).replace(/^&/, '')}` : '';
 const url = `${opt.host}:${opt.port}/index.html?backend=${opt.backend}` +
-            `&seconds=${opt.seconds}&report=1${env}${opt.pad ? '&pad=1' : ''}`;
+            `&seconds=${opt.seconds}&report=1${env}${opt.pad ? '&pad=1' : ''}${extra}`;
 await cdp.send('Emulation.setDeviceMetricsOverride',
   { width: +opt.width, height: +opt.height, deviceScaleFactor: 1, mobile: !!opt.pad });
 if (opt.pad)
