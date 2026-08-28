@@ -135,6 +135,36 @@ static void* EmuThreadTrampoline(void* raw)
 }
 #endif
 
+#ifdef __EMSCRIPTEN__
+// Start a thread that will own the browser's canvas.
+//
+// A canvas can be handed to exactly one thread and only at pthread_create, and
+// the thread that has to have it is whichever one initialises the video backend
+// -- the emulation thread in single core, a separate "Video thread" in dual.
+// Get that wrong and there is no second chance: the canvas has already left the
+// browser's main thread, so even the proxied fallback has nothing to create a
+// context from, and the failure reads as "Failed to initialize video backend!"
+// with nothing to say why.
+//
+// Returns false if the thread could not be started at all; a canvas that could
+// not be transferred is not a failure, because a build linked without
+// OFFSCREENCANVAS_SUPPORT still gets a working, proxied context.
+static bool StartCanvasOwningThread(pthread_t* thread, void* (*entry)(void*), void* arg)
+{
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  // Named the same way the page and GLContextEmscripten name it.
+  emscripten_pthread_attr_settransferredcanvases(&attr, "#canvas");
+  int rc = pthread_create(thread, &attr, entry, arg);
+  pthread_attr_destroy(&attr);
+  if (rc == 0)
+    return true;
+  WARN_LOG_FMT(BOOT, "Could not hand the canvas to the rendering thread ({}); "
+                     "GL calls will be proxied and slow.", rc);
+  return pthread_create(thread, nullptr, entry, arg) == 0;
+}
+#endif
+
 static bool EmuThreadJoinable()
 {
 #ifdef __EMSCRIPTEN__
@@ -304,32 +334,18 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
 #ifdef __EMSCRIPTEN__
   {
     auto* args = new EmuThreadArgs{&system, std::move(boot), prepared_wsi};
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    // Named the same way the page and GLContextEmscripten name it. If the
-    // calling thread does not hold the canvas -- which is what happens when the
-    // build was linked without OFFSCREENCANVAS_SUPPORT -- pthread_create fails
-    // and the plain thread below still gets a working, proxied context.
-    emscripten_pthread_attr_settransferredcanvases(&attr, "#canvas");
-    const int rc = pthread_create(&s_emu_pthread, &attr, EmuThreadTrampoline, args);
-    pthread_attr_destroy(&attr);
-    if (rc == 0)
+    // Always to the emulation thread, even in dual core where it is not the
+    // thread that renders: a canvas can only move at pthread_create and only
+    // from the thread that currently holds it, so reaching the video thread
+    // means passing through the thread that creates it. This is the first of
+    // those two hops; GetInitializedVideoGuard() makes the second.
+    if (!StartCanvasOwningThread(&s_emu_pthread, EmuThreadTrampoline, args))
     {
-      s_emu_pthread_running = true;
-      return true;
+      delete args;
+      return false;
     }
-    WARN_LOG_FMT(BOOT, "Emulation thread could not take the canvas ({}); "
-                       "GL calls will be proxied and slow.", rc);
-    boot = std::move(args->boot);
-    prepared_wsi = args->wsi;
-    delete args;
-    if (pthread_create(&s_emu_pthread, nullptr, EmuThreadTrampoline,
-                       new EmuThreadArgs{&system, std::move(boot), prepared_wsi}) == 0)
-    {
-      s_emu_pthread_running = true;
-      return true;
-    }
-    return false;
+    s_emu_pthread_running = true;
+    return true;
   }
 #else
   s_emu_thread = std::thread(EmuThread, std::ref(system), std::move(boot), prepared_wsi);
@@ -537,8 +553,7 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
   {
     std::promise<bool> init_from_thread;
 
-    // Spawn the GPU thread.
-    std::thread gpu_thread{[&] {
+    const auto gpu_body = [&] {
       Common::SetCurrentThreadName("Video thread");
 
       const bool is_init = init_video();
@@ -551,7 +566,45 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
       INFO_LOG_FMT(CONSOLE, "{}", StopMessage(false, "Video Loop Ended"));
 
       deinit_video();
-    }};
+    };
+
+#ifdef __EMSCRIPTEN__
+    // This is the thread that initialises the video backend in dual core, so
+    // this is the thread the browser's canvas has to belong to. std::thread
+    // cannot carry a pthread attribute, so it is a pthread here; the lambda
+    // outlives this scope only until the join below, which every path performs.
+    pthread_t gpu_pthread{};
+    // The closure has to outlive this function: the guard returned below is
+    // held by the caller, and the thread runs deinit_video() long after
+    // GetInitializedVideoGuard has returned. std::thread copies it; a pthread
+    // does not, so the thread owns a copy and destroys it on the way out.
+    // `gpu_body` is const-qualified as a local `const auto`, and a pthread
+            // argument is a plain void*.
+            auto* gpu_closure = new std::remove_const_t<decltype(gpu_body)>(gpu_body);
+    auto* gpu_entry = +[](void* raw) -> void* {
+      using Body = std::remove_const_t<decltype(gpu_body)>;
+      std::unique_ptr<Body> body(static_cast<Body*>(raw));
+      (*body)();
+      return nullptr;
+    };
+    if (!StartCanvasOwningThread(&gpu_pthread, gpu_entry, gpu_closure))
+    {
+      delete gpu_closure;
+      return ReturnType{};
+    }
+    if (init_from_thread.get_future().get())
+    {
+      return std::make_unique<GuardType>([&, gpu_pthread]() mutable {
+        INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "Wait for Video Loop to exit ..."));
+        system.GetFifo().ExitGpuLoop();
+        pthread_join(gpu_pthread, nullptr);
+        INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "GPU thread stopped."));
+      });
+    }
+    pthread_join(gpu_pthread, nullptr);
+    return ReturnType{};
+#else
+    std::thread gpu_thread{gpu_body};
 
     if (init_from_thread.get_future().get())
     {
@@ -565,6 +618,7 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
     }
 
     gpu_thread.join();
+#endif
   }
   else  // SingleCore mode
   {
