@@ -4,6 +4,38 @@
 plan, not a result: nothing below has been built. What has been built is
 recorded in the "Already true" section, with commits.*
 
+## The objective
+
+**Disney skate at full speed in Safari on the iPhone, with nothing installed,
+by doing to the wasm target what was already done to the ARM64 one.**
+
+The two targets have the same defining constraint -- *no JIT allowed* -- and
+that constraint is what shaped the iOS solution, so the shape transfers:
+
+| | iOS | wasm |
+|---|---|---|
+| guest CPU | PPC recompiled ahead of time to ARM64 | PPC recompiled ahead of time to wasm |
+| everything else | Dolphin, `ENABLE_GENERIC` (no JIT) | the same, now proven to build and run |
+| how the module attaches | statically linked before signing, `AttachedDescriptor` | statically linked into the binary, `AttachedDescriptor` |
+| guest memory | software-translated offset into a plain buffer | the same -- there is no fastmem on either |
+| fallback for uncovered code | the plain interpreter | the same |
+
+The last row is the same in a way that hurts more here: see "What the fallback
+becomes".
+
+**One correction to the received story.** The PGO in `ios/PERFORMANCE.md` was
+applied to the *DolVM interpreter* (`-fprofile-instr-use=.../dolvm.profdata`,
+`MODERNGEKKO_DOLVM_PGO_GENERATE`), and DolVM was deleted from the tree on
+2026-08-26. It is not what made Disney skate fast. What did: the LLVM AOT
+backend, plus **chunk size** (1024 -> 64 was +60% throughput and -66% .text,
+and on GEXE52 specifically took a matched run from 71.8% to 105.4-106.9% of
+realtime), plus inlining FP arithmetic that used to go through `cpu.c` helper
+calls. So the lever to port is *codegen shape*, not interpreter PGO.
+
+PGO does become interesting again here, but pointed somewhere new: at the
+generated module and at Dolphin itself, both of which clang can instrument for
+wasm. That is a later step, after the module is attached and measured.
+
 ## The question
 
 Dolphin now runs in WebAssembly, but on its **PowerPC interpreter** — and that
