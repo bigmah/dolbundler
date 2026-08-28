@@ -318,9 +318,14 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
 static const u32* g_chunk_starts = NULL;
 static u32 g_chunk_count = 0;
 
-void emit_set_chunk_table(const u32* starts, u32 count) {
+// Whether a direct call asks the chassis's gate first. Off means the old
+// opt-in benchmark mode, which skips the SMC guard.
+static bool g_gated_calls;
+
+void emit_set_chunk_table(const u32* starts, u32 count, bool gated) {
     g_chunk_starts = count ? starts : NULL;
     g_chunk_count = count ? count : 0;
+    g_gated_calls = gated;
 }
 
 static bool g_hle_outcalls;
@@ -342,12 +347,15 @@ void emit_set_hle_local_calls(bool enabled) {
     g_hle_local_calls = enabled;
 }
 
-// The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
-// the text sections but the first one does not start on the common stride, so
-// this binary-searches rather than dividing.
-static u32 chunk_start_for(u32 addr) {
+// The index of the chunk whose func_<start>() covers `addr`, or -1 if none
+// does. Chunks tile the text sections but the first one does not start on the
+// common stride, so this binary-searches rather than dividing -- which is also
+// why the caller must hand this table in sorted, and why the index it returns
+// is the chassis's chunk index: gen_module_tables.py builds chunk_ranges from
+// the sorted func_ declarations, and the gate's chunk_open runs parallel to it.
+static int chunk_index_for(u32 addr) {
     if (!g_chunk_starts || !g_chunk_count)
-        return 0;
+        return -1;
     u32 lo = 0, hi = g_chunk_count;
     while (lo < hi) {
         u32 mid = lo + (hi - lo) / 2u;
@@ -356,34 +364,56 @@ static u32 chunk_start_for(u32 addr) {
         else
             hi = mid;
     }
-    return lo ? g_chunk_starts[lo - 1u] : 0;
+    return lo ? (int)(lo - 1u) : -1;
+}
+
+static u32 chunk_start_for(u32 addr) {
+    int index = chunk_index_for(addr);
+    return index < 0 ? 0u : g_chunk_starts[index];
 }
 
 
 // A cross-chunk `bl` whose target chunk is known: call it directly instead of
 // returning to the chassis. The chassis round trip costs two rel-section scans,
 // two IsHostCallAddress hash lookups, a ModManager dispatch and a downcount
-// flush, none of which a same-module call needs.
+// flush, none of which a same-module call needs. The SDK's leaf functions make
+// this worth having on its own: OSDisableInterrupts is five instructions, and a
+// third of GEXE52's dispatches were the round trips into and out of that shape.
+//
+// What makes it *safe* rather than merely fast is the gate.
+// dolrecomp_native_gate_allows() asks the chassis the same three questions it
+// would have asked itself before dispatching -- is that chunk still verified
+// against guest RAM and unhooked, is there budget left in the timing slice, is
+// an exception pending -- and any "no" takes the plain return. Without it a
+// direct call skips the chassis's SMC guard, which is what "unsafe" in
+// DOLRECOMP_UNSAFE_DIRECT_CALLS refers to.
 //
 // Resume inline only if the callee came back to the instruction after the call.
 // Any other pc means it stopped early -- budget exhausted, an exception, a
 // tail-call elsewhere -- and only the chassis knows what to do next.
 //
-// The prototype is declared at block scope so this needs no header plumbing;
-// the definition lives in another translation unit and the linker resolves it.
+// The prototypes are declared at block scope so this needs no header plumbing;
+// the definitions live in other translation units and the linker resolves them.
 static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
                                   u32 func_start, u32 func_end) {
     u32 continuation = inst->address + 4u;
-    u32 target_chunk = chunk_start_for(inst->branch_target);
-    if (!target_chunk)
+    int target_index = chunk_index_for(inst->branch_target);
+    if (target_index < 0)
         return false;
+    u32 target_chunk = g_chunk_starts[target_index];
     // Without a local continuation label there is nothing to resume into, so
     // the call would buy nothing over the plain return.
     if (!branch_target_is_local(func_start, func_end, continuation))
         return false;
 
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
-    fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+    if (g_gated_calls) {
+        fprintf(out, "            bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index);\n");
+        fprintf(out, "            if (dolrecomp_native_gate_allows(ctx, %uu) && dolrecomp_call_enter()) {\n",
+                (unsigned)target_index);
+    } else {
+        fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+    }
     fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
     fprintf(out, "                func_%08X(ctx);\n", target_chunk);
     fprintf(out, "                dolrecomp_call_leave();\n");

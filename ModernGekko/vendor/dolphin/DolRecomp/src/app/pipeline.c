@@ -1213,15 +1213,39 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             emit_set_hle_local_calls(true);
         }
 
+        // Two modes. DOLRECOMP_DIRECT_CALLS asks the chassis's dispatch gate
+        // before following a call, which is what the chassis would have checked
+        // itself, so it keeps the SMC guard and the timing slice exact.
+        // DOLRECOMP_UNSAFE_DIRECT_CALLS is the older benchmark mode that does
+        // not, and is what the "unsafe" in its name is about.
+        const char* gated = getenv("DOLRECOMP_DIRECT_CALLS");
         const char* direct = getenv("DOLRECOMP_UNSAFE_DIRECT_CALLS");
+        const bool want_gated = gated && strcmp(gated, "1") == 0;
+        const bool want_ungated = direct && strcmp(direct, "1") == 0;
         u32* chunk_starts = NULL;
-        if (direct && strcmp(direct, "1") == 0) {
-            printf("  unsafe cross-chunk direct calls enabled\n");
+        if (want_gated || want_ungated) {
+            printf("  cross-chunk direct calls enabled (%s)\n",
+                   want_gated ? "gated" : "UNSAFE, no gate");
             chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
             if (chunk_starts) {
                 for (u32 i = 0; i < funcs.count; ++i)
                     chunk_starts[i] = funcs.ranges[i].start;
-                emit_set_chunk_table(chunk_starts, funcs.count);
+                // Sorted, and it matters twice: the emitter binary-searches
+                // this, and the index it finds has to be the chassis's chunk
+                // index, which gen_module_tables.py derives from the *sorted*
+                // func_ declarations. Sections are not emitted in address order
+                // -- this DOL's data section starts below its second text
+                // section -- so insertion order is not sorted.
+                for (u32 i = 1; i < funcs.count; ++i) {
+                    u32 key = chunk_starts[i];
+                    u32 j = i;
+                    while (j > 0 && chunk_starts[j - 1] > key) {
+                        chunk_starts[j] = chunk_starts[j - 1];
+                        j--;
+                    }
+                    chunk_starts[j] = key;
+                }
+                emit_set_chunk_table(chunk_starts, funcs.count, want_gated);
             }
         }
 
@@ -1229,7 +1253,7 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
         if (!run_chunk_jobs(chunk_jobs, section_job_count, jobs)) {
-            emit_set_chunk_table(NULL, 0);
+            emit_set_chunk_table(NULL, 0, false);
             free(chunk_starts);
             smc_analysis_free(&smc);
             function_list_free(&funcs);
@@ -1239,7 +1263,7 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             fclose(manifest);
             return 0;
         }
-        emit_set_chunk_table(NULL, 0);
+        emit_set_chunk_table(NULL, 0, false);
         free(chunk_starts);
 
         free(chunk_jobs);

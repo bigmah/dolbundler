@@ -21,7 +21,9 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 // Direct calls bypass chassis dispatch checks and must not be enabled by a
 // runtime that validates mutable guest code there. Call before worker emission;
 // passing count == 0 restores the safe return-to-chassis form.
-void emit_set_chunk_table(const u32* starts, u32 count);
+// `starts` must be sorted: the emitter binary-searches it, and the index it
+// finds is the chassis chunk index the dispatch gate is keyed by.
+void emit_set_chunk_table(const u32* starts, u32 count, bool gated);
 
 // HLE generation only: lower a non-local `bl` whose continuation is local to
 // a DOLRECOMP_OUTCALL(target, return, label) macro instead of a plain leave,
