@@ -1,0 +1,17 @@
+diff --git a/include/SFML/Config.hpp b/include/SFML/Config.hpp
+index 36a8b1a..d1a7729 100644
+--- a/include/SFML/Config.hpp
++++ b/include/SFML/Config.hpp
+@@ -96,6 +96,12 @@
+ // NetBSD
+ #define SFML_SYSTEM_NETBSD
+ 
++#elif defined(__EMSCRIPTEN__)
++
++// Emscripten presents a POSIX-shaped system; SFML is only reached here through
++// Dolphin's networking, which a browser build does not use.
++#define SFML_SYSTEM_LINUX
++
+ #else
+ 
+ // Unsupported UNIX system
