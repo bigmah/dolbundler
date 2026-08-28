@@ -40,11 +40,30 @@ number is the one that is still missing.
 The recompiled module is supplied by path and never enters the repository:
 
 ```sh
+DOLRECOMP_C_CHUNK_INSTRUCTIONS=256 \
 ModernGekko/build/vendor/dolphin/DolRecomp/dolrecomp --gamecube --backend c -j14 \
-    build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c
-cp build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c/generated/main.dol
-DOLWEB_MODULES='GEXE52=/abs/path/build-wasm/gexe52-c/generated' ./build.sh
+    build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c256
+cp build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c256/generated/main.dol
+DOLWEB_MODULES='GEXE52=/abs/path/build-wasm/gexe52-c256/generated' ./build.sh
 ```
+
+**The chunk size is not a detail.** A C-backend chunk is one function entered
+through a `switch (ctx->pc)` over every instruction in it, so the chunk size is
+the size of that switch -- and it is the same lever that took GEXE52 from 71.8%
+to 105-107% on arm64. The C default is 4096. Measured here in the node harness,
+Null, unthrottled, over the same guest window (45-90 s), which is the only way
+to compare two builds on the same scene:
+
+| instructions per chunk | chunks | wasm | speed |
+|---|---|---|---|
+| 4096 (the default) | 118 | 91.5 MB | 193.6% |
+| 512 | 928 | 87.6 MB | 209.6% |
+| **256** | **1855** | **86.5 MB** | **218.4%** |
+| 128 (the floor) | 3709 | 86.0 MB | 194.8% |
+
+A curve with a minimum, not a free win: past 256 the calls that leave a chunk
+and return through the dispatcher cost more than the smaller switch saves.
+`./bench-node.py` is the measurement.
 
 `build.sh` also applies the Emscripten patches for the two Externals that are
 nested git repositories (SFML, zlib-ng), which is where a fix would otherwise be

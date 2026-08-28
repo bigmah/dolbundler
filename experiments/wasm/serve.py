@@ -122,6 +122,19 @@ def make_handler(root, iso_path=None):
             if iso_path and self.path.split("?")[0] == "/disc.iso":
                 return self.serve_iso(head_only=True)
             if self.headers.get("Range"):
+                # A HEAD asks about the resource, not about a slice of it, and
+                # answering 206 leaves the client to trust that Content-Length
+                # describes the whole file. Chrome does; Safari does not appear
+                # to, and the difference was a 1.4 GB download per boot. A plain
+                # 200 with Accept-Ranges says the same thing unambiguously.
+                path = self.translate_path(self.path)
+                if os.path.isfile(path):
+                    self.send_response(200)
+                    self.send_header("Content-Type", self.guess_type(path))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Content-Length", str(os.path.getsize(path)))
+                    self.end_headers()
+                    return
                 return self.serve_range(head_only=True)
             return super().do_HEAD()
 
@@ -222,6 +235,13 @@ def make_handler(root, iso_path=None):
             # that has to re-fetch them on every reload cannot be iterated on.
             # Everything else stays uncacheable, and anything that already set
             # its own Cache-Control (the gzip path, with its ETag) keeps it.
+            # Emscripten's fetch backend decides between ranged reads and
+            # downloading the whole file by looking for Accept-Ranges on the
+            # response to its probe. SimpleHTTPRequestHandler does not send it,
+            # so any game file that reaches the default path advertises no
+            # range support and gets pulled down in full.
+            if self.path.startswith("/game/"):
+                self.send_header("Accept-Ranges", "bytes")
             if not getattr(self, "_cache_set", False):
                 cacheable = (self.path.startswith("/game/") and
                              not self.path.endswith(".manifest"))

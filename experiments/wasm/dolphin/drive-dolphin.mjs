@@ -142,8 +142,12 @@ while (Date.now() < deadline && !done) {
   // running, START pauses it, and a paused game draws a black screen that looks
   // exactly like a renderer that stopped working.
   if (opt.press && Date.now() - startedAt < (+opt.press) * 1000) {
+    // START first, then A: START gets past the attract loop and the title, and
+    // A is what walks through the menus after it. Alternating is enough to
+    // reach a menu screen without knowing the game.
+    const control = (Date.now() - startedAt) < (+opt.press) * 500 ? 5 : 0;
     await cdp.eval(`(() => { const c = window.dolweb && window.cwrapSetControl;
-      if (!c) return 'no'; c(5, 1); setTimeout(() => c(5, 0), 120); return 'ok'; })()`)
+      if (!c) return 'no'; c(${control}, 1); setTimeout(() => c(${control}, 0), 120); return 'ok'; })()`)
       .catch(() => {});
   }
   if (opt.audio && !audioReported &&

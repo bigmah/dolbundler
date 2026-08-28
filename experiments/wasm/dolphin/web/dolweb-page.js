@@ -401,10 +401,31 @@ function capabilities() {
   };
 }
 
+// What the browser makes of a ranged probe, which is the single decision that
+// says whether the disc is read in pieces or downloaded whole. Emscripten's
+// fetch backend asks with a HEAD and then reads three things off the response;
+// this reports the same three, because Chrome and Safari did not agree and
+// the difference was 62 MB against 1.4 GB per boot.
+async function reportRangeSupport() {
+  try {
+    const url = `${GAME}/sys/main.dol`;
+    const r = await fetch(url, { method: 'HEAD', headers: { Range: 'bytes=0-' } });
+    const seen = { phase: 'range-probe', status: r.status, ok: r.ok,
+                   contentLength: r.headers.get('Content-Length'),
+                   acceptRanges: r.headers.get('Accept-Ranges'),
+                   contentRange: r.headers.get('Content-Range') };
+    log('[page] ' + JSON.stringify(seen));
+    report(seen);
+  } catch (e) {
+    log('[page] range probe failed: ' + e);
+  }
+}
+
 async function boot() {
   const caps = capabilities();
   log('[page] ' + JSON.stringify(caps));
   report({ phase: 'capabilities', ...caps });
+  reportRangeSupport();
   if (!caps.webgl2)
     log('[page] no WebGL2: the OpenGL backend cannot start. Try ?backend=Null.');
   startBtn.disabled = true;
