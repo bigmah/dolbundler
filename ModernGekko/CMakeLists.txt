@@ -31,6 +31,12 @@ option(MODERNGEKKO_DOLVM_PROFILE
     "Count executed DolVM opcodes and print the histogram when a bytecode module closes" OFF)
 option(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME
        "Build the RecompCore/Dolphin production chassis" ON)
+# The desktop frontend: an SDL3 window, the imgui launcher, the port tool. A
+# host that supplies its own window and input does not want any of it -- iOS
+# already links only the runtime, and a browser build is the same shape but
+# cannot satisfy the SDL3 requirement at all.
+option(MODERNGEKKO_ENABLE_FRONTEND
+       "Build the SDL3 runner, launcher and port tool" ON)
 option(MODERNGEKKO_ENABLE_DOLPHIN_TESTS
        "Build the imported Dolphin unit-test targets" OFF)
 option(MODERNGEKKO_ENABLE_DISC_TOOL
@@ -237,6 +243,9 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         # doing the building.
         if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
             set(_dolvm_cpu -mcpu=apple-a16)
+        elseif(EMSCRIPTEN)
+            # wasm has no host core to name, and no `native` to ask about.
+            set(_dolvm_cpu "")
         else()
             set(_dolvm_cpu -mcpu=native)
         endif()
@@ -562,7 +571,7 @@ target_link_libraries(moderngekko-module-info
     PRIVATE ModernGekko::Runtime
 )
 
-if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME AND MODERNGEKKO_ENABLE_FRONTEND)
     if(TARGET SDL3-static)
         set(_moderngekko_sdl_target SDL3-static)
     elseif(TARGET SDL3::SDL3-shared)

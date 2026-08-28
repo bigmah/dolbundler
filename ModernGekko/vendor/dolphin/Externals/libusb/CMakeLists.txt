@@ -66,6 +66,15 @@ elseif(${CMAKE_SYSTEM_NAME} MATCHES "NetBSD")
   target_sources(usb PRIVATE libusb/libusb/os/netbsd_usb.c)
 elseif(${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD")
   target_sources(usb PRIVATE libusb/libusb/os/openbsd_usb.c)
+elseif(EMSCRIPTEN)
+  # No backend source means `usbi_backend` is never defined, and libusb_init
+  # then calls through an undefined struct -- which in wasm is a function
+  # signature mismatch, not a null dereference, and takes the emulator down
+  # before it has read a single byte of the game. A browser has no USB
+  # devices to offer an emulator (libusb ships a WebUSB backend, but that
+  # wants a user permission prompt per device and no GameCube adapter is
+  # reachable that way), so the null backend is the honest answer.
+  target_sources(usb PRIVATE libusb/libusb/os/null_usb.c)
 endif()
 
 if(UNIX)

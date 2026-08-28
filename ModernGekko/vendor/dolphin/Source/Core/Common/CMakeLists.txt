@@ -264,6 +264,11 @@ elseif(APPLE)
     Logging/ConsoleListenerNix.cpp
     MemArenaDarwin.cpp
   )
+elseif(EMSCRIPTEN)
+  target_sources(common PRIVATE
+    Logging/ConsoleListenerNix.cpp
+    MemArenaEmscripten.cpp
+  )
 else()
   target_sources(common PRIVATE
     Logging/ConsoleListenerNix.cpp
