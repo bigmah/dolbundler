@@ -263,7 +263,48 @@ async function startAudio(module) {
 
 // --- boot -------------------------------------------------------------------
 
+// What this browser can actually do, sent before anything is attempted. On a
+// phone there is no console to read and no way to drive Safari from outside, so
+// a run that fails has to have already said why it was going to.
+function capabilities() {
+  let webgl2 = false;
+  let renderer = '';
+  try {
+    const probe = document.createElement('canvas').getContext('webgl2');
+    webgl2 = !!probe;
+    if (probe) {
+      const info = probe.getExtension('WEBGL_debug_renderer_info');
+      renderer = info ? probe.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'masked';
+    }
+  } catch (e) { /* reported as false */ }
+  return {
+    crossOriginIsolated: !!self.crossOriginIsolated,
+    sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
+    // A module whose only content is a *shared* memory. Declaring one requires
+    // the threads proposal, so validate() answers the question and nothing else
+    // has to be got right -- an earlier version of this probe carried an atomic
+    // op in a code section, got the encoding wrong, and reported "no threads"
+    // on a browser that was already running them.
+    wasmThreads: (() => {
+      try {
+        return WebAssembly.validate(
+            new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 4, 1, 3, 1, 1]));
+      } catch (e) { return false; }
+    })(),
+    audioWorklet: typeof AudioWorklet !== 'undefined',
+    webgl2, renderer,
+    cores: navigator.hardwareConcurrency,
+    deviceMemoryGB: navigator.deviceMemory ?? null,
+    screen: `${screen.width}x${screen.height}@${devicePixelRatio}`,
+  };
+}
+
 async function boot() {
+  const caps = capabilities();
+  log('[page] ' + JSON.stringify(caps));
+  report({ phase: 'capabilities', ...caps });
+  if (!caps.webgl2)
+    log('[page] no WebGL2: the OpenGL backend cannot start. Try ?backend=Null.');
   startBtn.disabled = true;
   status('loading module');
 
