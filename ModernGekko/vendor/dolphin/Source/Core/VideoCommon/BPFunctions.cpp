@@ -1,7 +1,9 @@
 // Copyright 2009 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <set>
 
@@ -262,6 +264,32 @@ void SetScissorAndViewport(FramebufferManager* frame_buffer_manager, ScissorPos 
     // clipping depth range on the hardware.
     near_depth = 1.0f - max_depth;
     far_depth = 1.0f - min_depth;
+  }
+
+  // Every distinct depth setup the guest asks for, with what we turn it into.
+  // Comparing this between a run with the reversed range and one without is the
+  // way to see which number stops matching.
+  static const bool log_depth = std::getenv("MODERNGEKKO_LOG_DEPTH") != nullptr;
+  if (log_depth)
+  {
+    auto& system = Core::System::GetInstance();
+    static std::set<std::array<u32, 6>> seen;
+    std::array<u32, 6> key{};
+    const float probe[6] = {viewport.zRange, viewport.farZ, min_depth,
+                            max_depth,       near_depth,    far_depth};
+    for (int i = 0; i < 6; ++i)
+      std::memcpy(&key[i], &probe[i], sizeof(u32));
+    if (seen.insert(key).second)
+    {
+      std::printf("[depth] zRange=%.1f farZ=%.1f -> min=%.6f max=%.6f near=%.6f far=%.6f "
+                  "vertexRange=%d corr.z=%.6f corr.w=%.6f ztex=%d\n",
+                  viewport.zRange, viewport.farZ, min_depth, max_depth, near_depth, far_depth,
+                  VertexShaderManager::UseVertexDepthRange() ? 1 : 0,
+                  system.GetVertexShaderManager().constants.pixelcentercorrection[2],
+                  system.GetVertexShaderManager().constants.pixelcentercorrection[3],
+                  static_cast<int>(bpmem.ztex2.op.Value()));
+      std::fflush(stdout);
+    }
   }
 
   // Lower-left flip.

@@ -162,17 +162,7 @@ bool VertexShaderManager::UseVertexDepthRange()
     return false;
 
   // We can't compute the depth range in the vertex shader if we don't support depth clamp.
-  //
-  // Except where there is no other mechanism left. WebGL has neither: it forbids
-  // depthRange(zNear > zFar), so the reversed-range trick is out, and it has no
-  // depth clamp, so this bails and the shader leaves depth alone -- with the
-  // result that a console reverse-Z range produces depths the test rejects, and
-  // whole objects disappear. Computing the range here is right except when the
-  // console asks for one larger than 0..1, which then clips instead of clamping.
-  // That is a much smaller wrong than an empty screen.
-  static const bool ignore_clamp =
-      std::getenv("MODERNGEKKO_VERTEX_DEPTH_WITHOUT_CLAMP") != nullptr;
-  if (!g_backend_info.bSupportsDepthClamp && !ignore_clamp)
+  if (!g_backend_info.bSupportsDepthClamp)
     return false;
 
   // We need a full depth range if a ztexture is used.

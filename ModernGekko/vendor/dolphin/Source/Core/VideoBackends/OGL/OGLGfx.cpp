@@ -390,7 +390,17 @@ void OGLGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEn
   if (zEnable)
   {
     glDepthMask(zEnable ? GL_TRUE : GL_FALSE);
-    glClearDepthf(float(z & 0xFFFFFF) / 16777216.0f);
+    // This is the backend's fast path for the EFB clear, and it has to make the
+    // same conversion AbstractGfx::ClearRegion does: without a reversed depth
+    // range the stored depth runs the other way, so the clear value does too.
+    // The generic path already flips it; this one never did, because on OpenGL
+    // the reversed range was always available. Missing it clears the depth
+    // buffer to the near plane instead of the far one, and then every object
+    // the game draws fails its depth test and vanishes.
+    float clear_depth = float(z & 0xFFFFFF) / 16777216.0f;
+    if (!g_backend_info.bSupportsReversedDepthRange)
+      clear_depth = 1.0f - clear_depth;
+    glClearDepthf(clear_depth);
     clear_mask |= GL_DEPTH_BUFFER_BIT;
   }
 
@@ -534,21 +544,23 @@ void OGLGfx::ApplyDepthState(const DepthState state)
 
   const GLenum glCmpFuncs[8] = {GL_NEVER,   GL_LESS,     GL_EQUAL,  GL_LEQUAL,
                                 GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
-  // Diagnostics for the reversed-depth-range problem, not settings, and off by
-  // default. MODERNGEKKO_DEPTH=always takes the depth test out of the picture
-  // entirely -- with it the whole scene draws, which is how we know the
-  // geometry and transforms are fine and only the test rejects them.
-  // =flip inverts the comparison the way VKPipeline.cpp does when
-  // bSupportsReversedDepthRange is false. That is the documented contract, and
-  // on this backend it is *not* sufficient: it turns the missing geometry into
-  // a grey frame, so the stored depths are degenerate rather than merely
-  // inverted, and something else in the path still assumes the reversed range.
+  // Without a reversed depth range the stored depth runs the other way, so the
+  // comparison has to be inverted to match -- less becomes greater, equality
+  // either way. VKPipeline.cpp makes the same swap and D3D relies on it; the
+  // OpenGL backend never needed it, because until WebGL it could always just
+  // reverse the range. It has to be paired with the flipped clear value in
+  // ClearRegion: either one alone is worse than neither.
   const GLenum glCmpFuncsInverted[8] = {GL_NEVER,  GL_GREATER,  GL_EQUAL,  GL_GEQUAL,
                                         GL_LESS,   GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS};
+  const GLenum* funcs =
+      g_backend_info.bSupportsReversedDepthRange ? glCmpFuncs : glCmpFuncsInverted;
+  // MODERNGEKKO_DEPTH=always drops the depth test entirely, which is what
+  // separates "the depth values are wrong" from "the comparison is the wrong
+  // way round". Kept: it is the measurement that found this.
   static const char* depth_mode = std::getenv("MODERNGEKKO_DEPTH");
   const bool force_always = depth_mode && std::string(depth_mode) == "always";
-  const GLenum* funcs = (depth_mode && std::string(depth_mode) == "flip") ?
-                            glCmpFuncsInverted : glCmpFuncs;
+  if (depth_mode && std::string(depth_mode) == "noflip")
+    funcs = glCmpFuncs;
 
   if (state.test_enable)
   {
