@@ -144,10 +144,19 @@ class DolWebSession {
     this.frames = 0;
     this.startTime = 0;
     this.pad = { buttons: 0, x: 0, y: 0, cx: 0, cy: 0, l: 0, r: 0 };
-    this.touchButtons = 0;
+    // Three independent sources that are OR-ed together in pushPad(), rather
+    // than one field every source writes: a gamepad poll used to clobber
+    // `touchButtons` every frame, which silently disabled the on-screen pad the
+    // moment any HID device was attached.
+    this.touchButtons = 0;                       // on-screen pad (and the harness)
+    this.stickTouch = { x: 0, y: 0 };            // on-screen main stick
+    this.cstickTouch = { x: 0, y: 0 };           // on-screen C stick
+    this.triggerTouch = { l: 0, r: 0 };          // 0..1, analog
     this.keyButtons = 0;
     this.keyAxes = { x: 0, y: 0, cx: 0, cy: 0 };
-    this.stickTouch = { x: 0, y: 0 };
+    this.gamepadButtons = 0;
+    this.gamepadAxes = { x: 0, y: 0, cx: 0, cy: 0, l: 0, r: 0 };
+    this.gamepadConnected = false;
   }
 
   // `allowNoRenderer` keeps the session usable where WebGPU is absent -- the iOS
@@ -217,24 +226,70 @@ class DolWebSession {
     this.running = true;
   }
 
+  // Audio needs a user gesture, and on iOS it needs three more things that are
+  // easy to miss and each of which produces a silent, error-free page:
+  //
+  //   * The context has to run at the *hardware* rate. Asking for the guest's
+  //     32 000 Hz gets you a context Safari may refuse or resample poorly; the
+  //     worklet resamples instead, so this asks for nothing.
+  //   * `navigator.audioSession.type` decides whether the ring/silent switch
+  //     mutes you. The default category is 'auto', which behaves as ambient --
+  //     i.e. a phone with the switch flipped plays a game with no sound and no
+  //     way to tell why. 'playback' is the category a game wants.
+  //   * The context can come back suspended after a backgrounded tab, and
+  //     nothing tells you; resumeAudio() is wired to visibilitychange below.
   async startAudio() {
-    if (this.audioCtx) return;
-    const rate = this.M._dolweb_audio_sample_rate();
-    const ctx = new AudioContext({ sampleRate: rate });
+    if (this.audioCtx) { await this.resumeAudio(); return; }
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch (e) { /* not Safari, or too old; the switch simply stays 'auto' */ }
+    const ctx = new AudioContext({ latencyHint: 'interactive' });
+    // resume() inside the gesture, before any await: a gesture is spent by the
+    // time an awaited addModule() resolves on some engines, and a context that
+    // was never resumed in one stays suspended forever.
+    const resumed = ctx.resume();
     await ctx.audioWorklet.addModule('audio-worklet.js');
     const node = new AudioWorkletNode(ctx, 'dol-audio', { outputChannelCount: [2] });
     node.connect(ctx.destination);
-    await ctx.resume();
+    node.port.onmessage = (e) => { this.audioStats = e.data; };
+    await resumed;
+    if (ctx.state !== 'running') await ctx.resume();
     this.audioCtx = ctx;
     this.audioNode = node;
+    this.audioRate = 0;
     this.audioStage = this.M._dolweb_alloc(4096 * 4); // s16 stereo frames
-    this.log(`audio: ${rate} Hz worklet`, 'ok');
+    this.log(`audio: guest ${this.M._dolweb_audio_sample_rate()} Hz -> ` +
+             `context ${ctx.sampleRate | 0} Hz (${ctx.state})`, 'ok');
+    if (ctx.state !== 'running')
+      this.log('audio context is suspended - tap the picture to start it', 'bad');
   }
 
+  async resumeAudio() {
+    if (!this.audioCtx || this.audioCtx.state === 'running') return;
+    try { await this.audioCtx.resume(); } catch (e) { /* still needs a gesture */ }
+  }
+
+  get audioRunning() { return !!this.audioCtx && this.audioCtx.state === 'running'; }
+
   pumpAudio() {
-    if (!this.audioNode) return;
     const M = this.M;
+    if (!this.audioNode) {
+      // Nothing is draining the ring. Discard it rather than let it fill and
+      // charge the guest's first second of audio to whoever finally taps.
+      let n = M._dolweb_audio_available();
+      while (n > 0) {
+        const got = M._dolweb_audio_pull(this.audioStageIdle ||
+          (this.audioStageIdle = M._dolweb_alloc(4096 * 4)), Math.min(n, 4096));
+        if (got === 0) break;
+        n -= got;
+      }
+      return;
+    }
+    const rate = M._dolweb_audio_sample_rate();
+    const rateChanged = rate !== this.audioRate;
+    if (rateChanged) this.audioRate = rate;
     let avail = M._dolweb_audio_available();
+    let sentRate = !rateChanged;
     while (avail > 0) {
       const want = Math.min(avail, 4096);
       const got = M._dolweb_audio_pull(this.audioStage, want);
@@ -242,30 +297,44 @@ class DolWebSession {
       const src = new Int16Array(M.HEAPU8.buffer, this.audioStage, got * 2);
       const f32 = new Float32Array(got * 2);
       for (let i = 0; i < got * 2; i++) f32[i] = src[i] / 32768;
-      this.audioNode.port.postMessage({ samples: f32 }, [f32.buffer]);
+      this.audioPushed = (this.audioPushed || 0) + got;
+      const msg = { samples: f32 };
+      if (!sentRate) { msg.rate = rate; sentRate = true; }
+      this.audioNode.port.postMessage(msg, [f32.buffer]);
       avail -= got;
     }
+    if (!sentRate) this.audioNode.port.postMessage({ rate });
   }
 
   pushPad() {
-    const buttons = this.keyButtons | this.touchButtons;
-    const x = Math.max(-1, Math.min(1, this.keyAxes.x + this.stickTouch.x));
-    const y = Math.max(-1, Math.min(1, this.keyAxes.y + this.stickTouch.y));
+    const buttons = this.keyButtons | this.touchButtons | this.gamepadButtons;
+    const mix = (a, b, c) => Math.max(-1, Math.min(1, a + b + c));
+    const x = mix(this.keyAxes.x, this.stickTouch.x, this.gamepadAxes.x);
+    const y = mix(this.keyAxes.y, this.stickTouch.y, this.gamepadAxes.y);
+    const cx = mix(this.keyAxes.cx, this.cstickTouch.x, this.gamepadAxes.cx);
+    const cy = mix(this.keyAxes.cy, this.cstickTouch.y, this.gamepadAxes.cy);
+    // The stick reads +-100 at full deflection, not +-128: a real GameCube
+    // stick's range is about that, and games calibrate against it.
     const clamp = (v) => Math.max(-128, Math.min(127, Math.round(v * 100)));
-    this.M._dolweb_set_pad(0, buttons, clamp(x), clamp(y),
-                           clamp(this.keyAxes.cx), clamp(this.keyAxes.cy),
-                           (buttons & PAD.L) ? 255 : 0, (buttons & PAD.R) ? 255 : 0);
+    const trig = (t, bit) => Math.min(255, Math.round(
+        Math.max(t, (buttons & bit) ? 1 : 0) * 255));
+    this.M._dolweb_set_pad(0, buttons, clamp(x), clamp(y), clamp(cx), clamp(cy),
+                           trig(Math.max(this.triggerTouch.l, this.gamepadAxes.l), PAD.L),
+                           trig(Math.max(this.triggerTouch.r, this.gamepadAxes.r), PAD.R));
   }
 
   step() {
     if (!this.running) return false;
     this.pushPad();
     const r = this.M._dolweb_step(this.blockBudget, this.msBudget);
+    // Drain the DSP ring on every slice rather than only on a present. A slice
+    // that does not reach present() still produced audio, and holding it until
+    // the next frame is a stutter at exactly the frame rates that need help.
+    this.pumpAudio();
     if (r === 1) {
       if (this.renderer) this.renderer.renderFrame();
       else this.M._dol_web_begin_frame();  // nobody consumed it; drop the arenas
       this.frames++;
-      this.pumpAudio();
     } else if (r < 0) {
       this.running = false;
       this.log('stopped: ' + this.M.UTF8ToString(this.M._dolweb_stop_reason()), 'bad');
@@ -274,6 +343,7 @@ class DolWebSession {
   }
 
   stats() {
+    if (this.audioNode) this.audioNode.port.postMessage({ stats: true });
     const elapsed = (performance.now() - this.startTime) / 1000;
     // Counters the module keeps as u64 arrive as BigInt (emscripten links with
     // WASM_BIGINT). JSON.stringify throws on those, which silently killed the
@@ -293,6 +363,10 @@ class DolWebSession {
         queued: this.M._dolweb_audio_available(),
         dropped: num(this.M._dolweb_audio_dropped()),
         started: !!this.audioCtx,
+        state: this.audioCtx ? this.audioCtx.state : 'none',
+        ctxRate: this.audioCtx ? this.audioCtx.sampleRate : 0,
+        pushed: this.audioPushed || 0,
+        worklet: this.audioStats || null,
       },
       gpu: this.renderer ? Object.assign({}, this.renderer.stats) : null,
       texcache: this.M._dolweb_texture_stat ? {
@@ -326,8 +400,16 @@ class DolWebSession {
   // The Gamepad API covers a real controller; it is polled, not evented.
   pollGamepad() {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    const gp = pads && pads[0];
-    if (!gp) return;
+    let gp = null;
+    for (const p of pads || []) if (p && p.connected) { gp = p; break; }
+    if (!gp) {
+      if (this.gamepadConnected) {
+        this.gamepadConnected = false;
+        this.gamepadButtons = 0;
+        this.gamepadAxes = { x: 0, y: 0, cx: 0, cy: 0, l: 0, r: 0 };
+      }
+      return;
+    }
     let b = 0;
     const p = (i) => gp.buttons[i] && gp.buttons[i].pressed;
     if (p(0)) b |= PAD.A;
@@ -342,11 +424,21 @@ class DolWebSession {
     if (p(13)) b |= PAD.DOWN;
     if (p(14)) b |= PAD.LEFT;
     if (p(15)) b |= PAD.RIGHT;
-    this.touchButtons = (this.touchButtons & ~0xFFFF) | b;
+    this.gamepadButtons = b;
+    this.gamepadConnected = true;
+    const dead = (v) => (Math.abs(v) > 0.15 ? v : 0);
     if (gp.axes.length >= 2) {
-      this.stickTouch.x = Math.abs(gp.axes[0]) > 0.15 ? gp.axes[0] : 0;
-      this.stickTouch.y = Math.abs(gp.axes[1]) > 0.15 ? -gp.axes[1] : 0;
+      this.gamepadAxes.x = dead(gp.axes[0]);
+      this.gamepadAxes.y = -dead(gp.axes[1]);
     }
+    if (gp.axes.length >= 4) {
+      this.gamepadAxes.cx = dead(gp.axes[2]);
+      this.gamepadAxes.cy = -dead(gp.axes[3]);
+    }
+    // Analog triggers where the browser exposes them; the digital bits above
+    // already cover the click.
+    this.gamepadAxes.l = gp.buttons[6] ? gp.buttons[6].value : 0;
+    this.gamepadAxes.r = gp.buttons[7] ? gp.buttons[7].value : 0;
   }
 }
 

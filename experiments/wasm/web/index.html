@@ -1,67 +1,166 @@
 <!doctype html>
 <html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<!-- maximum-scale/user-scalable are advisory on iOS since 10; what actually
+     stops double-tap zoom and pinch is touch-action below plus the gesture*
+     handlers. Keep all three: other engines honour the meta. -->
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no,interactive-widget=resizes-content">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
 <title>GameCube in the browser</title>
 <style>
-:root { color-scheme: dark; }
+:root {
+  color-scheme: dark;
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { font: 13px/1.5 -apple-system,system-ui,sans-serif; margin: 0; padding: 0;
-       background: #0d1214; color: #e4ebeb; overscroll-behavior: none; }
-header { padding: 10px 14px; border-bottom: 1px solid #1c2528; }
+
+/* The whole app is one non-scrolling, non-zooming surface.
+   - position:fixed + overflow:hidden stops the rubber-band scroll that makes a
+     touch pad feel broken on iOS: a drag that starts on a button and moves a
+     few pixels would otherwise pan the page instead.
+   - touch-action:manipulation on the document removes double-tap-to-zoom
+     (the "double tap zooms" complaint); the pad itself uses `none`, which also
+     removes the browser's own pan/pinch handling of those elements.
+   - 100dvh, not 100vh: on iOS Safari 100vh is the *tallest* viewport, so the
+     page is taller than the visible area whenever the toolbars are showing. */
+html, body {
+  height: 100%; height: 100dvh;
+  margin: 0; padding: 0; overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+}
+body {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column;
+  font: 13px/1.5 -apple-system,system-ui,sans-serif;
+  background: #000; color: #e4ebeb;
+}
+
+/* --- the picture ------------------------------------------------------- */
+#screen { position: relative; flex: 1 1 auto; min-height: 0; background: #000;
+          touch-action: none; overflow: hidden; }
+canvas#cv { position: absolute; left: 0; top: 0; display: block; background: #000;
+            touch-action: none; image-rendering: auto; }
+#hud { position: absolute; font: 11px/1.35 ui-monospace,Menlo,monospace;
+       color: #9ee8bd; text-shadow: 0 1px 2px #000, 0 0 6px #000;
+       pointer-events: none; white-space: pre; z-index: 5; }
+body.nohud #hud { display: none; }
+
+/* --- the on-screen pad -------------------------------------------------- */
+#pad { position: absolute; inset: 0; pointer-events: none; z-index: 4;
+       touch-action: none; }
+body.pad-on #pad { pointer-events: auto; }
+#pad:not(.on) { display: none; }
+.ctl { position: absolute; border-radius: 50%; display: flex;
+       align-items: center; justify-content: center;
+       font: 600 15px/1 -apple-system,system-ui,sans-serif;
+       color: #eaf3f3; text-shadow: 0 1px 2px rgba(0,0,0,.6);
+       background: rgba(255,255,255,.10);
+       border: 1.5px solid rgba(255,255,255,.26);
+       backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+       transition: background .06s linear, transform .06s linear;
+       will-change: transform; }
+.ctl.on { background: rgba(120,220,170,.42); border-color: rgba(160,255,205,.7);
+          transform: scale(.94); }
+.ctl.a { background: rgba(120,200,160,.16); }
+.ctl.small { font-size: 12px; }
+.stickbase { position: absolute; border-radius: 50%;
+             background: rgba(255,255,255,.06);
+             border: 1.5px solid rgba(255,255,255,.18); }
+.stickknob { position: absolute; border-radius: 50%;
+             background: rgba(235,245,245,.34);
+             border: 1.5px solid rgba(255,255,255,.4);
+             pointer-events: none; }
+.stickbase.on { background: rgba(255,255,255,.10); }
+.stickbase .cap { position: absolute; left: 0; right: 0; top: 50%;
+                  transform: translateY(-50%); text-align: center;
+                  font: 600 10px/1 ui-monospace,Menlo,monospace;
+                  color: rgba(255,255,255,.28); pointer-events: none; }
+
+/* --- chrome ------------------------------------------------------------- */
+#panel { flex: 0 0 auto; max-height: 52%; overflow: auto;
+         background: #0d1214; border-top: 1px solid #1c2528;
+         padding-bottom: var(--sab);
+         -webkit-overflow-scrolling: touch; touch-action: pan-y; }
+body.immersive #panel { display: none; }
+header { padding: 9px 14px 7px; }
 h1 { font-size: 14px; margin: 0; font-weight: 600; }
 p.sub { margin: 2px 0 0; color: #8b9a9d; font-size: 12px; }
-#stage { position: relative; background: #000; display: flex; justify-content: center; }
-canvas { display: block; width: 100%; max-width: 800px; aspect-ratio: 4 / 3;
-         background: #000; touch-action: none; }
-#controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+#controls { padding: 0 14px 10px; display: flex; gap: 8px; flex-wrap: wrap;
+            align-items: center; }
 button, label.file { background: #1b2427; border: 1px solid #2b3a3e; color: #dbe6e6;
-         padding: 6px 12px; border-radius: 6px; font: inherit; cursor: pointer; }
-button:disabled { opacity: .45; cursor: default; }
+         padding: 7px 13px; border-radius: 7px; font: inherit; cursor: pointer;
+         touch-action: manipulation; }
+button.pri { background: #1d3b30; border-color: #2f6b56; color: #b6f0d3; }
+button[aria-pressed=true] { background: #24403a; border-color: #3d7a66; }
+button:disabled { opacity: .4; cursor: default; }
 input[type=file] { display: none; }
-#log { margin: 0 14px 10px; background: #10171a; border: 1px solid #1c2528;
+#log { margin: 0 14px 12px; background: #10171a; border: 1px solid #1c2528;
        border-radius: 6px; padding: 8px 10px; font: 11.5px/1.5 ui-monospace,Menlo,monospace;
-       white-space: pre-wrap; max-height: 200px; overflow: auto; }
+       white-space: pre-wrap; max-height: 168px; overflow: auto; }
 .ok { color: #63bc8a } .bad { color: #e0796a } .dim { color: #7d8b8e }
-#hud { position: absolute; left: 8px; top: 8px; font: 11px/1.4 ui-monospace,Menlo,monospace;
-       color: #9ee8bd; text-shadow: 0 1px 2px #000; pointer-events: none; white-space: pre; }
-#pad { display: none; }
-#pad.on { display: block; position: absolute; inset: 0; pointer-events: none; }
-.btn { position: absolute; pointer-events: auto; border-radius: 50%;
-       background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.22);
-       display: flex; align-items: center; justify-content: center;
-       font: 600 15px/1 -apple-system,system-ui,sans-serif; color: #eaf3f3; }
-.btn.on { background: rgba(120,220,170,.35); }
-#stick { position: absolute; left: 6%; bottom: 10%; width: 34%; aspect-ratio: 1;
-         border-radius: 50%; background: rgba(255,255,255,.07);
-         border: 1px solid rgba(255,255,255,.16); pointer-events: auto; }
-#knob { position: absolute; left: 30%; top: 30%; width: 40%; height: 40%;
-        border-radius: 50%; background: rgba(255,255,255,.28); }
+
+/* The only chrome that survives immersive mode: one corner tab to get it back,
+   placed inside the safe area so the notch never eats it. */
+#tab { position: absolute; z-index: 6; display: none;
+       top: calc(env(safe-area-inset-top, 0px) + 6px); left: 50%;
+       transform: translateX(-50%);
+       width: 34px; height: 34px; border-radius: 9px; padding: 0;
+       background: rgba(20,28,30,.55); border: 1px solid rgba(255,255,255,.16);
+       color: #cfe3e0; font-size: 15px; line-height: 32px; text-align: center; }
+body.immersive #tab { display: block; }
+#toast { position: absolute; z-index: 7; left: 50%; transform: translateX(-50%);
+         bottom: calc(var(--sab) + 14px); padding: 7px 14px; border-radius: 999px;
+         background: rgba(12,18,20,.82); border: 1px solid rgba(255,255,255,.14);
+         color: #dbe8e6; font-size: 12px; pointer-events: none; opacity: 0;
+         transition: opacity .25s; white-space: nowrap; }
+#toast.show { opacity: 1; }
+/* Read the safe-area insets off real padding rather than off the custom
+   properties: getComputedStyle does not reliably resolve env() inside a
+   custom property, and a wrong inset puts a thumb control under the notch. */
+#insets { position: fixed; left: 0; top: 0; width: 0; height: 0;
+          visibility: hidden; pointer-events: none;
+          padding-top: env(safe-area-inset-top, 0px);
+          padding-right: env(safe-area-inset-right, 0px);
+          padding-bottom: env(safe-area-inset-bottom, 0px);
+          padding-left: env(safe-area-inset-left, 0px); }
 </style></head><body>
 
-<header>
-  <h1>GameCube in the browser</h1>
-  <p class="sub">GXRuntime + gxcore, compiled to WebAssembly. Guest code recompiled by
-     DolRecomp. Rendering through WebGPU. Bring your own disc.</p>
-</header>
+<div id="insets"></div>
 
-<div id="stage">
+<div id="screen">
   <canvas id="cv" width="640" height="480"></canvas>
   <div id="hud"></div>
-  <div id="pad">
-    <div id="stick"><div id="knob"></div></div>
-  </div>
+  <div id="pad"></div>
+  <button id="tab" title="Show controls">☰</button>
+  <div id="toast"></div>
 </div>
 
-<div id="controls">
-  <label class="file">Choose disc<input id="file" type="file" accept=".iso,.gcm,.ciso"></label>
-  <button id="boot" disabled>Boot</button>
-  <button id="pause" disabled>Pause</button>
-  <button id="sound" disabled>Sound</button>
-  <button id="touch">Touch pad</button>
-  <button id="gaps">Gap report</button>
+<div id="panel">
+  <header>
+    <h1>GameCube in the browser</h1>
+    <p class="sub">GXRuntime + gxcore, compiled to WebAssembly. Guest code recompiled by
+       DolRecomp. Rendering through WebGPU. Bring your own disc.</p>
+  </header>
+  <div id="controls">
+    <label class="file">Choose disc<input id="file" type="file" accept=".iso,.gcm,.ciso"></label>
+    <button id="boot" class="pri" disabled>Boot</button>
+    <button id="pause" disabled>Pause</button>
+    <button id="sound" disabled>Sound</button>
+    <button id="touch" aria-pressed="false">Touch pad</button>
+    <button id="cstick" aria-pressed="false">C stick</button>
+    <button id="immersive">Full screen</button>
+    <button id="gaps">Gap report</button>
+  </div>
+  <pre id="log">ready.</pre>
 </div>
-<pre id="log">ready.</pre>
 
 <script src="dolweb.js"></script>
 <script src="dolboot.js"></script>
@@ -71,9 +170,12 @@ const qs = new URLSearchParams(location.search);
 const logEl = document.getElementById('log');
 const hudEl = document.getElementById('hud');
 const canvas = document.getElementById('cv');
+const screenEl = document.getElementById('screen');
+const padEl = document.getElementById('pad');
+const toastEl = document.getElementById('toast');
 const logLines = [];
 let logSuppressed = 0;
-const TRACE = new URLSearchParams(location.search).get('trace');
+const TRACE = qs.get('trace');
 function trace(...a) { if (TRACE) console.log('[trace]', ...a); }
 // A guest that hits a repeating fprintf would otherwise append a DOM node per
 // line and take the page down with it. Keep every line in the array (that is
@@ -98,9 +200,389 @@ function log(s, cls) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+let toastTimer = 0;
+function toast(msg, ms) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms || 2200);
+}
+
 let session = null;
 let raf = 0;
+const COARSE = matchMedia('(pointer: coarse)').matches;
 
+// ==========================================================================
+// Layout
+//
+// Two orientations, one rule: the picture is never covered by a control the
+// layout could have put somewhere else.
+//
+//   landscape -- the picture fills the screen and the pad floats over it, at
+//                the edges where thumbs already are.
+//   portrait  -- the picture sits at the top at full width and the pad gets
+//                the whole empty area underneath it, so nothing overlaps.
+//
+// Control positions are a fraction of the pad box, sizes a fraction of a single
+// `unit`, and every centre is then clamped inside the box. Fractions alone
+// break in portrait (a stick 14% from the left of a 430px box is half off the
+// screen once it has a radius); the clamp is what makes one table serve both.
+// ==========================================================================
+const GC_ASPECT = 4 / 3;
+
+// Positions are an offset from an anchored corner, in units of `unit`, not a
+// fraction of the box: fractions put a thumb control half off the screen the
+// moment the box is narrow, and clamping them back stacks controls on top of
+// each other (which is exactly what portrait did). Anchoring keeps each cluster
+// where a thumb is, in any box; `relax()` below then pushes apart whatever the
+// short side still leaves overlapping.
+//   ax: 'l' | 'c' | 'r'   ay: 't' | 'b'
+const PAD_SPEC = [
+  { id: 'L',     btn: 'L',     label: 'L', ax: 'l', ay: 't', dx: 0.17, dy: 0.16, r: 0.078, pin: 0.5, cls: 'small' },
+  { id: 'R',     btn: 'R',     label: 'R', ax: 'r', ay: 't', dx: 0.17, dy: 0.16, r: 0.078, pin: 0.5, cls: 'small' },
+  { id: 'Z',     btn: 'Z',     label: 'Z', ax: 'r', ay: 't', dx: 0.44, dy: 0.16, r: 0.066, pin: 0.8, cls: 'small' },
+  { id: 'stick', kind: 'stick',            ax: 'l', ay: 'b', dx: 0.36, dy: 0.36, r: 0.195, pin: 0.05 },
+  { id: 'A',     btn: 'A',     label: 'A', ax: 'r', ay: 'b', dx: 0.30, dy: 0.34, r: 0.108, pin: 0.05, cls: 'a' },
+  { id: 'B',     btn: 'B',     label: 'B', ax: 'r', ay: 'b', dx: 0.56, dy: 0.20, r: 0.076, pin: 1 },
+  { id: 'X',     btn: 'X',     label: 'X', ax: 'r', ay: 'b', dx: 0.09, dy: 0.60, r: 0.070, pin: 1, cls: 'small' },
+  { id: 'Y',     btn: 'Y',     label: 'Y', ax: 'r', ay: 'b', dx: 0.55, dy: 0.56, r: 0.070, pin: 1, cls: 'small' },
+  { id: 'START', btn: 'START', label: '▶', ax: 'c', ay: 'b', dx: 0.00, dy: 0.13, r: 0.058, pin: 0.6, cls: 'small' },
+  { id: 'cstick', kind: 'cstick', optional: true,  ax: 'c', ay: 'b', dx: 0.00, dy: 0.62, r: 0.115, pin: 1 },
+];
+
+// Push overlapping controls apart, then put everyone back inside the box, a few
+// times. `pin` is how far a control is willing to move: the stick and A are
+// where the thumbs rest and should not wander, so the small buttons give way.
+function relax(live, box, gap) {
+  for (let pass = 0; pass < 24; pass++) {
+    let moved = 0;
+    for (let i = 0; i < live.length; i++) {
+      for (let j = i + 1; j < live.length; j++) {
+        const a = live[i].geom, b = live[j].geom;
+        const want = a.r + b.r + gap;
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        if (d >= want) continue;
+        if (d < 1e-3) { dx = 1; dy = 0; d = 1; }
+        const push = (want - d);
+        const wa = live[i].pin, wb = live[j].pin;
+        const total = wa + wb || 1;
+        a.x -= (dx / d) * push * (wa / total); a.y -= (dy / d) * push * (wa / total);
+        b.x += (dx / d) * push * (wb / total); b.y += (dy / d) * push * (wb / total);
+        moved++;
+      }
+    }
+    for (const c of live) {
+      c.geom.x = clamp(c.geom.x, box.x + c.geom.r + gap, box.x + box.w - c.geom.r - gap);
+      c.geom.y = clamp(c.geom.y, box.y + c.geom.r + gap, box.y + box.h - c.geom.r - gap);
+    }
+    if (!moved) break;
+  }
+}
+
+const controls = [];        // live control objects, with .el and .geom
+let padBox = { x: 0, y: 0, w: 0, h: 0 };
+// #screen sits at the viewport origin today, but pointer events are in viewport
+// coordinates and control geometry is in #screen's -- keep the offset explicit
+// rather than relying on the two staying equal.
+let screenOrigin = { x: 0, y: 0 };
+let cstickOn = false;
+
+function buildPad() {
+  const P = window.DOLWEB_PAD;
+  padEl.textContent = '';
+  controls.length = 0;
+  for (const spec of PAD_SPEC) {
+    const c = Object.assign({ pressed: false }, spec);
+    if (spec.kind === 'stick' || spec.kind === 'cstick') {
+      const base = document.createElement('div');
+      base.className = 'stickbase';
+      const knob = document.createElement('div');
+      knob.className = 'stickknob';
+      base.appendChild(knob);
+      if (spec.kind === 'cstick') {
+        const cap = document.createElement('div');
+        cap.className = 'cap';
+        cap.textContent = 'C';
+        base.appendChild(cap);
+      }
+      c.el = base; c.knob = knob;
+    } else {
+      const el = document.createElement('div');
+      el.className = 'ctl' + (spec.cls ? ' ' + spec.cls : '');
+      el.textContent = spec.label;
+      c.el = el;
+      c.bit = P[spec.btn];
+    }
+    padEl.appendChild(c.el);
+    controls.push(c);
+  }
+}
+
+function layout() {
+  const sw = screenEl.clientWidth, sh = screenEl.clientHeight;
+  if (!sw || !sh) return;
+  const rect = screenEl.getBoundingClientRect();
+  screenOrigin = { x: rect.left, y: rect.top };
+  const insets = readInsets();
+  const portrait = sh > sw * 1.05;
+
+  // The picture: whole screen in landscape, top-aligned full width in portrait.
+  let cw, ch, cx, cy;
+  if (portrait) {
+    cw = sw;
+    ch = Math.min(Math.round(sw / GC_ASPECT), Math.round(sh * 0.55));
+    cw = Math.round(ch * GC_ASPECT);
+    cx = Math.round((sw - cw) / 2);
+    cy = insets.top;
+  } else {
+    const scale = Math.min(sw / GC_ASPECT, sh);
+    cw = Math.round(scale * GC_ASPECT); ch = Math.round(scale);
+    cx = Math.round((sw - cw) / 2); cy = Math.round((sh - ch) / 2);
+  }
+  canvas.style.left = cx + 'px';
+  canvas.style.top = cy + 'px';
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+  sizeBackingStore(cw, ch);
+
+  // The pad box: the free area under the picture in portrait, the whole screen
+  // (inside the safe area) in landscape.
+  if (portrait) {
+    // Everything below the picture is free, but a pad spread over all of it
+    // puts the triggers in the middle of the screen with a dead band under
+    // them. Give the controls the height they need and park that at the
+    // bottom, where the thumbs are; the slack goes above the trigger row.
+    const top = cy + ch;
+    const availH = Math.max(0, sh - top - insets.bottom);
+    const w = sw - insets.left - insets.right;
+    const unit = Math.max(48, Math.min(560, w / 1.18, availH / 0.92));
+    const h = Math.min(availH, unit * 1.3);
+    padBox = { x: insets.left, y: sh - insets.bottom - h, w, h };
+  } else {
+    padBox = { x: insets.left, y: insets.top,
+               w: sw - insets.left - insets.right,
+               h: sh - insets.top - insets.bottom };
+  }
+  padEl.dataset.box = `${sw}x${sh} pad ${padBox.x},${padBox.y} ${padBox.w}x${padBox.h} dpr${window.devicePixelRatio} iw${innerWidth} ce${document.documentElement.clientWidth}`;
+  hudEl.style.left = (padBox.x + 8) + 'px';
+  hudEl.style.top = ((portrait ? cy : padBox.y) + 6) + 'px';
+
+  // One size unit for every control. The divisors are what the two clusters
+  // actually span: left stick plus right face cluster across the width, top
+  // triggers plus the tallest face button down the height. Capped so a desktop
+  // window does not produce a pad with 200-pixel buttons.
+  const unit = Math.max(48, Math.min(560, padBox.w / 1.18, padBox.h / 0.92));
+  const gap = Math.max(4, unit * 0.022);
+  const live = [];
+  for (const c of controls) {
+    const hidden = (c.optional && !cstickOn) || padBox.h < unit * 0.5;
+    c.el.style.display = hidden ? 'none' : '';
+    if (hidden) { c.geom = null; continue; }
+    const r = c.r * unit;
+    const x = c.ax === 'l' ? padBox.x + c.dx * unit
+            : c.ax === 'r' ? padBox.x + padBox.w - c.dx * unit
+            : padBox.x + padBox.w / 2 + c.dx * unit;
+    const y = c.ay === 't' ? padBox.y + c.dy * unit
+                           : padBox.y + padBox.h - c.dy * unit;
+    c.geom = { x, y, r };
+    live.push(c);
+  }
+  relax(live, padBox, gap);
+  for (const c of live) {
+    const r = Math.round(c.geom.r);
+    c.el.style.left = Math.round(c.geom.x - r) + 'px';
+    c.el.style.top = Math.round(c.geom.y - r) + 'px';
+    c.el.style.width = c.el.style.height = (r * 2) + 'px';
+    if (c.knob) {
+      c.knobRadius = Math.round(r * 0.44);
+      c.el.style.fontSize = Math.round(r * 0.28) + 'px';
+      moveKnob(c, c.vx || 0, c.vy || 0);
+    } else {
+      c.el.style.fontSize = Math.round(r * (c.cls === 'small' ? 0.62 : 0.72)) + 'px';
+    }
+  }
+}
+
+function clamp(v, lo, hi) { return hi < lo ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, v)); }
+
+const insetProbe = document.getElementById('insets');
+function readInsets() {
+  const cs = getComputedStyle(insetProbe);
+  const px = (name) => parseFloat(cs.getPropertyValue(name)) || 0;
+  return { top: px('padding-top'), bottom: px('padding-bottom'),
+           left: px('padding-left'), right: px('padding-right') };
+}
+
+// The blit at the end of a frame scales the EFB to whatever the canvas backing
+// store is, so this is the emulator's output resolution, not a CSS detail.
+// Native pixels on a DPR-3 phone would be 3.6M pixels of fill for a 640x528
+// source; cap it instead -- the extra sharpness above ~1.5x is not visible and
+// the fill is.
+function sizeBackingStore(cssW, cssH) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let w = Math.round(cssW * dpr), h = Math.round(cssH * dpr);
+  const cap = 1280;
+  if (w > cap) { h = Math.round(h * cap / w); w = cap; }
+  if (w === canvas.width && h === canvas.height) return;
+  if (w < 16 || h < 16) return;
+  try { canvas.width = w; canvas.height = h; } catch (e) { /* keep the old size */ }
+}
+
+function moveKnob(c, vx, vy) {
+  if (!c.knob) return;
+  const r = c.geom ? c.geom.r : 0;
+  const kr = c.knobRadius || Math.round(r * 0.44);
+  const reach = r - kr - 2;
+  c.knob.style.width = c.knob.style.height = (kr * 2) + 'px';
+  c.knob.style.left = Math.round(r - kr + vx * reach) + 'px';
+  c.knob.style.top = Math.round(r - kr - vy * reach) + 'px';
+}
+
+// ==========================================================================
+// Touch handling
+//
+// One listener set on the container, hit-testing every live pointer, rather
+// than a listener per button with setPointerCapture. That is the difference
+// between the old pad and one that behaves:
+//   * two thumbs at once work (A while holding the stick);
+//   * a thumb that slides off a button releases it, and sliding onto another
+//     presses it -- rolling B->A is how people play;
+//   * a pointer whose element is removed or re-laid out mid-press cannot get
+//     stuck down, because state lives in this map and not in the DOM.
+// ==========================================================================
+const active = new Map();       // pointerId -> { control } | { stick }
+const DEADZONE = 0.16;
+const DPAD_ON = 0.55, DPAD_OFF = 0.38;   // hysteresis, so an edge does not chatter
+let dpadBits = 0;
+
+function hitControl(x, y) {
+  let best = null, bestD = Infinity;
+  for (const c of controls) {
+    const g = c.geom;
+    if (!g || c.el.style.display === 'none') continue;
+    const d = Math.hypot(x - g.x, y - g.y);
+    const reach = g.r * (c.kind ? 1.0 : 1.22);   // buttons get a forgiving edge
+    if (d <= reach && d < bestD) { best = c; bestD = d; }
+  }
+  return best;
+}
+
+function setPressed(c, on) {
+  if (c.pressed === on) return;
+  c.pressed = on;
+  c.el.classList.toggle('on', on);
+  if (!session) return;
+  if (c.bit !== undefined) {
+    if (on) session.touchButtons |= c.bit; else session.touchButtons &= ~c.bit;
+  }
+}
+
+function applyStick(c, x, y) {
+  let dx = (x - c.geom.x) / c.geom.r;
+  let dy = (y - c.geom.y) / c.geom.r;
+  const m = Math.hypot(dx, dy);
+  if (m > 1) { dx /= m; dy /= m; }
+  // A radial deadzone, rescaled so the usable range still reaches 1.0. Without
+  // the rescale the first third of the travel is dead and the stick feels numb.
+  const mag = Math.min(1, m);
+  if (mag < DEADZONE) { dx = 0; dy = 0; }
+  else { const k = ((mag - DEADZONE) / (1 - DEADZONE)) / mag; dx *= k; dy *= k; }
+  c.vx = dx; c.vy = -dy;
+  moveKnob(c, c.vx, c.vy);
+  if (!session) return;
+  if (c.kind === 'cstick') { session.cstickTouch.x = c.vx; session.cstickTouch.y = c.vy; }
+  else { session.stickTouch.x = c.vx; session.stickTouch.y = c.vy; updateDpad(c.vx, c.vy); }
+}
+
+// The GameCube has both a stick and a D-pad and a phone has room for one. Menus
+// in a lot of titles only listen to the D-pad, so the main stick also emits
+// D-pad bits past a threshold. Hysteresis on the release edge: without it a
+// thumb resting near the boundary machine-guns the menu.
+function updateDpad(x, y) {
+  const P = window.DOLWEB_PAD;
+  const axis = (v, pos, neg) => {
+    let bits = 0;
+    if (v > DPAD_ON || (v > DPAD_OFF && (dpadBits & pos))) bits |= pos;
+    if (v < -DPAD_ON || (v < -DPAD_OFF && (dpadBits & neg))) bits |= neg;
+    return bits;
+  };
+  const next = axis(x, P.RIGHT, P.LEFT) | axis(y, P.UP, P.DOWN);
+  if (next === dpadBits) return;
+  if (session) session.touchButtons = (session.touchButtons & ~0x000F) | next;
+  dpadBits = next;
+}
+
+function releaseStick(c) {
+  c.vx = 0; c.vy = 0;
+  moveKnob(c, 0, 0);
+  c.el.classList.remove('on');
+  if (!session) return;
+  if (c.kind === 'cstick') { session.cstickTouch.x = 0; session.cstickTouch.y = 0; }
+  else { session.stickTouch.x = 0; session.stickTouch.y = 0; updateDpad(0, 0); }
+}
+
+function padPointerDown(e) {
+  const c = hitControl(e.clientX - screenOrigin.x, e.clientY - screenOrigin.y);
+  if (!c) return;
+  e.preventDefault();
+  padEl.setPointerCapture(e.pointerId);
+  active.set(e.pointerId, c);
+  if (c.kind) { c.el.classList.add('on'); applyStick(c, e.clientX - screenOrigin.x, e.clientY - screenOrigin.y); }
+  else setPressed(c, true);
+}
+
+function padPointerMove(e) {
+  const cur = active.get(e.pointerId);
+  if (!cur) return;
+  e.preventDefault();
+  if (cur.kind) { applyStick(cur, e.clientX - screenOrigin.x, e.clientY - screenOrigin.y); return; }
+  // Roll off / roll on. Only buttons participate: dragging out of a stick and
+  // into a button would otherwise drop the stick mid-move.
+  const c = hitControl(e.clientX - screenOrigin.x, e.clientY - screenOrigin.y);
+  if (c === cur) return;
+  setPressed(cur, false);
+  if (c && !c.kind) { active.set(e.pointerId, c); setPressed(c, true); }
+  else active.delete(e.pointerId);
+}
+
+function padPointerUp(e) {
+  const cur = active.get(e.pointerId);
+  if (!cur) return;
+  e.preventDefault();
+  active.delete(e.pointerId);
+  if (cur.kind) releaseStick(cur); else setPressed(cur, false);
+}
+
+padEl.addEventListener('pointerdown', padPointerDown);
+padEl.addEventListener('pointermove', padPointerMove);
+padEl.addEventListener('pointerup', padPointerUp);
+padEl.addEventListener('pointercancel', padPointerUp);
+padEl.addEventListener('lostpointercapture', padPointerUp);
+padEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Nothing on this page is ever a zoom gesture. Safari's pinch (gesture*) and
+// its double-tap zoom both survive `user-scalable=no`, so they are refused
+// explicitly; the second one also needs the dblclick, which iOS synthesises.
+for (const ev of ['gesturestart', 'gesturechange', 'gestureend'])
+  document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+document.addEventListener('touchmove', (e) => {
+  if (e.touches.length > 1) e.preventDefault();          // pinch
+}, { passive: false });
+
+// Any pointer the browser forgets to end (a call arriving, the app going to the
+// background mid-press) would leave a button held down forever.
+function releaseAll() {
+  for (const [, c] of active) { if (c.kind) releaseStick(c); else setPressed(c, false); }
+  active.clear();
+}
+addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+
+// ==========================================================================
+// Session
+// ==========================================================================
 async function ensureSession() {
   if (session) return session;
   logEl.textContent = '';
@@ -167,26 +649,90 @@ const storedDisc = (async function restoreDisc() {
   return 'opfs';
 })();
 
+// ==========================================================================
+// Chrome
+// ==========================================================================
+function setPad(on) {
+  padEl.classList.toggle('on', on);
+  document.body.classList.toggle('pad-on', on);
+  document.getElementById('touch').setAttribute('aria-pressed', String(on));
+  if (on) layout();
+}
+function setImmersive(on) {
+  document.body.classList.toggle('immersive', on);
+  requestAnimationFrame(layout);
+}
+
 document.getElementById('boot').addEventListener('click', () => start());
 document.getElementById('pause').addEventListener('click', () => {
   if (!session) return;
   session.running = !session.running;
+  document.getElementById('pause').textContent = session.running ? 'Pause' : 'Resume';
   if (session.running) loop();
 });
-document.getElementById('sound').addEventListener('click', async () => {
-  if (session) { await session.startAudio(); document.getElementById('sound').disabled = true; }
-});
+document.getElementById('sound').addEventListener('click', () => unlockAudio(true));
 document.getElementById('touch').addEventListener('click', () => {
-  document.getElementById('pad').classList.toggle('on');
+  setPad(!padEl.classList.contains('on'));
 });
+document.getElementById('cstick').addEventListener('click', (e) => {
+  cstickOn = !cstickOn;
+  e.currentTarget.setAttribute('aria-pressed', String(cstickOn));
+  layout();
+});
+document.getElementById('immersive').addEventListener('click', () => {
+  // Element.requestFullscreen does not exist on iPhone Safari, so immersive
+  // mode is the page's own: hide the chrome and let the picture have the
+  // viewport. Where the real thing exists, use it as well.
+  setImmersive(true);
+  const el = document.documentElement;
+  if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+});
+document.getElementById('tab').addEventListener('click', () => setImmersive(false));
 document.getElementById('gaps').addEventListener('click', () => {
   if (!session) return;
   const st = session.stats();
   log('--- gap report (cumulative) ---');
   for (const [k, v] of Object.entries(st.gaps || {})) if (v) log(`  ${k}: ${v}`);
   log(`  gpu: ${JSON.stringify(st.gpu)}`);
+  log(`  audio: ${JSON.stringify(st.audio)}`);
 });
 
+// ==========================================================================
+// Audio unlock
+//
+// iOS will not start an AudioContext outside a user gesture, and the old page
+// tried exactly once, on the first pointerdown anywhere, with `{once: true}`.
+// The first pointerdown on this page is the disc picker or the Boot button --
+// at which point there is no session yet, so the attempt did nothing and the
+// listener was gone. That is why audio was wired and never heard. Keep trying
+// on every gesture until one actually succeeds.
+// ==========================================================================
+let audioUnlocked = false;
+const UNLOCK_EVENTS = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'];
+async function unlockAudio(explicit) {
+  if (audioUnlocked || !session) return;
+  try {
+    await session.startAudio();
+    if (!session.audioRunning) return;      // still suspended: try again next gesture
+    audioUnlocked = true;
+    document.getElementById('sound').disabled = true;
+    document.getElementById('sound').textContent = 'Sound on';
+    for (const ev of UNLOCK_EVENTS) removeEventListener(ev, onGestureUnlock, true);
+  } catch (e) {
+    if (explicit) log('audio unavailable: ' + e.message, 'bad');
+  }
+}
+function onGestureUnlock() { unlockAudio(false); }
+for (const ev of UNLOCK_EVENTS) addEventListener(ev, onGestureUnlock, true);
+// A backgrounded tab suspends the context and nothing tells the page; without
+// this the game comes back with a picture and no sound.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && session) session.resumeAudio();
+});
+
+// ==========================================================================
+// Run loop
+// ==========================================================================
 let cardSaveTimer = 0;
 function start() {
   try {
@@ -202,7 +748,12 @@ function start() {
   }
   document.getElementById('boot').disabled = true;
   document.getElementById('pause').disabled = false;
-  document.getElementById('sound').disabled = false;
+  document.getElementById('sound').disabled = audioUnlocked;
+  if (COARSE && !qs.get('auto')) {
+    setPad(true);
+    setImmersive(true);
+    toast('Tap ☰ for settings');
+  }
   loop();
 }
 
@@ -255,6 +806,7 @@ async function autoTick() {
                           pipelines: s.gpu ? s.gpu.pipelines : null,
                           textures: s.gpu ? s.gpu.textures : null,
                           planned: s.planned, planSkipped: s.planSkipped,
+                          audio: s.audio,
                           rendererError: s.rendererError });
   }
   if (session.frames < autoWant.frames && session.running &&
@@ -332,79 +884,30 @@ function loop() {
     const g = s.gpu;   // null when there is no renderer (?norender)
     hudEl.textContent =
       `${s.fps.toFixed(1)} fps  frame ${s.frames}\n` +
-      (g ? `draws ${g.draws}  skipped ${s.planSkipped + g.skippedDraws}\n` +
-           `pipelines ${g.pipelines}  textures ${g.textures}\n`
+      (g ? `draws ${g.draws}  skipped ${s.planSkipped + g.skippedDraws}\n`
          : `planned ${s.planned}  no renderer\n`) +
-      `pc 0x${s.pc.toString(16).padStart(8, '0')}` +
-      (s.rendererError ? `\n! ${s.rendererError}` : '');
+      (s.rendererError ? `! ${s.rendererError}` : '');
   }
   autoTick();
   scheduleFrame(loop);
 }
 
-// A phone gets the on-screen pad without being asked, and audio starts on the
-// first touch anywhere -- iOS will not start an AudioContext without a gesture,
-// and making the user find a button for it is a worse first thirty seconds.
-if (matchMedia('(pointer: coarse)').matches)
-  document.getElementById('pad').classList.add('on');
-addEventListener('pointerdown', async function unlock() {
-  removeEventListener('pointerdown', unlock);
-  if (session) {
-    try { await session.startAudio(); document.getElementById('sound').disabled = true; }
-    catch (e) { log('audio unavailable: ' + e.message, 'bad'); }
-  }
-}, { once: true });
-
-// --- on-screen pad --------------------------------------------------------
-const PADBITS = window.DOLWEB_PAD;
-const padEl = document.getElementById('pad');
-const FACE = [
-  { name: 'A', bit: PADBITS.A, x: 82, y: 68, r: 9 },
-  { name: 'B', bit: PADBITS.B, x: 70, y: 80, r: 7 },
-  { name: 'X', bit: PADBITS.X, x: 93, y: 56, r: 6 },
-  { name: 'Y', bit: PADBITS.Y, x: 71, y: 55, r: 6 },
-  { name: 'S', bit: PADBITS.START, x: 50, y: 88, r: 5 },
-  { name: 'L', bit: PADBITS.L, x: 12, y: 20, r: 6 },
-  { name: 'R', bit: PADBITS.R, x: 88, y: 20, r: 6 },
-  { name: 'Z', bit: PADBITS.Z, x: 76, y: 22, r: 5 },
-];
-for (const b of FACE) {
-  const el = document.createElement('div');
-  el.className = 'btn';
-  el.textContent = b.name;
-  el.style.left = `calc(${b.x}% - ${b.r}%)`;
-  el.style.top = `calc(${b.y}% - ${b.r * 4 / 3}%)`;
-  el.style.width = `${b.r * 2}%`;
-  el.style.aspectRatio = '1';
-  const set = (on) => {
-    if (!session) return;
-    if (on) session.touchButtons |= b.bit; else session.touchButtons &= ~b.bit;
-    el.classList.toggle('on', on);
-  };
-  el.addEventListener('pointerdown', (e) => { e.preventDefault(); el.setPointerCapture(e.pointerId); set(true); });
-  el.addEventListener('pointerup', () => set(false));
-  el.addEventListener('pointercancel', () => set(false));
-  padEl.appendChild(el);
-}
-const stick = document.getElementById('stick'), knob = document.getElementById('knob');
-function stickMove(e) {
-  const r = stick.getBoundingClientRect();
-  let dx = (e.clientX - (r.left + r.width / 2)) / (r.width / 2);
-  let dy = (e.clientY - (r.top + r.height / 2)) / (r.height / 2);
-  const m = Math.hypot(dx, dy);
-  if (m > 1) { dx /= m; dy /= m; }
-  if (session) { session.stickTouch.x = dx; session.stickTouch.y = -dy; }
-  knob.style.left = `${30 + dx * 30}%`;
-  knob.style.top = `${30 + dy * 30}%`;
-}
-stick.addEventListener('pointerdown', (e) => { e.preventDefault(); stick.setPointerCapture(e.pointerId); stickMove(e); });
-stick.addEventListener('pointermove', (e) => { if (e.buttons || e.pressure > 0) stickMove(e); });
-const stickRelease = () => {
-  if (session) { session.stickTouch.x = 0; session.stickTouch.y = 0; }
-  knob.style.left = '30%'; knob.style.top = '30%';
-};
-stick.addEventListener('pointerup', stickRelease);
-stick.addEventListener('pointercancel', stickRelease);
+// ==========================================================================
+// Startup
+// ==========================================================================
+buildPad();
+layout();
+// ?pad=1 / ?pad=0 force the on-screen pad on a machine whose pointer says
+// otherwise, which is the only way to look at the touch layout from a desktop
+// or a headless screenshot. ?immersive=1 does the same for the chrome.
+const padForced = qs.get('pad');
+setPad(padForced !== null ? padForced !== '0' : COARSE);
+if (qs.get('immersive') === '1') setImmersive(true);
+if (qs.get('cstick') === '1') { cstickOn = true;
+  document.getElementById('cstick').setAttribute('aria-pressed', 'true'); layout(); }
+addEventListener('resize', layout);
+addEventListener('orientationchange', () => { layout(); setTimeout(layout, 250); });
+if (window.visualViewport) visualViewport.addEventListener('resize', layout);
 
 // --- headless/automated mode ----------------------------------------------
 // ?iso=/disc.iso&auto=1&frames=N boots without a picker and POSTs a report,
@@ -483,8 +986,13 @@ window.addEventListener('unhandledrejection', (e) => {
   // --autoplay-policy=no-user-gesture-required so the DSP -> worklet path is
   // exercised rather than assumed.
   if (qs.get('audio')) {
-    try { await session.startAudio(); progress('audio-started'); }
-    catch (e) { progress('audio-failed', { error: String(e) }); }
+    try {
+      await session.startAudio();
+      audioUnlocked = session.audioRunning;
+      progress('audio-started', { state: session.audioCtx.state,
+                                  ctxRate: session.audioCtx.sampleRate,
+                                  guestRate: session.M._dolweb_audio_sample_rate() });
+    } catch (e) { progress('audio-failed', { error: String(e) }); }
   }
 
   // Is the run loop stalled because a step never returns, or because the page's
