@@ -1,5 +1,25 @@
 # WebAssembly as a target
 
+**Update, 2026-08-28: Dolphin runs a GameCube game in a browser at 60 fps, on
+statically recompiled PowerPC.** That is a different route from the one the rest
+of this file argues for, and it is the one that won. `dolphin/` is the build:
+Dolphin Core compiled to wasm32, the disc's guest code recompiled to C on a Mac
+and linked in ahead of time, WebGL2 for the renderer, an AudioWorklet for sound,
+and a disc mounted over HTTP range requests. Disney's Extreme Skate Adventure
+plays at 60 fps and 101-123% of realtime with the throttle off, with **no
+per-title knowledge whatsoever** -- no symbol table, no audio stand-ins, no
+per-game debugging. `dolphin/README.md` has the numbers, and `DOLPHIN-ROUTE.md`
+has the argument and how each of its worries turned out.
+
+Section 5 below says "if the browser build had to be Dolphin, this would be a
+long project", and picks GXRuntime for that reason. That was a fair reading of
+what was known at the time and it is now wrong: Dolphin needed three `#if`
+branches to compile, four fixes to boot, and about a dozen more to run well. The
+rest of this file is kept because its measurements are still correct and still
+describe the target.
+
+---
+
 **Update, 2026-08-27: a GameCube game now runs in a browser.** Super Mario
 Strikers boots from a disc the user supplies, presents frames through WebGPU,
 streams textures and performs EFB copies -- runtime, renderer, disc and guest

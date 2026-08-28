@@ -1,8 +1,24 @@
 # Recompiled guest code as Dolphin's CPU, in WebAssembly
 
-*Written 2026-08-27, after Dolphin was made to boot a game in wasm. This is a
-plan, not a result: nothing below has been built. What has been built is
-recorded in the "Already true" section, with commits.*
+*Written 2026-08-27 as a plan. **Answered 2026-08-28: it works.** Disney skate
+plays at 60 fps in a browser on its recompiled code, with sound. The route is
+built in `dolphin/`, and that directory's README carries the numbers and the
+instruments. What follows is the plan as written, kept because the questions it
+asked are the ones that turned out to matter — with the answers marked.*
+
+## The answers, in the order the plan asked
+
+| the plan's worry | what happened |
+|---|---|
+| module size | 91.6 MB, 12.8 MB gzipped. Not the wall; `-Os` is 6% smaller and no faster. |
+| "the wasm tax on everything that is not the CPU" | Real and then not: the renderer cost 5x until one `glBufferSubData` was changed to `glBufferData`, after which Null and OpenGL measure the same. |
+| coverage | `fallback_steps=32` over a ten-minute run. Coverage was never the problem. |
+| indirect-call cost | Not measurable next to what was. |
+| C backend versus LLVM | The C backend got there. LLVM is blocked on a real obstacle the plan did not see: it computes CPUState offsets with the host's `offsetof`, and wasm32 is 32-bit. |
+
+And one the plan did not ask, which was the whole first day: **the chassis
+livelocked.** A generated loop that reads a hardware register every iteration
+cannot side-exit, because the read hook zeroes the charge its loop guard tests.
 
 ## The objective
 
