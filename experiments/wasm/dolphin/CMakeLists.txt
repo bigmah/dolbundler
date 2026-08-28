@@ -221,14 +221,17 @@ else()
   endif()
   # Handing the canvas to the thread that renders makes every GL call local
   # instead of a queued cross-thread call, and on a Mac that is worth about 14%.
-  # It is off by default because it does not work on iOS: pthread_create with a
-  # transfer list is proxied to the browser's main thread by postMessage, and
-  # there it intermittently never delivers -- the emulation thread simply never
-  # runs, Dolphin prints nothing at all, and the CPU sits in PowerDown with no
-  # error anywhere. Without it the canvas stays on the browser's main thread and
-  # the context is created there and proxied, which is slower and works.
+  #
+  # It is on, but only because Core::Init now survives it not working. Handing a
+  # canvas over makes pthread_create asynchronous -- the browser's main thread
+  # performs the transfer and only then spawns the worker -- and on iOS that
+  # sometimes never happens, with pthread_create having already returned
+  # success. The emulation thread never runs, Dolphin prints nothing at all, and
+  # the CPU sits in PowerDown with no error anywhere. Core::Init waits to see the
+  # thread claim its work and starts a plain one if it does not, which falls back
+  # to a proxied context: slower, and it starts every time.
   option(DOLWEB_OFFSCREEN_CANVAS
-         "Hand the canvas to the rendering thread (faster; broken on iOS)" OFF)
+         "Hand the canvas to the rendering thread (faster where it lands)" ON)
   if(DOLWEB_OFFSCREEN_CANVAS)
     target_link_options(dolweb PRIVATE
       -sOFFSCREENCANVAS_SUPPORT=1

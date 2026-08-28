@@ -39,13 +39,32 @@
   #log.hidden { display: none; }
 
   /* --- the on-screen pad -------------------------------------------------
-     Only on a touch screen, and only over the picture: a phone has no room
-     for a pad beside the game, and a pad that pushes the canvas smaller is
-     worse than one drawn on top of it. */
-  #pad { position: fixed; inset: 0; pointer-events: none; display: none; }
+     Three clusters, each a box that owns its own area: shoulders, the left
+     hand (stick over d-pad) and the face buttons. Everything inside a cluster
+     is a percentage of that cluster, so the clusters can be moved and resized
+     per orientation without any two controls ever landing on top of each
+     other -- which is exactly what the old per-button percentages did on a
+     phone held upright.
+
+     iOS Safari refuses screen.orientation.lock, so portrait is not a corner
+     case to tolerate: it is how the page is first seen. Portrait puts the
+     picture in a band at the top and gives the controls the room underneath;
+     landscape has no room to spare, so there the controls go over the
+     picture. */
+  #pad {
+    position: fixed; inset: 0; pointer-events: none; display: none;
+    /* vw-limited so the left hand and the face buttons can never grow into
+       each other: 42vw + 44vw + two edges still fits the narrowest phone. */
+    --stick: min(42vw, 180px);
+    --dpad: min(32vw, 132px);
+    --face: min(44vw, 196px);
+    --edge-x: max(14px, env(safe-area-inset-left), env(safe-area-inset-right));
+    --edge-y: max(16px, env(safe-area-inset-bottom));
+  }
   body.pad #pad { display: block; }
   body.pad #bar, body.pad #log { display: none; }
   body.pad #stage { position: fixed; inset: 0; }
+
   .btn {
     position: absolute; pointer-events: auto;
     display: flex; align-items: center; justify-content: center;
@@ -55,16 +74,73 @@
   }
   .btn.down { background: rgba(255,255,255,.32); }
   .pill { border-radius: 14px; font-size: 13px; }
+
+  /* shoulders + start: a row that lays itself out, so nothing can collide */
+  #shoulders {
+    position: absolute; left: 0; right: 0;
+    display: flex; gap: 8px; justify-content: center; align-items: center;
+    padding: 0 var(--edge-x);
+  }
+  #shoulders .btn {
+    position: relative; flex: 0 1 auto;
+    height: 38px; min-width: 52px; padding: 0 10px;
+  }
+  #shoulders [data-control="5"] { min-width: 78px; }
+
+  /* the left hand: stick with the d-pad under it */
+  #hand {
+    position: absolute; left: var(--edge-x); bottom: var(--edge-y);
+    width: var(--stick); pointer-events: none;
+  }
   #stick {
-    position: absolute; pointer-events: auto; width: 40vh; height: 40vh;
-    max-width: 190px; max-height: 190px;
-    left: max(18px, env(safe-area-inset-left)); bottom: 18px;
+    position: relative; pointer-events: auto;
+    width: var(--stick); height: var(--stick);
     border-radius: 50%; border: 1px solid rgba(255,255,255,.22);
     background: rgba(255,255,255,.06); touch-action: none;
   }
   #knob {
     position: absolute; width: 34%; height: 34%; left: 33%; top: 33%;
     border-radius: 50%; background: rgba(255,255,255,.32);
+  }
+  #dpad {
+    position: relative; width: var(--dpad); height: var(--dpad);
+    margin: 14px auto 0;
+  }
+  #dpad .btn { width: 34%; height: 34%; font-size: 17px; }
+  #dpad [data-control="6"] { left: 33%; top: 0; }
+  #dpad [data-control="7"] { left: 33%; top: 66%; }
+  #dpad [data-control="8"] { left: 0; top: 33%; }
+  #dpad [data-control="9"] { left: 66%; top: 33%; }
+
+  /* the face buttons, in the GameCube arrangement: A large in the middle,
+     B below-left, X to its right, Y above */
+  #face {
+    position: absolute; right: var(--edge-x); bottom: var(--edge-y);
+    width: var(--face); height: var(--face); pointer-events: none;
+  }
+  #face [data-control="0"] { left: 28%; top: 34%; width: 40%; height: 40%; font-size: 19px; }
+  #face [data-control="1"] { left:  0%; top: 60%; width: 27%; height: 27%; }
+  #face [data-control="2"] { left: 71%; top: 22%; width: 27%; height: 27%; }
+  #face [data-control="3"] { left: 30%; top:  1%; width: 27%; height: 27%; }
+
+  /* --- portrait: picture on top, controls in the room underneath --------- */
+  @media (orientation: portrait) {
+    #pad { --picture: min(80vw, 46vh); }
+    body.pad #stage {
+      top: env(safe-area-inset-top); bottom: auto;
+      height: var(--picture);
+    }
+    #shoulders { top: calc(env(safe-area-inset-top) + var(--picture) + 18px); }
+  }
+
+  /* --- landscape: no room to spare, so the controls go over the picture --- */
+  @media (orientation: landscape) {
+    #pad {
+      --stick: min(30vh, 150px);
+      --dpad: min(24vh, 118px);
+      --face: min(38vh, 180px);
+    }
+    #shoulders { top: max(10px, env(safe-area-inset-top)); }
   }
 </style>
 
@@ -75,19 +151,27 @@
 <canvas id="dolweb-probe" width="1" height="1" style="display:none"></canvas>
 
 <div id="pad">
-  <div id="stick"><div id="knob"></div></div>
-  <div class="btn" data-control="0" style="right:6%;bottom:12%;width:76px;height:76px">A</div>
-  <div class="btn" data-control="1" style="right:22%;bottom:8%;width:60px;height:60px">B</div>
-  <div class="btn" data-control="2" style="right:8%;bottom:38%;width:52px;height:52px">X</div>
-  <div class="btn" data-control="3" style="right:22%;bottom:34%;width:52px;height:52px">Y</div>
-  <div class="btn pill" data-control="10" style="left:4%;top:5%;width:78px;height:38px">L</div>
-  <div class="btn pill" data-control="11" style="right:4%;top:5%;width:78px;height:38px">R</div>
-  <div class="btn pill" data-control="4" style="left:16%;top:5%;width:56px;height:38px">Z</div>
-  <div class="btn pill" data-control="5" style="left:50%;top:5%;transform:translateX(-50%);width:88px;height:38px">START</div>
-  <div class="btn" data-control="6" style="left:26%;bottom:30%;width:46px;height:46px">↑</div>
-  <div class="btn" data-control="7" style="left:26%;bottom:8%;width:46px;height:46px">↓</div>
-  <div class="btn" data-control="8" style="left:19%;bottom:19%;width:46px;height:46px">←</div>
-  <div class="btn" data-control="9" style="left:33%;bottom:19%;width:46px;height:46px">→</div>
+  <div id="shoulders">
+    <div class="btn pill" data-control="10">L</div>
+    <div class="btn pill" data-control="4">Z</div>
+    <div class="btn pill" data-control="5">START</div>
+    <div class="btn pill" data-control="11">R</div>
+  </div>
+  <div id="hand">
+    <div id="stick"><div id="knob"></div></div>
+    <div id="dpad">
+      <div class="btn" data-control="6">↑</div>
+      <div class="btn" data-control="7">↓</div>
+      <div class="btn" data-control="8">←</div>
+      <div class="btn" data-control="9">→</div>
+    </div>
+  </div>
+  <div id="face">
+    <div class="btn" data-control="0">A</div>
+    <div class="btn" data-control="1">B</div>
+    <div class="btn" data-control="2">X</div>
+    <div class="btn" data-control="3">Y</div>
+  </div>
 </div>
 
 <div id="bar">

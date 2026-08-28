@@ -4,6 +4,7 @@
 #include "Core/Core.h"
 
 #ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
 #include <emscripten/threading.h>
 #include <pthread.h>
 #endif
@@ -127,9 +128,28 @@ struct EmuThreadArgs
 static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,
                       WindowSystemInfo wsi);
 
-static void* EmuThreadTrampoline(void* raw)
+// The emulation thread may be started twice and must run once. Handing a canvas
+// to a thread makes its pthread_create asynchronous -- the browser's main thread
+// performs the transfer and only then spawns the worker -- and on iOS that
+// sometimes never happens, with pthread_create having already returned success.
+// So Core::Init waits to see the thread claim its work and starts a plain one if
+// it does not; whichever arrives first wins the exchange and the other returns.
+static std::atomic<bool> s_emu_claimed{false};
+static EmuThreadArgs* s_emu_args = nullptr;
+
+static void* EmuThreadTrampoline(void*)
 {
-  std::unique_ptr<EmuThreadArgs> args(static_cast<EmuThreadArgs*>(raw));
+  if (s_emu_claimed.exchange(true))
+  {
+    // A late delivery of the canvas-carrying thread, after the plain one had
+    // already been started and claimed the work. Nothing to do and nobody to
+    // join it.
+    pthread_detach(pthread_self());
+    return nullptr;
+  }
+  s_emu_pthread = pthread_self();
+  std::unique_ptr<EmuThreadArgs> args(s_emu_args);
+  s_emu_args = nullptr;
   EmuThread(*args->system, std::move(args->boot), args->wsi);
   return nullptr;
 }
@@ -345,17 +365,39 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
   s_state.store(State::Starting);
 #ifdef __EMSCRIPTEN__
   {
-    auto* args = new EmuThreadArgs{&system, std::move(boot), prepared_wsi};
+    s_emu_args = new EmuThreadArgs{&system, std::move(boot), prepared_wsi};
+    s_emu_claimed.store(false);
     // Always to the emulation thread, even in dual core where it is not the
     // thread that renders: a canvas can only move at pthread_create and only
     // from the thread that currently holds it, so reaching the video thread
     // means passing through the thread that creates it. This is the first of
     // those two hops; GetInitializedVideoGuard() makes the second.
-    if (!StartCanvasOwningThread(&s_emu_pthread, EmuThreadTrampoline, args,
-                                 prepared_wsi.type == WindowSystemType::Emscripten))
+    pthread_t attempt{};
+    const bool wants_canvas = prepared_wsi.type == WindowSystemType::Emscripten;
+    if (!StartCanvasOwningThread(&attempt, EmuThreadTrampoline, nullptr, wants_canvas))
     {
-      delete args;
+      delete s_emu_args;
+      s_emu_args = nullptr;
       return false;
+    }
+    if (wants_canvas)
+    {
+      // Give the transfer a moment to land. Two seconds is far longer than the
+      // hop takes when it works and far shorter than a user waits before
+      // deciding the page is broken.
+      for (int i = 0; i < 200 && !s_emu_claimed.load(); ++i)
+        emscripten_thread_sleep(10);
+      if (!s_emu_claimed.load())
+      {
+        WARN_LOG_FMT(BOOT, "The canvas-carrying emulation thread never started; "
+                           "retrying without it. GL calls will be proxied and slow.");
+        if (pthread_create(&attempt, nullptr, EmuThreadTrampoline, nullptr) != 0)
+        {
+          delete s_emu_args;
+          s_emu_args = nullptr;
+          return false;
+        }
+      }
     }
     s_emu_pthread_running = true;
     return true;

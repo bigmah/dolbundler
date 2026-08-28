@@ -724,6 +724,11 @@ bool PopulateConfig(GLContext* m_main_gl_context)
                               g_ogl_config.gl_renderer, g_ogl_config.gl_version),
                   5000);
 
+  // WebGL2 has no buffer_storage and never will, so on Emscripten this warning is
+  // neither news nor actionable -- and at 60 s it sits on top of the game. The
+  // streaming path already takes the orphaning route that is fast here
+  // (OGLStreamBuffer.cpp), which is what the warning is really asking about.
+#ifndef __EMSCRIPTEN__
   if (!g_ogl_config.bSupportsGLBufferStorage && !g_ogl_config.bSupportsGLPinnedMemory)
   {
     OSD::AddMessage(fmt::format("Your OpenGL driver does not support {}_buffer_storage.",
@@ -731,6 +736,7 @@ bool PopulateConfig(GLContext* m_main_gl_context)
                     60000);
     OSD::AddMessage("This device's performance may be poor.", 60000);
   }
+#endif
 
   INFO_LOG_FMT(VIDEO, "Video Info: {}, {}, {}", g_ogl_config.gl_vendor, g_ogl_config.gl_renderer,
                g_ogl_config.gl_version);
