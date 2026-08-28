@@ -12,6 +12,7 @@
 #include "host/interrupt.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static bool g_log = false;
 static DolGuestMemory g_guest_memory;
@@ -25,6 +26,18 @@ static DolDi g_di;
 #define AI_SIZE  0x20u
 #define WGPIPE_BASE 0xCC008000u
 #define WGPIPE_SIZE 0x20u
+// The command processor's register block. Nothing here drives the renderer --
+// gxcore consumes the write-gather pipe directly and the graphics processor is
+// never behind -- but the SDK reads the status register to find out whether the
+// GP has caught up, and an unmapped read of zero says "still busy". Disney's
+// Extreme Skate Adventure polls GXGetGPStatus in its frame loop and stopped
+// dead after two frames on exactly that.
+#define CP_BASE 0xCC000000u
+#define CP_SIZE 0x80u
+#define CP_STATUS_OFF 0x00u
+#define CP_STATUS_UNDERFLOW_LO 0x0002u
+#define CP_STATUS_READ_IDLE 0x0004u
+#define CP_STATUS_CMD_IDLE  0x0008u
 
 void mmio_set_logging(bool enabled) {
     g_log = enabled;
@@ -153,6 +166,40 @@ static bool graphics_guest_address_resolver_cb(
     return true;
 }
 #endif
+
+static u8 g_cp_regs[CP_SIZE];
+
+static bool cp_read_cb(void* user, CPUState* cpu, u32 ea, u8 size, u64* value) {
+    (void)user;
+    (void)cpu;
+    const u32 offset = ea - CP_BASE;
+    if (offset + size > CP_SIZE)
+        return false;
+    if (offset == CP_STATUS_OFF && size == 2u) {
+        // Always idle, and always below the low watermark: gxcore consumes the
+        // write-gather pipe as it is written, so the FIFO is empty and the
+        // graphics processor has nothing outstanding.
+        *value = CP_STATUS_UNDERFLOW_LO | CP_STATUS_READ_IDLE |
+                 CP_STATUS_CMD_IDLE;
+        return true;
+    }
+    u64 result = 0;
+    for (u8 i = 0; i < size; i++)
+        result = (result << 8) | g_cp_regs[offset + i];
+    *value = result;
+    return true;
+}
+
+static bool cp_write_cb(void* user, CPUState* cpu, u32 ea, u8 size, u64 value) {
+    (void)user;
+    (void)cpu;
+    const u32 offset = ea - CP_BASE;
+    if (offset + size > CP_SIZE)
+        return false;
+    for (u8 i = 0; i < size; i++)
+        g_cp_regs[offset + size - 1u - i] = (u8)(value >> (8u * i));
+    return true;
+}
 
 static bool audio_read_cb(void* user, CPUState* cpu, u32 ea, u8 size,
                           u64* value) {
@@ -321,6 +368,9 @@ bool mmio_install(CPUState* cpu) {
     ok = ok && dol_mmio_bus_register(&g_mmio_bus, WGPIPE_BASE, WGPIPE_SIZE,
                                      NULL, gx_fifo_write_cb, NULL);
 #endif
+    memset(g_cp_regs, 0, sizeof g_cp_regs);
+    ok = ok && dol_mmio_bus_register(&g_mmio_bus, CP_BASE, CP_SIZE,
+                                     cp_read_cb, cp_write_cb, NULL);
     ok = ok && dol_mmio_bus_register(&g_mmio_bus, DSP_BASE, DSP_SIZE,
                                      audio_read_cb, audio_write_cb, NULL);
     ok = ok && dol_mmio_bus_register(&g_mmio_bus, AI_BASE, AI_SIZE,

@@ -663,6 +663,11 @@ def main():
                     help="a file of `NAME 0xADDRESS` lines, verified by hand, that "
                          "wins over both methods (repeatable)")
     ap.add_argument("--names-out", help="write every transferred name, not just SDK ones")
+    ap.add_argument("--where", help="comma-separated reference addresses; report where "
+                                    "each one landed in the target. This is how the "
+                                    "GAME_ADDR_* hooks in runtime/host/game_<ID>.h are "
+                                    "found -- they have no SDK name, so the table cannot "
+                                    "carry them, but the transfer still knows them.")
     args = ap.parse_args()
 
     with open(args.dol, "rb") as f:
@@ -672,6 +677,7 @@ def main():
 
     sdk = aurora_sdk_names(args.aurora)
     named = {}          # address -> name, from the transfer
+    where_map = None    # reference address -> target address
     all_named = {}      # address -> name, including non-SDK library functions
 
     dsy_here = dsy_named(dol, functions, args.dsy) if os.path.exists(args.dsy) else {}
@@ -685,6 +691,7 @@ def main():
         mapping, anchors, strong = transfer(ref, ref_funcs, dol, functions)
         print(f"transfer: {len(strong)} strong anchors, {len(mapping)} functions matched "
               f"({100.0 * len(mapping) / max(len(ref_funcs), 1):.0f}% of the reference)")
+        where_map = {r: t for t, r in mapping.items()}
         for tgt_addr, ref_addr in mapping.items():
             name = ref_names.get(ref_addr)
             if name:
@@ -803,6 +810,16 @@ def main():
             print(f"    missing 0x{a:08X} {truth[a]}")
         for a in extra[:20]:
             print(f"    extra   0x{a:08X} {mine[a]}")
+
+    if args.where and where_map is not None:
+        for token in args.where.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            a = int(token, 16)
+            t = where_map.get(a)
+            print(f"where 0x{a:08X} -> " +
+                  (f"0x{t:08X}" if t else "not matched"))
 
     if args.names_out and all_named:
         with open(args.names_out, "w") as out:

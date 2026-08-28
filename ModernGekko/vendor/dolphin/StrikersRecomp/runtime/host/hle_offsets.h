@@ -1,64 +1,98 @@
 #ifndef STRIKERSRECOMP_HLE_OFFSETS_H
 #define STRIKERSRECOMP_HLE_OFFSETS_H
 
-// Game-specific and SDK-specific guest memory offsets for Strikers HLE registry
-#define STRIKERS_THP_SIMPLE_CONTROL         0x8032F000u
-#define STRIKERS_GX_PROJ_MATRIX             0x8032C090u
-#define STRIKERS_GX_MODELVIEW_MATRIX        0x8032C0D0u
-#define STRIKERS_GX_MVIEW_MATRIX            0x8032C060u
-#define STRIKERS_OS_CONTEXT_POINTER         0x800000D4u
-#define STRIKERS_BALL_DRAW_FUN_START        0x8011DF10u
-#define STRIKERS_BALL_DRAW_FUN_END          0x8011E38Cu
-#define STRIKERS_RENDER_WORLD_GLOBAL        0x8037273Cu
-#define STRIKERS_GBALL_GLOBAL               0x80373664u
-#define STRIKERS_BALL_VTABLE                0x802AFA18u
-#define STRIKERS_DISPATCH_INTERRUPT_ADDR    0x80256FD0u
-#define STRIKERS_MUSYX_DSP_DONE_ADDR        0x80374A98u
-#define STRIKERS_GX_DIRTY_STATE_HELPER_ADDR 0x8024DCA0u
-#define STRIKERS_GX_FLUSH_PRIM_HELPER_ADDR  0x8024DDF0u
+// Which game this build is for.
+//
+// Everything the host policy knows that is not an SDK function lives in one
+// header per title: guest globals, the addresses of the game's own functions we
+// hook, and the handful of SDK internals (the __GXData pointer, the dirty-state
+// offset) that no symbol table names. SDK *functions* do not appear here -- they
+// come from generated/sdk_symbols.inc, by name.
+//
+// Set with -DSTRIKERSRECOMP_GAME=GEXE52 at configure time; the CMake option
+// defines STRIKERSRECOMP_GAME_HEADER for us.
+#ifndef STRIKERSRECOMP_GAME_HEADER
+#define STRIKERSRECOMP_GAME_HEADER "host/game_G4QE01.h"
+#endif
+#include STRIKERSRECOMP_GAME_HEADER
 
-#define STRIKERS_CBALL_UPDATE_ORIENTATION   0x80009E00u
-#define STRIKERS_CBALL_POST_PHYSICS_UPDATE  0x8000B828u
-#define STRIKERS_PHYSICS_UPDATE             0x80132B10u
-#define STRIKERS_PHYSICS_AI_BALL_POST_UPDATE 0x801343C8u
-#define STRIKERS_PHYSICS_WORLD_UPDATE       0x8020199Cu
-#define STRIKERS_PHYSICS_WORLD_PRE_UPDATE   0x80201A8Cu
-#define STRIKERS_DWORLD_QUICK_STEP          0x80220894u
-#define STRIKERS_DBODY_SET_FORCE            0x802214E8u
-#define STRIKERS_DBODY_ADD_FORCE            0x80221530u
-#define STRIKERS_DBODY_SET_ANGULAR_VEL      0x8022160Cu
-#define STRIKERS_DBODY_SET_LINEAR_VEL       0x8022161Cu
-#define STRIKERS_DBODY_SET_ROTATION         0x8022162Cu
-#define STRIKERS_DBODY_SET_POSITION         0x802216B4u
-#define STRIKERS_SOR_LCP                    0x80222DC0u
-#define STRIKERS_SOR_LCP_RETURN             0x80222994u
-#define STRIKERS_DX_STEP_BODY               0x80223F30u
-
-// Game diagnostic guest memory offsets for main.c
-#define STRIKERS_TASK_MANAGER               0x803742B8u
-#define STRIKERS_TRANSITION                 0x80373DA0u
-#define STRIKERS_LOADING_GLOBAL             0x80373DE4u
-#define STRIKERS_GAME_SCENE_MANAGER         0x80373840u
-#define STRIKERS_FE_RESOURCE_MANAGER        0x80374448u
-#define STRIKERS_FE_SCENE_MANAGER           0x80374450u
-#define STRIKERS_FE_INPUT                   0x80374458u
-#define STRIKERS_VIEW_BASE                  0x80336FC0u
-#define STRIKERS_PENDING_RESOURCE           0x80343610u
-#define STRIKERS_CURRENT_RESOURCE           0x80374434u
-#define STRIKERS_RESOURCE_CONTEXT           0x80374438u
-#define STRIKERS_PAD_CURRENT                0x80372FF0u
-#define STRIKERS_PAD_NEXT                   0x80372FF4u
-#define STRIKERS_PAD_INTERNAL               0x80372FF8u
-#define STRIKERS_PUSHPOP_HEAD               0x80343660u
-#define STRIKERS_BUS_CLOCK                  0x800000F8u
-#define STRIKERS_UPTIME                     0x80373D78u
-#define STRIKERS_RESET_MODE                 0x80373DB0u
-#define STRIKERS_RESET_STATE                0x80373DB4u
-#define STRIKERS_AUDIO_INIT                 0x80373DB8u
-#define STRIKERS_RESET_PRESSED              0x80373DB9u
-#define STRIKERS_GAME_PAUSED                0x80373DBAu
-#define STRIKERS_CHECK_CARD                 0x80373DBBu
-#define STRIKERS_RESET_HOLD_BASE            0x802C16B0u
-#define STRIKERS_VIEW_ENABLED_BASE          0x80302050u
+// A title that does not have one of these gets zero, and every use is guarded:
+// a hook at address zero is never installed (it is outside the dispatch range)
+// and a guest write to address zero would corrupt the OS globals.
+#ifndef GAME_ADDR_OS_INIT_AUDIO_SYSTEM
+#define GAME_ADDR_OS_INIT_AUDIO_SYSTEM 0u
+#endif
+#ifndef GAME_ADDR_AI_SRC_INIT
+#define GAME_ADDR_AI_SRC_INIT 0u
+#endif
+#ifndef GAME_ADDR_SAL_INIT_DSP
+#define GAME_ADDR_SAL_INIT_DSP 0u
+#endif
+#ifndef GAME_ADDR_ARAM_UPLOAD_DATA
+#define GAME_ADDR_ARAM_UPLOAD_DATA 0u
+#endif
+#ifndef GAME_ADDR_CARD_FORMAT_ASYNC
+#define GAME_ADDR_CARD_FORMAT_ASYNC 0u
+#endif
+#ifndef GAME_ADDR_SND_FX_START_PARA_INFO
+#define GAME_ADDR_SND_FX_START_PARA_INFO 0u
+#endif
+#ifndef GAME_ADDR_SND_STREAM_ACTIVATE
+#define GAME_ADDR_SND_STREAM_ACTIVATE 0u
+#endif
+#ifndef GAME_ADDR_SND_PUSH_GROUP
+#define GAME_ADDR_SND_PUSH_GROUP 0u
+#endif
+#ifndef GAME_ADDR_SND_SEQ_PLAY_EX
+#define GAME_ADDR_SND_SEQ_PLAY_EX 0u
+#endif
+#ifndef GAME_ADDR_TASK_SET_NEXT_STATE
+#define GAME_ADDR_TASK_SET_NEXT_STATE 0u
+#endif
+#ifndef GAME_ADDR_TASK_STARTUP
+#define GAME_ADDR_TASK_STARTUP 0u
+#endif
+#ifndef GAME_ADDR_MAIN_MENU_UPDATE
+#define GAME_ADDR_MAIN_MENU_UPDATE 0u
+#endif
+#ifndef GAME_ADDR_CHOOSE_SIDE_CHECK
+#define GAME_ADDR_CHOOSE_SIDE_CHECK 0u
+#endif
+#ifndef GAME_ADDR_CHOOSE_SIDE_POSITION
+#define GAME_ADDR_CHOOSE_SIDE_POSITION 0u
+#endif
+#ifndef GAME_ADDR_MOVIE_PLAY
+#define GAME_ADDR_MOVIE_PLAY 0u
+#endif
+#ifndef GAME_ADDR_MOVIE_STOP
+#define GAME_ADDR_MOVIE_STOP 0u
+#endif
+#ifndef GAME_ADDR_MOVIE_START
+#define GAME_ADDR_MOVIE_START 0u
+#endif
+#ifndef GAME_ADDR_THP_SIMPLE_DECODE
+#define GAME_ADDR_THP_SIMPLE_DECODE 0u
+#endif
+#ifndef GAME_ADDR_THP_SIMPLE_DECODE_RET
+#define GAME_ADDR_THP_SIMPLE_DECODE_RET 0u
+#endif
+#ifndef GAME_ADDR_THP_VIDEO_DECODE_RET
+#define GAME_ADDR_THP_VIDEO_DECODE_RET 0u
+#endif
+#ifndef GAME_ADDR_THP_VIDEO_DECODE_RET2
+#define GAME_ADDR_THP_VIDEO_DECODE_RET2 0u
+#endif
+#ifndef GAME_ADDR_THP_SIMPLE_PRELOAD
+#define GAME_ADDR_THP_SIMPLE_PRELOAD 0u
+#endif
+#ifndef GAME_ADDR_THP_SIMPLE_SET_BUFFER
+#define GAME_ADDR_THP_SIMPLE_SET_BUFFER 0u
+#endif
+#ifndef GAME_ADDR_THP_SIMPLE_OPEN
+#define GAME_ADDR_THP_SIMPLE_OPEN 0u
+#endif
+#ifndef GAME_ADDR_THP_VIDEO_DECODE
+#define GAME_ADDR_THP_VIDEO_DECODE 0u
+#endif
 
 #endif /* STRIKERSRECOMP_HLE_OFFSETS_H */

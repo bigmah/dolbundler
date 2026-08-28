@@ -62,6 +62,8 @@ static void apply_ai_control(DolAudioDma* dma) {
     dol_platform_audio_set_sample_rate(rate);
 }
 
+static void dsp_post_mail(DolAudioDma* dma, u32 mail);
+
 void dol_audio_dma_init(DolAudioDma* dma) {
     memset(dma, 0, sizeof(*dma));
     dma->sample_rate = DOL_AUDIO_DMA_32KHZ;
@@ -70,6 +72,11 @@ void dol_audio_dma_init(DolAudioDma* dma) {
     dma->work_units_per_chunk = 1;
     store_be32(dma->ai_regs + DOL_AUDIO_DMA_AI_CONTROL_OFF,
                DOL_AUDIO_DMA_AI_CONTROL_INIT);
+    // A console powers up with the DSP boot ROM's word already in the mailbox.
+    // Post it here as well as on reset, because a client that intercepts
+    // __OSInitAudioSystem -- which is where the reset lives -- would otherwise
+    // never see one.
+    dsp_post_mail(dma, DOL_AUDIO_DMA_DSP_ROM_GREETING);
 }
 
 void dol_audio_dma_set_work_rate(DolAudioDma* dma, u64 work_units_per_second) {
@@ -210,6 +217,11 @@ void dol_audio_dma_dsp_mmio_read(DolAudioDma* dma, u32 offset, u8 size,
             control |= DOL_AUDIO_DMA_DSP_AID_INT_BIT;
         else
             control &= (u16)~DOL_AUDIO_DMA_DSP_AID_INT_BIT;
+        if (dma->mail_interrupt_pending)
+            control |= DOL_AUDIO_DMA_DSP_DSP_INT_BIT;
+        else
+            control &= (u16)~DOL_AUDIO_DMA_DSP_DSP_INT_BIT;
+        control &= (u16)~DOL_AUDIO_DMA_DSP_ARAM_INT_BIT;
         *value = control;
         return;
     }
@@ -218,6 +230,21 @@ void dol_audio_dma_dsp_mmio_read(DolAudioDma* dma, u32 offset, u8 size,
         return;
     }
     *value = register_read(dma->dsp_regs, offset, size);
+    // Reading the low half of the DSP's mailbox consumes the word.
+    if (offset == DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_LO && size == 2u) {
+        const u16 hi = load_be16(dma->dsp_regs +
+                                 DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_HI);
+        store_be16(dma->dsp_regs + DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_HI,
+                   (u16)(hi & ~DOL_AUDIO_DMA_DSP_MAIL_PRESENT));
+    }
+}
+
+// Put a word in the DSP's outgoing mailbox, as the DSP would.
+static void dsp_post_mail(DolAudioDma* dma, u32 mail) {
+    store_be16(dma->dsp_regs + DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_HI,
+               (u16)((mail >> 16) | DOL_AUDIO_DMA_DSP_MAIL_PRESENT));
+    store_be16(dma->dsp_regs + DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_LO,
+               (u16)(mail & 0xFFFFu));
 }
 
 void dol_audio_dma_dsp_mmio_write(DolAudioDma* dma, u32 offset, u8 size,
@@ -226,11 +253,59 @@ void dol_audio_dma_dsp_mmio_write(DolAudioDma* dma, u32 offset, u8 size,
         return;
     if (offset == DOL_AUDIO_DMA_DSP_CONTROL_OFF && size == 2u) {
         u16 control = (u16)value;
-        // Writing the AID status bit acknowledges the interrupt (write-1-clear).
+        // The three interrupt status bits are write-1-clear, and so is the
+        // reset request. Storing them as written is worse than leaving an
+        // interrupt un-acknowledged: the SDK's own acknowledgement writes them
+        // as ones, so the register reads back "DSP mail pending" forever and
+        // __OSDispatchInterrupt hands every audio interrupt to __DSPHandler,
+        // which then waits for a mail. That, and a reset bit that never
+        // cleared, is where Disney's Extreme Skate Adventure stopped -- 6.2
+        // billion guest blocks into a boot with no frame. Strikers never met
+        // either, because its __OSInitAudioSystem is replaced wholesale.
         if (control & DOL_AUDIO_DMA_DSP_AID_INT_BIT)
             dol_audio_dma_ack_interrupt(dma);
-        control &= (u16)~DOL_AUDIO_DMA_DSP_AID_INT_BIT;
+        if (control & DOL_AUDIO_DMA_DSP_DSP_INT_BIT)
+            dma->mail_interrupt_pending = false;
+        const bool reset = (control & DOL_AUDIO_DMA_DSP_RESET_BIT) != 0u;
+        control &= (u16)~(DOL_AUDIO_DMA_DSP_AID_INT_BIT |
+                          DOL_AUDIO_DMA_DSP_ARAM_INT_BIT |
+                          DOL_AUDIO_DMA_DSP_DSP_INT_BIT |
+                          DOL_AUDIO_DMA_DSP_RESET_BIT);
         store_be16(dma->dsp_regs + offset, control);
+        // A reset brings the boot ROM up, and its first act is to mail the CPU.
+        // __DSP_boot_task waits for exactly that word before sending anything.
+        if (reset)
+            dsp_post_mail(dma, DOL_AUDIO_DMA_DSP_ROM_GREETING);
+        return;
+    }
+    // The CPU's outgoing mailbox. The "a word is waiting" bit is bit 31 of the
+    // 32-bit word, which is not a flag beside the data -- it *is* the top bit
+    // of the data, and every word in the SDK's boot protocol has it set
+    // (0x80F3A001, 0x80F3D001, ...). Clearing it on the way in, as a naive
+    // reading of "the sender sets it, the receiver clears it" suggests, both
+    // corrupts the mail and hides the protocol from anything watching. The
+    // receiver clears it, so: store the halves as written, reconstruct the word
+    // when the low half completes it, and only then mark the box empty -- a
+    // real DSP reads it immediately, and `while (DSPCheckMailToDSP());` has to
+    // terminate.
+    if (offset == DOL_AUDIO_DMA_DSP_MAIL_TO_DSP_LO && size == 2u) {
+        store_be16(dma->dsp_regs + offset, (u16)value);
+        const u16 hi = load_be16(dma->dsp_regs + DOL_AUDIO_DMA_DSP_MAIL_TO_DSP_HI);
+        const u32 mail = ((u32)hi << 16) | (u32)(u16)value;
+        store_be16(dma->dsp_regs + DOL_AUDIO_DMA_DSP_MAIL_TO_DSP_HI,
+                   (u16)(hi & ~DOL_AUDIO_DMA_DSP_MAIL_PRESENT));
+        // One exchange, read off a real boot sequence: ten mails ending with
+        // the boot ROM's "go" word and the task's start vector, after which a
+        // real DSP is running the task and mails DSP_INIT with an interrupt.
+        // Without that reply AXInit waits forever for a callback that only the
+        // interrupt brings.
+        if (mail == DOL_AUDIO_DMA_DSP_MAIL_BOOT_GO) {
+            dma->mail_boot_countdown = 1;
+        } else if (dma->mail_boot_countdown > 0 &&
+                   --dma->mail_boot_countdown == 0) {
+            dsp_post_mail(dma, DOL_AUDIO_DMA_DSP_MAIL_INIT);
+            dma->mail_interrupt_pending = true;
+        }
         return;
     }
     register_write(dma->dsp_regs, offset, size, value);
@@ -243,9 +318,12 @@ void dol_audio_dma_dsp_mmio_write(DolAudioDma* dma, u32 offset, u8 size,
 }
 
 bool dol_audio_dma_dsp_interrupt_pending(const DolAudioDma* dma) {
-    if (dma == NULL || !dma->interrupt_pending)
+    if (dma == NULL)
         return false;
     const u16 control = load_be16(dma->dsp_regs +
                                   DOL_AUDIO_DMA_DSP_CONTROL_OFF);
-    return (control & DOL_AUDIO_DMA_DSP_AID_MSK_BIT) != 0;
+    if (dma->interrupt_pending && (control & DOL_AUDIO_DMA_DSP_AID_MSK_BIT))
+        return true;
+    return dma->mail_interrupt_pending &&
+           (control & DOL_AUDIO_DMA_DSP_DSP_MSK_BIT) != 0;
 }

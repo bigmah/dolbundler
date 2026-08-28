@@ -65,6 +65,11 @@ static double host_time_seconds(void) {
 
 static u32 thp_audio_valid_samples(CPUState* cpu, u32* output_valid) {
     const u32 base = STRIKERS_THP_SIMPLE_CONTROL; // THP_SIMPLE_CONTROL
+    if (base == 0u) {                 // no THP player identified for this title
+        if (output_valid != NULL)
+            *output_valid = 0u;
+        return 0u;
+    }
     u32 total = 0;
     for (u32 i = 0; i < 6u; i++)
         total += mem_read32(cpu, base + 0x16Cu + i * 12u + 8u);
@@ -83,7 +88,7 @@ static void movie_cadence_present(CPUState* cpu) {
         return;
 
     const u32 base = STRIKERS_THP_SIMPLE_CONTROL; // THP_SIMPLE_CONTROL
-    if (mem_read8(cpu, base + 0x6Cu) == 0u) {
+    if (base == 0u || mem_read8(cpu, base + 0x6Cu) == 0u) {
         g_movie_cadence_started = false;
         return;
     }
@@ -483,104 +488,105 @@ static const HleEntry kHandlers[] = {
     { "CARDClose",         dol_hle_CARDClose },
     { "CARDReadAsync",     dol_hle_CARDReadAsync },
     { "CARDWriteAsync",    dol_hle_CARDWriteAsync },
+    // These used to be spelled as Strikers addresses in kAddrHandlers even
+    // though every one of them is an SDK symbol the generated table already
+    // names. By name they follow the disc.
+    { "ARQPostRequest",    dol_hle_ARQPostRequest },
+    { "DSPCheckMailToDSP", dol_hle_return_zero },
+    { "DVDInit",           dol_hle_DVDInit },
+    { "DVDConvertPathToEntrynum", dol_hle_DVDConvertPathToEntrynum },
+    { "DVDFastOpen",       dol_hle_DVDFastOpen },
+    { "DVDClose",          dol_hle_DVDClose },
+    { "DVDReadAsyncPrio",  dol_hle_DVDReadAsyncPrio },
+    { "DVDGetCommandBlockStatus", dol_hle_DVDGetCommandBlockStatus },
+    { "DVDGetDriveStatus", dol_hle_DVDGetDriveStatus },
+    { "OSGetResetButtonState", dol_hle_OSGetResetButtonState },
+    { "LCStoreBlocks",     dol_hle_LCStoreBlocks },
+    { "LCStoreData",       dol_hle_LCStoreData },
+    { "LCQueueWait",       dol_hle_noop },
+#ifdef STRIKERSRECOMP_HAS_BACKEND
+    { "PSMTXConcat",       dol_hle_PSMTXConcat },
+    { "GXSetArray",        dol_hle_GXSetArray },
+    { "GXBegin",           strikers_hle_GXBegin },
+    { "GXCallDisplayList", dol_hle_GXCallDisplayList },
+#endif
+    { "PADReset",          dol_hle_PADReset },
+    { "PADRecalibrate",    dol_hle_PADRecalibrate },
+    { "PADInit",           dol_hle_PADInit },
+    { "PADRead",           hle_PADRead },
+    { "PADControlMotor",   dol_hle_PADControlMotor },
+    { "PADSetSpec",        dol_hle_PADSetSpec },
 };
 
+// The four functions here have no SDK name and appear in no signature
+// database: two are static SDK internals, two belong to the game's own audio
+// middleware. A title that has not had them identified leaves them at zero,
+// which is outside the dispatch range and therefore installs nothing.
 static const HleAddrEntry kAddrHandlers[] = {
-    { 0x80254718u, dol_hle_noop,                     "__OSInitAudioSystem" },
-    { 0x8023B610u, dol_hle_noop,                     "__AI_SRC_INIT" },
-    { 0x80282B98u, dol_hle_salInitDsp,                "salInitDsp" },
-    { 0x80281BCCu, dol_hle_aramUploadData,            "aramUploadData" },
-    { 0x8023D638u, dol_hle_ARQPostRequest,            "ARQPostRequest" },
-    { 0x802442C4u, dol_hle_return_zero,                "DSPCheckMailToDSP" },
-    { 0x8024608Cu, dol_hle_DVDInit,                  "DVDInit" },
-    { 0x80245C0Cu, dol_hle_DVDConvertPathToEntrynum, "DVDConvertPathToEntrynum" },
-    { 0x80245F00u, dol_hle_DVDFastOpen,              "DVDFastOpen" },
-    { 0x80245F74u, dol_hle_DVDClose,                 "DVDClose" },
-    { 0x80245F98u, dol_hle_DVDReadAsyncPrio,         "DVDReadAsyncPrio" },
-    { 0x80248118u, dol_hle_DVDGetCommandBlockStatus, "DVDGetCommandBlockStatus" },
-    { 0x80248164u, dol_hle_DVDGetDriveStatus,        "DVDGetDriveStatus" },
-    { 0x802429FCu, dol_hle_CARDFormatAsync,           "CARDFormatAsync" },
-    { 0x80257CC0u, dol_hle_OSGetResetButtonState,    "OSGetResetButtonState" },
-    { 0x80254C54u, dol_hle_LCStoreBlocks,             "LCStoreBlocks" },
-    { 0x80254C78u, dol_hle_LCStoreData,               "LCStoreData" },
-    { 0x80254D24u, dol_hle_noop,                      "LCQueueWait" },
-#ifdef STRIKERSRECOMP_HAS_BACKEND
-    { 0x80252680u, dol_hle_PSMTXConcat,                "PSMTXConcat" },
-    { 0x8024D240u, dol_hle_GXSetArray,                "GXSetArray" },
-    { 0x8024DD20u, strikers_hle_GXBegin,               "GXBegin" },
-    { 0x80251510u, dol_hle_GXCallDisplayList,          "GXCallDisplayList" },
-#endif
-    { 0x8025AC10u, dol_hle_PADReset,                  "PADReset" },
-    { 0x8025AD20u, dol_hle_PADRecalibrate,            "PADRecalibrate" },
-    { 0x8025AE34u, dol_hle_PADInit,                   "PADInit" },
-    { 0x8025AF84u, hle_PADRead,                       "PADRead" },
-    { 0x8025B284u, dol_hle_PADControlMotor,           "PADControlMotor" },
-    { 0x8025B33Cu, dol_hle_PADSetSpec,                "PADSetSpec" },
-
+    { GAME_ADDR_OS_INIT_AUDIO_SYSTEM, dol_hle_noop,          "__OSInitAudioSystem" },
+    { GAME_ADDR_AI_SRC_INIT,          dol_hle_noop,          "__AI_SRC_INIT" },
+    { GAME_ADDR_SAL_INIT_DSP,         dol_hle_salInitDsp,    "salInitDsp" },
+    { GAME_ADDR_ARAM_UPLOAD_DATA,     dol_hle_aramUploadData, "aramUploadData" },
+    { GAME_ADDR_CARD_FORMAT_ASYNC,    dol_hle_CARDFormatAsync, "CARDFormatAsync" },
 };
 
-static const HleAddrEntry kNotify[] = {
-    { 0x80259990u, notify_OSSleepThread,  "OSSleepThread" },
-    { 0x802442FCu, notify_DSPSendMailToDSP, "DSPSendMailToDSP" },
-    { 0x80268A08u, notify_audio_api,       "sndFXStartParaInfo" },
-    { 0x8026C518u, notify_audio_api,       "sndStreamActivate" },
-    { 0x80277274u, notify_audio_api,       "sndPushGroup" },
-    { 0x80277BA4u, notify_audio_api,       "sndSeqPlayEx" },
-    { 0x80257994u, notify_OSResetSystem,    "OSResetSystem" },
-    { 0x801D2908u, notify_SetNextState,     "nlTaskManager::SetNextState" },
-    { 0x801D2B28u, notify_TaskManagerStartup, "nlTaskManager::Startup" },
-    { 0x800A9A5Cu, notify_SHMainMenuUpdate, "SHMainMenu::Update" },
-    { 0x800C3C64u, notify_IChooseSideCheckControllers, "IChooseSide::CheckControllers" },
-    { 0x800C36E8u, notify_IChooseSidePositionController, "IChooseSide::PositionController" },
-    { 0x801CB7F8u, notify_MoviePlay,        "MoviePlay" },
-    { 0x801CB8E0u, notify_MovieStop,        "MovieStop" },
-    { 0x801CBA48u, notify_MovieStart,       "MovieStart" },
-    { 0x801CC5E8u, notify_THPSimpleDecode,  "THPSimpleDecode" },
-    { 0x801CB868u, notify_THPSimpleDecodeReturn, "THPSimpleDecode return" },
-    { 0x801CC6C4u, notify_THPVideoDecodeReturn, "THPVideoDecode return" },
-    { 0x801CC7F0u, notify_THPVideoDecodeReturn, "THPVideoDecode return" },
-    { 0x801CCB00u, notify_THPSimplePreLoad, "THPSimplePreLoad" },
-    { 0x801CCDD0u, notify_THPSimpleSetBuffer, "THPSimpleSetBuffer" },
-    { 0x801CD2C8u, notify_THPSimpleOpen,    "THPSimpleOpen" },
-    { 0x802857ACu, notify_THPVideoDecode,   "THPVideoDecode" },
-    { 0x80254BF4u, notify_LCEnable,          "LCEnable" },
-    { 0x80254C2Cu, notify_LCDisable,         "LCDisable" },
-    { 0x80255360u, notify_OSLoadContext,     "OSLoadContext" },
+// Notifications on SDK functions, by name.
+static const HleEntry kNameNotify[] = {
+    { "OSSleepThread",     notify_OSSleepThread },
+    { "DSPSendMailToDSP",  notify_DSPSendMailToDSP },
+    { "OSResetSystem",     notify_OSResetSystem },
+    { "LCEnable",          notify_LCEnable },
+    { "LCDisable",         notify_LCDisable },
+    { "OSLoadContext",     notify_OSLoadContext },
 #ifdef STRIKERSRECOMP_HAS_BACKEND
-    { 0x8024E974u, notify_GXCopyDisp,      "GXCopyDisp" },
-    { 0x8024EADCu, notify_GXCopyTex,       "GXCopyTex" },
-    { 0x8024F89Cu, notify_GXLoadTexObj,    "GXLoadTexObj" },
-    { 0x8024F928u, notify_GXLoadTlut,      "GXLoadTlut" },
-    { 0x8025186Cu, notify_GXLoadPosMtxImm, "GXLoadPosMtxImm" },
-    { 0x8025DF30u, notify_VIWaitForRetrace,"VIWaitForRetrace" },
-    { 0x8025E3F8u, notify_VIConfigure,     "VIConfigure" },
+    { "GXCopyDisp",        notify_GXCopyDisp },
+    { "GXCopyTex",         notify_GXCopyTex },
+    { "GXLoadTexObj",      notify_GXLoadTexObj },
+    { "GXLoadTlut",        notify_GXLoadTlut },
+    { "GXLoadPosMtxImm",   notify_GXLoadPosMtxImm },
+    { "VIWaitForRetrace",  notify_VIWaitForRetrace },
+    { "VIConfigure",       notify_VIConfigure },
 #endif
+};
+
+// Notifications on the game's own functions. All zero for a title whose
+// middleware has not been identified, which disables the feature rather than
+// hooking an unrelated address.
+static const HleAddrEntry kNotify[] = {
+    { GAME_ADDR_SND_FX_START_PARA_INFO, notify_audio_api, "sndFXStartParaInfo" },
+    { GAME_ADDR_SND_STREAM_ACTIVATE,    notify_audio_api, "sndStreamActivate" },
+    { GAME_ADDR_SND_PUSH_GROUP,         notify_audio_api, "sndPushGroup" },
+    { GAME_ADDR_SND_SEQ_PLAY_EX,        notify_audio_api, "sndSeqPlayEx" },
+    { GAME_ADDR_TASK_SET_NEXT_STATE,    notify_SetNextState, "nlTaskManager::SetNextState" },
+    { GAME_ADDR_TASK_STARTUP,           notify_TaskManagerStartup, "nlTaskManager::Startup" },
+    { GAME_ADDR_MAIN_MENU_UPDATE,       notify_SHMainMenuUpdate, "SHMainMenu::Update" },
+    { GAME_ADDR_CHOOSE_SIDE_CHECK,      notify_IChooseSideCheckControllers, "IChooseSide::CheckControllers" },
+    { GAME_ADDR_CHOOSE_SIDE_POSITION,   notify_IChooseSidePositionController, "IChooseSide::PositionController" },
+    { GAME_ADDR_MOVIE_PLAY,             notify_MoviePlay,  "MoviePlay" },
+    { GAME_ADDR_MOVIE_STOP,             notify_MovieStop,  "MovieStop" },
+    { GAME_ADDR_MOVIE_START,            notify_MovieStart, "MovieStart" },
+    { GAME_ADDR_THP_SIMPLE_DECODE,      notify_THPSimpleDecode, "THPSimpleDecode" },
+    { GAME_ADDR_THP_SIMPLE_DECODE_RET,  notify_THPSimpleDecodeReturn, "THPSimpleDecode return" },
+    { GAME_ADDR_THP_VIDEO_DECODE_RET,   notify_THPVideoDecodeReturn, "THPVideoDecode return" },
+    { GAME_ADDR_THP_VIDEO_DECODE_RET2,  notify_THPVideoDecodeReturn, "THPVideoDecode return" },
+    { GAME_ADDR_THP_SIMPLE_PRELOAD,     notify_THPSimplePreLoad, "THPSimplePreLoad" },
+    { GAME_ADDR_THP_SIMPLE_SET_BUFFER,  notify_THPSimpleSetBuffer, "THPSimpleSetBuffer" },
+    { GAME_ADDR_THP_SIMPLE_OPEN,        notify_THPSimpleOpen, "THPSimpleOpen" },
+    { GAME_ADDR_THP_VIDEO_DECODE,       notify_THPVideoDecode, "THPVideoDecode" },
 };
 
 // ---------------------------------------------------------------------------
 // Trace and Dispatch tables
 // ---------------------------------------------------------------------------
 
-typedef struct {
-    u32         address;
-    const char* name;
-} HleTraceEntry;
-
-static const HleTraceEntry kTrace[] = {
-    { 0x8023BA70u, "ARInit" },
-    { 0x8023BB40u, "ARGetBaseAddress" },
-    { 0x8023BB48u, "ARGetSize" },
-    { 0x8025DA80u, "VIInit" },
-    { 0x8025DF30u, "VIWaitForRetrace" },
-    { 0x8025E3F8u, "VIConfigure" },
-    { 0x8025ED30u, "VISetNextFrameBuffer" },
-    { 0x80255360u, "OSLoadContext" },
-    { 0x80259370u, "__OSReschedule" },
-    { 0x80259598u, "OSResumeThread" },
+static const char* const kTrace[] = {
+    "ARInit", "ARGetBaseAddress", "ARGetSize", "VIInit", "VIWaitForRetrace",
+    "VIConfigure", "VISetNextFrameBuffer", "OSLoadContext", "__OSReschedule",
+    "OSResumeThread",
 };
 
 #define HLE_CODE_BASE 0x80003000u
-#define HLE_CODE_LIMIT 0x8028D260u
+#define HLE_CODE_LIMIT GAME_HLE_CODE_LIMIT
 #define HLE_DISPATCH_COUNT ((HLE_CODE_LIMIT - HLE_CODE_BASE) / 4u)
 
 static HleDispatchEntry g_hle_dispatch[HLE_DISPATCH_COUNT];
@@ -593,8 +599,8 @@ static HleDispatchEntry* hle_dispatch_entry(u32 address) {
 
 static const char* trace_name(u32 address) {
     for (size_t i = 0; i < sizeof kTrace / sizeof kTrace[0]; i++)
-        if (kTrace[i].address == address)
-            return kTrace[i].name;
+        if (sdk_symbol_address(kTrace[i]) == address)
+            return kTrace[i];
     return NULL;
 }
 
@@ -700,6 +706,12 @@ static void initialize_hle_dispatch(void) {
         if (entry != NULL)
             entry->intercept = kAddrHandlers[i].fn;
     }
+    for (size_t i = 0; i < sizeof kNameNotify / sizeof kNameNotify[0]; i++) {
+        HleDispatchEntry* entry =
+            hle_dispatch_entry(sdk_symbol_address(kNameNotify[i].name));
+        if (entry != NULL)
+            entry->notify = kNameNotify[i].fn;
+    }
     for (size_t i = 0; i < sizeof kNotify / sizeof kNotify[0]; i++) {
         HleDispatchEntry* entry = hle_dispatch_entry(kNotify[i].address);
         if (entry != NULL)
@@ -741,8 +753,11 @@ void hle_install(CPUState* cpu) {
     config.thp_simple_control_addr = STRIKERS_THP_SIMPLE_CONTROL;
     config.gx_dirty_state_helper_addr = STRIKERS_GX_DIRTY_STATE_HELPER_ADDR;
     config.gx_flush_prim_helper_addr = STRIKERS_GX_FLUSH_PRIM_HELPER_ADDR;
-    memcpy(config.game_code, "G4QE", 4);
-    memcpy(config.company, "01", 2);
+    memcpy(config.game_code, GAME_ID_CODE, 4);
+    memcpy(config.company, GAME_ID_COMPANY, 2);
+    config.gx_data_base_reg = GAME_GX_DATA_BASE_REG;
+    config.gx_data_sda_offset = GAME_GX_DATA_SDA_OFFSET;
+    config.gx_dirty_state_offset = GAME_GX_DIRTY_STATE_OFFSET;
     dol_hle_init(&config);
 
     // 2. Local logs and scripting settings

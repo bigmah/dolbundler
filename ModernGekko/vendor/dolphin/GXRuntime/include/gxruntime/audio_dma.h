@@ -17,6 +17,17 @@
 // bases stay owned by the game MMIO-bus registration.
 #define DOL_AUDIO_DMA_AI_REG_BYTES 0x20u
 #define DOL_AUDIO_DMA_DSP_REG_BYTES 0x40u
+// The two mailboxes. Bit 15 of each high half is "a word is waiting"; hardware
+// sets it when the sender writes the low half and clears it when the receiver
+// reads the low half.
+#define DOL_AUDIO_DMA_DSP_MAIL_TO_DSP_HI   0x00u
+#define DOL_AUDIO_DMA_DSP_MAIL_TO_DSP_LO   0x02u
+#define DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_HI 0x04u
+#define DOL_AUDIO_DMA_DSP_MAIL_FROM_DSP_LO 0x06u
+#define DOL_AUDIO_DMA_DSP_MAIL_PRESENT     0x8000u
+// What the boot ROM answers with on a real console. The SDK reads it once and
+// throws it away, so only the presence of a word matters.
+#define DOL_AUDIO_DMA_DSP_ROM_GREETING     0x8071FEEDu
 
 #define DOL_AUDIO_DMA_AI_CONTROL_OFF 0x00u
 // AICR bits (Dolphin AudioInterface.h). AIDFR is intentionally inverted w.r.t.
@@ -29,7 +40,18 @@
 // UDSPControl bits (Dolphin DSP.h, DSP_CONTROL_MASK = 0x0C07). The AID bit is
 // the DMA-to-AI/speakers interrupt status; AID_MSK gates it as a PI source.
 #define DOL_AUDIO_DMA_DSP_CONTROL_OFF 0x0Au
-#define DOL_AUDIO_DMA_DSP_AID_INT_BIT 0x0008u
+// DSPCR (0xCC00500A). The three status bits are write-1-clear, like every
+// other interrupt status on this machine; the reset bit is a request that
+// completes immediately when there is no DSP to reset.
+#define DOL_AUDIO_DMA_DSP_RESET_BIT    0x0001u
+#define DOL_AUDIO_DMA_DSP_AID_INT_BIT  0x0008u
+#define DOL_AUDIO_DMA_DSP_ARAM_INT_BIT 0x0020u
+#define DOL_AUDIO_DMA_DSP_DSP_INT_BIT  0x0080u
+#define DOL_AUDIO_DMA_DSP_DSP_MSK_BIT  0x0100u
+// The boot ROM's "here is where to start" mail, and what a task mails back once
+// it is running. Both are fixed by the SDK's DSP boot protocol.
+#define DOL_AUDIO_DMA_DSP_MAIL_BOOT_GO 0x80F3D001u
+#define DOL_AUDIO_DMA_DSP_MAIL_INIT    0xDCD10000u
 #define DOL_AUDIO_DMA_DSP_AID_MSK_BIT 0x0010u
 
 #define DOL_AUDIO_DMA_DSP_DMA_START_HI_OFF 0x30u
@@ -50,6 +72,11 @@ typedef struct DolAudioDma {
     u64 work_units_per_frame;
     u64 work_units_per_chunk;
     bool interrupt_pending;
+    // The DSP mailbox handshake. There is no DSP, so the model answers the
+    // boot sequence itself: two mails after the boot ROM's "go" word, the task
+    // is running and reports so.
+    bool mail_interrupt_pending;
+    unsigned mail_boot_countdown;
     // Big-endian AI/DSP register files. AI CR DRIVES the AID sample rate; DSP
     // control carries the AID interrupt mask and DMA address/length state.
     u8 ai_regs[DOL_AUDIO_DMA_AI_REG_BYTES];

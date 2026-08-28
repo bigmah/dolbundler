@@ -24,6 +24,10 @@ bench/web/full.wasm
 # The browser client's module is built from the user's own disc.
 web/strikers.js
 web/strikers.wasm
+# One module per game, and every one of them is derived from the user's disc.
+web/gexe52.js
+web/gexe52.wasm
+frame-*.png
 web/selftest.js
 web/selftest.wasm
 web/build-gxr/

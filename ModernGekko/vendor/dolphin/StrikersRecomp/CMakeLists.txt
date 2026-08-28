@@ -27,6 +27,16 @@ if(STRIKERSRECOMP_ENABLE_WEB)
     set(STRIKERSRECOMP_ENABLE_AURORA OFF CACHE BOOL "" FORCE)
     set(GXRUNTIME_ENABLE_WEB ON CACHE BOOL "" FORCE)
 endif()
+# Which disc this build is for. Selects runtime/host/game_<ID>.h, the generated
+# directory, and the name of the emscripten module, so two games can be built
+# from one tree without either overwriting the other.
+set(STRIKERSRECOMP_GAME "G4QE01" CACHE STRING "Game ID this client is built for")
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/runtime/host/game_${STRIKERSRECOMP_GAME}.h")
+    message(FATAL_ERROR
+        "No host policy for ${STRIKERSRECOMP_GAME}: expected "
+        "runtime/host/game_${STRIKERSRECOMP_GAME}.h")
+endif()
+
 set(STRIKERSRECOMP_GXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/../GXRuntime"
     CACHE PATH "Path to a GXRuntime checkout")
 set(STRIKERSRECOMP_AURORA_DIR "${STRIKERSRECOMP_GXRUNTIME_DIR}/graphics/aurora"
@@ -46,7 +56,12 @@ add_subdirectory("${STRIKERSRECOMP_GXRUNTIME_DIR}"
                  "${CMAKE_BINARY_DIR}/GXRuntime")
 
 # Where `tools/generate.py` placed the recompiled output.
-set(STRIKERSRECOMP_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated"
+if(STRIKERSRECOMP_GAME STREQUAL "G4QE01")
+    set(STRIKERSRECOMP_DEFAULT_GENERATED "${CMAKE_SOURCE_DIR}/generated")
+else()
+    set(STRIKERSRECOMP_DEFAULT_GENERATED "${CMAKE_SOURCE_DIR}/generated-${STRIKERSRECOMP_GAME}")
+endif()
+set(STRIKERSRECOMP_GENERATED_DIR "${STRIKERSRECOMP_DEFAULT_GENERATED}"
     CACHE PATH "Directory containing DolRecomp output (generated.h, generated.c, chunks/)")
 
 if(NOT EXISTS "${STRIKERSRECOMP_GENERATED_DIR}/generated.h")
@@ -108,6 +123,8 @@ target_include_directories(StrikersRecomp PRIVATE
     "${CMAKE_SOURCE_DIR}/runtime"
     "${STRIKERSRECOMP_GENERATED_DIR}"
 )
+target_compile_definitions(StrikersRecomp PRIVATE
+    STRIKERSRECOMP_GAME_HEADER="host/game_${STRIKERSRECOMP_GAME}.h")
 target_link_libraries(StrikersRecomp PRIVATE GXRuntime::runtime)
 
 include(CheckLibraryExists)
@@ -127,9 +144,18 @@ if(STRIKERSRECOMP_ENABLE_WEB)
     # present, no textures and no display lists.
     target_compile_definitions(StrikersRecomp PRIVATE
         STRIKERSRECOMP_WEB=1 STRIKERSRECOMP_HAS_BACKEND=1)
+    # One module name per game, so the page can hold more than one and a build
+    # for a second disc does not overwrite the first.
+    if(STRIKERSRECOMP_GAME STREQUAL "G4QE01")
+        set(STRIKERSRECOMP_WEB_MODULE "strikers")
+        set(STRIKERSRECOMP_WEB_EXPORT "StrikersWeb")
+    else()
+        string(TOLOWER "${STRIKERSRECOMP_GAME}" STRIKERSRECOMP_WEB_MODULE)
+        set(STRIKERSRECOMP_WEB_EXPORT "DolWeb_${STRIKERSRECOMP_GAME}")
+    endif()
     set_target_properties(StrikersRecomp PROPERTIES
         LINKER_LANGUAGE CXX
-        OUTPUT_NAME "strikers"
+        OUTPUT_NAME "${STRIKERSRECOMP_WEB_MODULE}"
         SUFFIX ".js")
     # MODULARIZE so the page controls when the module instantiates; INVOKE_RUN=0
     # because boot is explicit (the user supplies a disc first). ALLOW_MEMORY_
@@ -147,7 +173,7 @@ if(STRIKERSRECOMP_ENABLE_WEB)
     target_link_options(StrikersRecomp PRIVATE
         "-sENVIRONMENT=web,worker"
         "-sMODULARIZE=1"
-        "-sEXPORT_NAME=StrikersWeb"
+        "-sEXPORT_NAME=${STRIKERSRECOMP_WEB_EXPORT}"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sINITIAL_MEMORY=128MB"
         "-sMAXIMUM_MEMORY=2GB"

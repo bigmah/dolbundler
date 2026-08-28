@@ -164,7 +164,6 @@ body.immersive #tab { display: block; }
 
 <script src="dolweb.js"></script>
 <script src="dolboot.js"></script>
-<script src="strikers.js"></script>
 <script>
 const qs = new URLSearchParams(location.search);
 const logEl = document.getElementById('log');
@@ -211,6 +210,26 @@ function toast(msg, ms) {
 let session = null;
 let raf = 0;
 const COARSE = matchMedia('(pointer: coarse)').matches;
+
+// One module per game, chosen by the disc's own ID rather than compiled in.
+// The module is 80-110 MB, so it is fetched only once a disc says which one is
+// wanted -- loading them all to find out would be a minute of somebody's data.
+const GAMES = {
+  G4QE01: { script: 'strikers.js', factory: 'StrikersWeb',
+            title: 'Super Mario Strikers' },
+  GEXE52: { script: 'gexe52.js', factory: 'DolWeb_GEXE52',
+            title: "Disney's Extreme Skate Adventure" },
+};
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error(`could not load ${src}`));
+    document.head.appendChild(el);
+  });
+}
 
 // ==========================================================================
 // Layout
@@ -583,11 +602,20 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) relea
 // ==========================================================================
 // Session
 // ==========================================================================
-async function ensureSession() {
+async function ensureSession(gameId) {
   if (session) return session;
+  const id = qs.get('game') || gameId;
+  const game = GAMES[id];
+  if (!game) {
+    const known = Object.keys(GAMES).join(', ');
+    throw new Error(`no module built for ${id || 'this disc'} (have: ${known})`);
+  }
   logEl.textContent = '';
-  log('loading module…', 'dim');
+  log(`loading ${game.title}…`, 'dim');
   const t0 = performance.now();
+  await loadScript(game.script);
+  const factory = window[game.factory];
+  if (!factory) throw new Error(`${game.script} defined no ${game.factory}`);
   // The runtime's diagnostics are env-gated (STRIKERS_*), and a wasm build has
   // no environment. Emscripten snapshots ENV into `environ` before main, so the
   // values have to be in place during preRun -- setting Module.ENV afterwards is
@@ -599,7 +627,7 @@ async function ensureSession() {
     blockBudget: parseInt(qs.get('budget') || '20000000', 10),
     msBudget: parseFloat(qs.get('ms') || '12'),
   }).load(
-    () => StrikersWeb({ print: (s) => log(s, 'dim'),
+    () => factory({ print: (s) => log(s, 'dim'),
                         printErr: (s) => log(s, s.startsWith('[') ? 'dim' : 'bad'),
                         preRun: [(mod) => {
                           const env = (mod && mod.ENV) || (typeof ENV !== 'undefined' ? ENV : null);
@@ -614,7 +642,10 @@ async function ensureSession() {
 }
 
 async function useDiscBytes(bytes) {
-  const s = await ensureSession();
+  // The disc names the game in its first six bytes, and that is what picks the
+  // module -- so read it before anything is instantiated.
+  const id = String.fromCharCode(...bytes.subarray(0, 6));
+  const s = await ensureSession(id);
   s.attachDisc(new ArrayBufferDisc(bytes));
   await s.restoreCard();
   document.getElementById('boot').disabled = false;

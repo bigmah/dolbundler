@@ -587,8 +587,20 @@ u64 audio_mmio_read(u32 address, u8 size) {
 
 void audio_mmio_write(u32 address, u8 size, u64 value) {
     if (address >= DSP_BASE && address < DSP_BASE + DSP_SIZE) {
-        dol_audio_dma_dsp_mmio_write(&g_audio_dma, address - DSP_BASE, size,
-                                     value);
+        const u32 dsp_offset = address - DSP_BASE;
+        dol_audio_dma_dsp_mmio_write(&g_audio_dma, dsp_offset, size, value);
+        // The mailbox handshake is the one part of this model that has to agree
+        // with a protocol nobody wrote down here, so it is worth being able to
+        // watch it rather than guess.
+        if (g_log && dsp_offset <= 0x0Au) {
+            u64 control = 0;
+            dol_audio_dma_dsp_mmio_read(&g_audio_dma, 0x0Au, 2, &control);
+            fprintf(stderr, "[dsp] write +%02X = 0x%04llX  cr=0x%04llX%s\n",
+                    dsp_offset, (unsigned long long)(value & 0xFFFFu),
+                    (unsigned long long)control,
+                    dol_audio_dma_dsp_interrupt_pending(&g_audio_dma)
+                        ? "  INT" : "");
+        }
         return;
     }
     const u32 offset = address - AI_BASE;
@@ -647,9 +659,13 @@ void audio_dsp_mail(CPUState* cpu, u32 mail) {
 
     g_waiting_for_command_list = false;
     process_command_list(cpu, mail);
-    mem_write32(cpu, STRIKERS_MUSYX_DSP_DONE_ADDR, 1);
+    // Zero means this title's MusyX completion flag has not been located.
+    // Writing there anyway would land on the OS globals at 0.
+    if (STRIKERS_MUSYX_DSP_DONE_ADDR)
+        mem_write32(cpu, STRIKERS_MUSYX_DSP_DONE_ADDR, 1);
 }
 
 void audio_skip_dsp_init(CPUState* cpu) {
-    mem_write32(cpu, STRIKERS_MUSYX_DSP_DONE_ADDR, 1);
+    if (STRIKERS_MUSYX_DSP_DONE_ADDR)
+        mem_write32(cpu, STRIKERS_MUSYX_DSP_DONE_ADDR, 1);
 }
