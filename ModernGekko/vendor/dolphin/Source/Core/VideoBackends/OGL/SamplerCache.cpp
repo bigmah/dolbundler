@@ -1,6 +1,8 @@
 // Copyright 2013 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "VideoBackends/OGL/SamplerCache.h"
 
 #include <memory>
@@ -83,6 +85,14 @@ void SamplerCache::SetParameters(GLuint sampler_id, const SamplerState& params)
                                                                GL_LINEAR_MIPMAP_NEAREST;
   }
 
+  // MODERNGEKKO_NO_MIPMAP drops to a non-mipmapped filter. WebGL returns black
+  // for a texture that is not mipmap complete, where a desktop driver samples
+  // level 0 anyway, so this separates "the texture is black" from "the shading
+  // made it black" for a surface that renders flat.
+  static const bool no_mipmap = std::getenv("MODERNGEKKO_NO_MIPMAP") != nullptr;
+  if (no_mipmap)
+    min_filter = (params.tm0.min_filter == FilterMode::Near) ? GL_NEAREST : GL_LINEAR;
+
   glSamplerParameteri(sampler_id, GL_TEXTURE_MIN_FILTER, min_filter);
   glSamplerParameteri(sampler_id, GL_TEXTURE_MAG_FILTER, mag_filter);
 
@@ -94,8 +104,8 @@ void SamplerCache::SetParameters(GLuint sampler_id, const SamplerState& params)
   glSamplerParameteri(sampler_id, GL_TEXTURE_WRAP_T,
                       address_modes[static_cast<u32>(params.tm0.wrap_v.Value())]);
 
-  glSamplerParameterf(sampler_id, GL_TEXTURE_MIN_LOD, params.tm1.min_lod / 16.f);
-  glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_LOD, params.tm1.max_lod / 16.f);
+  glSamplerParameterf(sampler_id, GL_TEXTURE_MIN_LOD, no_mipmap ? 0.f : params.tm1.min_lod / 16.f);
+  glSamplerParameterf(sampler_id, GL_TEXTURE_MAX_LOD, no_mipmap ? 0.f : params.tm1.max_lod / 16.f);
 
   if (g_backend_info.bSupportsLodBiasInSampler)
   {

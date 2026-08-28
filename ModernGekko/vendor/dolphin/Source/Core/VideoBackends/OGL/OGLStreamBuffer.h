@@ -18,7 +18,7 @@ public:
   static std::unique_ptr<StreamBuffer> Create(u32 type, u32 size);
   virtual ~StreamBuffer();
 
-  u32 GetGLBufferId() const { return m_buffer; }
+  virtual u32 GetGLBufferId() const { return m_buffer; }
   u32 GetSize() const { return m_size; }
   u32 GetCurrentOffset() const { return m_iterator; }
 

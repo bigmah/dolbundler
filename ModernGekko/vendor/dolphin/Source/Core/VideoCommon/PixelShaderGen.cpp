@@ -1,6 +1,9 @@
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string>
+
 #include "VideoCommon/PixelShaderGen.h"
 
 #include "Common/Assert.h"
@@ -1802,6 +1805,25 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
     out.Write("\tocol0.rgb = float3(prev.rgb >> 2) / 63.0;\n");
   else
     out.Write("\tocol0.rgb = float3(prev.rgb) / 255.0;\n");
+
+  // MODERNGEKKO_FLAT_SHADE paints every fragment magenta. Wireframe would be
+  // the natural way to ask "is this geometry reaching the framebuffer at all",
+  // and it needs glPolygonMode, which GLES and WebGL do not have. This asks the
+  // same question: a surface that renders black stays black if it is not being
+  // rasterised, and turns magenta if it is and the shading is what is wrong.
+  static const char* flat_shade = std::getenv("MODERNGEKKO_FLAT_SHADE");
+  if (flat_shade)
+  {
+    const std::string mode(flat_shade);
+    if (mode == "tex")
+      out.Write("\tocol0.rgb = float3(textemp.rgb) / 255.0;\n");
+    else if (mode == "ras")
+      out.Write("\tocol0.rgb = float3(rastemp.rgb) / 255.0;\n");
+    else if (mode == "konst")
+      out.Write("\tocol0.rgb = float3(konsttemp.rgb) / 255.0;\n");
+    else
+      out.Write("\tocol0.rgb = float3(1.0, 0.0, 1.0);\n");
+  }
 
   // Colors will be blended against the 8-bit alpha from ocol1 and
   // the 6-bit alpha from ocol0 will be written to the framebuffer
