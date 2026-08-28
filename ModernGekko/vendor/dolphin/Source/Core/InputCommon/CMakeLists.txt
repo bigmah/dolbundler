@@ -125,6 +125,14 @@ elseif(DOLPHIN_IOS)
   )
   target_link_libraries(inputcommon PRIVATE ${COREFOUNDATION_LIBRARY})
   target_compile_options(inputcommon PRIVATE -fobjc-arc)
+elseif(EMSCRIPTEN)
+  # A browser has no device-input API worth wiring to a GameCube pad, and the
+  # page owns the keyboard and the touch screen anyway. Same mechanism as iOS
+  # and Android: the host feeds control states straight into the overrider.
+  target_sources(inputcommon PRIVATE
+    ControllerInterface/Touch/InputOverrider.cpp
+    ControllerInterface/Touch/InputOverrider.h
+  )
 elseif(APPLE)
   target_sources(inputcommon PRIVATE
     ControllerInterface/Quartz/Quartz.h

@@ -410,6 +410,13 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformWin32.cpp)
         target_link_libraries(moderngekko PRIVATE dwmapi)
     endif()
+    if(EMSCRIPTEN)
+        # Same inversion as iOS: the host owns the surface. Here it is a canvas
+        # named by a CSS selector rather than a CAMetalLayer.
+        target_sources(moderngekko PRIVATE
+            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformEmscripten.cpp)
+        target_compile_definitions(moderngekko PRIVATE MODERNGEKKO_HAVE_EMSCRIPTEN=1)
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         # The host app owns the window on iOS; this only reports the layer it
         # is given. See PlatformIOS.mm for why the ownership is inverted.

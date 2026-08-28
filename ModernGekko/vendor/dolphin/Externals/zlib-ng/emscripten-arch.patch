@@ -1,0 +1,18 @@
+diff --git a/cmake/detect-arch.cmake b/cmake/detect-arch.cmake
+index f0547ba..80a1474 100644
+--- a/cmake/detect-arch.cmake
++++ b/cmake/detect-arch.cmake
+@@ -88,6 +88,13 @@ elseif("${ARCH}" MATCHES "rs6000")
+ elseif("${ARCH}" MATCHES "riscv(32|64)")
+     set(BASEARCH "riscv")
+     set(BASEARCH_RISCV_FOUND TRUE)
++elseif(EMSCRIPTEN OR "${ARCH}" MATCHES "wasm(32|64)?")
++    # Emscripten's toolchain file reports CMAKE_SYSTEM_PROCESSOR as "x86",
++    # which the fallback below then rounds up to a real x86, and the SIMD
++    # sources fail on __cpuid and "=a" asm constraints. WebAssembly has no
++    # architecture-specific path here; the generic C one is correct.
++    set(BASEARCH "wasm")
++    set(BASEARCH_WASM_FOUND TRUE)
+ else()
+     set(BASEARCH "x86")
+     set(BASEARCH_X86_FOUND TRUE)

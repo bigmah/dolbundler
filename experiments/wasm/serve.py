@@ -3,7 +3,8 @@
 
     python3 serve.py spike          # the GX -> WGSL -> WebGPU spike
     python3 serve.py bench          # the guest-code benchmark
-    python3 serve.py game           # the full runtime (web/)
+    python3 serve.py game           # the GXRuntime client (web/)
+    python3 serve.py dolphin        # Dolphin in wasm (dolphin/web/)
     python3 serve.py bench --lan    # listen on every interface, for a phone
 
 `game` also accepts --iso <path>, which mounts a disc image at /disc.iso with
@@ -49,12 +50,63 @@ def make_handler(root, iso_path=None):
         def do_GET(self):
             if iso_path and self.path.split("?")[0] == "/disc.iso":
                 return self.serve_iso()
+            if self.headers.get("Range"):
+                return self.serve_range()
             return super().do_GET()
 
         def do_HEAD(self):
             if iso_path and self.path.split("?")[0] == "/disc.iso":
                 return self.serve_iso(head_only=True)
             return super().do_HEAD()
+
+        def serve_range(self, head_only=False):
+            """Range requests for any file under the served directory.
+
+            SimpleHTTPRequestHandler ignores Range and sends the whole file with
+            a 200, which a client that asked for 64 KB of a 75 MB movie takes as
+            "here are the first 64 KB" -- wrong data, no error. WASMFS's fetch
+            backend is exactly that client: it is what lets a browser mount a
+            1.2 GB disc without downloading it.
+            """
+            path = self.translate_path(self.path)
+            if os.path.isdir(path) or not os.path.isfile(path):
+                return super().do_GET()
+            size = os.path.getsize(path)
+            spec = self.headers["Range"][6:].split(",")[0]
+            a, _, b = spec.partition("-")
+            if a:
+                start = int(a)
+                end = int(b) if b else size - 1
+            else:
+                start = max(0, size - int(b))
+                end = size - 1
+            end = min(end, size - 1)
+            if start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            length = end - start + 1
+            self.send_response(206)
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if head_only:
+                return
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    remaining -= len(chunk)
 
         def serve_iso(self, head_only=False):
             size = os.path.getsize(iso_path)
@@ -208,7 +260,7 @@ def dev_certificate(addresses):
 
 def main(argv):
     which = argv[1] if len(argv) > 1 else "spike"
-    if which not in ("spike", "bench", "game"):
+    if which not in ("spike", "bench", "game", "dolphin"):
         print(__doc__)
         return 2
     iso_path = None

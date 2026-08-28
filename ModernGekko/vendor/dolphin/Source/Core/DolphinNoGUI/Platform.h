@@ -56,6 +56,14 @@ public:
   static std::unique_ptr<Platform> CreateMacOSPlatform();
 #endif
 
+#ifdef __EMSCRIPTEN__
+  // The page owns the canvas; the runtime only draws into it. The argument is
+  // a CSS selector because that is what the browser's own APIs take -- there
+  // is no window handle. Must be set before Init().
+  static void SetEmscriptenCanvas(const char* css_selector);
+  static std::unique_ptr<Platform> CreateEmscriptenPlatform();
+#endif
+
 #ifdef MODERNGEKKO_HAVE_UIKIT
   // The layer is created and owned by the host app; the runtime only draws
   // into it. Must be set before Init().

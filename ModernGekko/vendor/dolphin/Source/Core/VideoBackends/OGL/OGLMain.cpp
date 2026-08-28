@@ -121,7 +121,17 @@ bool VideoBackend::FillBackendInfo(GLContext* context)
   g_backend_info.bSupports3DVision = false;
   g_backend_info.bSupportsPostProcessing = true;
   g_backend_info.bSupportsSSAA = true;
+#ifdef __EMSCRIPTEN__
+  // WebGL is stricter than either GL or GLES here: depthRange() with
+  // zNear > zFar is INVALID_OPERATION, and the call is simply dropped. Dolphin
+  // sets a reversed range for every viewport, so leaving this true means every
+  // draw uses whatever range was last accepted -- depth testing against the
+  // wrong direction, silently, with only a console warning to say so. The
+  // not-supported path already exists for D3D and costs a shader-side flip.
+  g_backend_info.bSupportsReversedDepthRange = false;
+#else
   g_backend_info.bSupportsReversedDepthRange = true;
+#endif
   g_backend_info.bSupportsLogicOp = true;
   g_backend_info.bSupportsMultithreading = false;
   g_backend_info.bSupportsCopyToVram = true;

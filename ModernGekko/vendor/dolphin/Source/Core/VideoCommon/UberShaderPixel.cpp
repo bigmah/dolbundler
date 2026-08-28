@@ -1158,17 +1158,22 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
   }
   else if (!host_config.backend_logic_op)
   {
+    // The `u` suffixes are not decoration: logic_op_mode is a uint, and GLSL ES
+    // requires case labels to have the same type as the switch init-expression.
+    // Desktop GLSL accepts the mismatch, so on every other backend this reads
+    // the same either way; on WebGL it is the difference between a pixel shader
+    // that compiles and a draw that silently does not happen.
     out.Write("  // Helpers for logic op blending approximations\n"
               "  if (logic_op_enable) {{\n"
               "    switch (logic_op_mode) {{\n");
-    out.Write("      case {}: // Clear\n", static_cast<u32>(LogicOp::Clear));
+    out.Write("      case {}u: // Clear\n", static_cast<u32>(LogicOp::Clear));
     out.Write("        TevResult = int4(0, 0, 0, 0);\n"
               "        break;\n");
-    out.Write("      case {}: // Copy Inverted\n", static_cast<u32>(LogicOp::CopyInverted));
+    out.Write("      case {}u: // Copy Inverted\n", static_cast<u32>(LogicOp::CopyInverted));
     out.Write("        TevResult ^= 0xff;\n"
               "        break;\n");
-    out.Write("      case {}: // Set\n", static_cast<u32>(LogicOp::Set));
-    out.Write("      case {}: // Invert\n", static_cast<u32>(LogicOp::Invert));
+    out.Write("      case {}u: // Set\n", static_cast<u32>(LogicOp::Set));
+    out.Write("      case {}u: // Invert\n", static_cast<u32>(LogicOp::Invert));
     out.Write("        TevResult = int4(255, 255, 255, 255);\n"
               "        break;\n");
     out.Write("      default:\n"

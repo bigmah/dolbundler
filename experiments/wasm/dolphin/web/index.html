@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dolphin in WebAssembly</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; height: 100%; background: #0b0d10; color: #d7dbe0;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    overscroll-behavior: none;
+  }
+  body { display: flex; flex-direction: column; }
+  #stage {
+    flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+    background: #000; position: relative; min-height: 0;
+  }
+  canvas {
+    max-width: 100%; max-height: 100%; display: block;
+    image-rendering: pixelated; touch-action: none;
+  }
+  #bar {
+    flex: 0 0 auto; display: flex; gap: 8px; align-items: center;
+    padding: 6px 10px; background: #12161b; border-top: 1px solid #222831;
+  }
+  button {
+    font: inherit; background: #1d232b; color: #d7dbe0;
+    border: 1px solid #2c343f; border-radius: 5px; padding: 5px 12px;
+  }
+  button:disabled { opacity: .45; }
+  #status { opacity: .75; }
+  #log {
+    flex: 0 0 auto; height: 26vh; overflow: auto; margin: 0; padding: 6px 10px;
+    background: #0b0d10; border-top: 1px solid #222831; white-space: pre-wrap;
+    font-size: 11px; line-height: 1.35;
+  }
+  #log.hidden { display: none; }
+</style>
+
+<div id="stage"><canvas id="canvas" width="640" height="528"></canvas></div>
+<div id="bar">
+  <button id="start">Start</button>
+  <button id="logtoggle">Log</button>
+  <span id="status">idle</span>
+</div>
+<pre id="log"></pre>
+
+<script src="dolweb.js"></script>
+<script src="dolweb-page.js"></script>

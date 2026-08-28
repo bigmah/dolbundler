@@ -315,6 +315,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   // surfaces as PlatformUnavailable rather than a crash in the video backend.
   else impl->platform = Platform::CreateIOSPlatform();
 #endif
+#ifdef MODERNGEKKO_HAVE_EMSCRIPTEN
+  else impl->platform = Platform::CreateEmscriptenPlatform();
+#endif
 #ifdef HAVE_X11
   else if (impl->config.window_system != WindowSystem::Wayland) impl->platform =
       Platform::CreateX11Platform();
@@ -355,8 +358,19 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     Config::SetBase(Config::GFX_ENABLE_GPU_TEXTURE_DECODING,
                     *impl->config.graphics.gpu_texture_decoding);
   Config::SetBase(Config::GFX_SHADER_CACHE, true);
+#ifdef __EMSCRIPTEN__
+  // WebGL has no shared contexts, so Dolphin's async shader compiler cannot
+  // start a worker and the ubershader half of the hybrid mode never gets
+  // replaced: every draw keeps running the general-purpose shader, which is
+  // what that mode exists to avoid. Compiling specialised shaders on the spot
+  // costs a hitch the first time a pipeline is seen and the right shader
+  // thereafter.
+  Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
+                  ShaderCompilationMode::Synchronous);
+#else
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
                   ShaderCompilationMode::AsynchronousUberShaders);
+#endif
   Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, true);
   const std::vector<std::string> audio_backends =
       AudioCommon::GetSoundBackends();

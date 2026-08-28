@@ -24,3 +24,6 @@ build/
 # ios/build.sh and the simulator recipe in ios/README.md
 build-ios/
 build-sim/
+
+# The WebAssembly build tree (experiments/wasm/dolphin/build.sh)
+build-wasm/

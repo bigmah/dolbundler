@@ -154,6 +154,7 @@ private:
   // slice, matching DolVM's conservative poll-spin handling.
   void TrackExternalRead(u32 pc, u32 address, u64 value);
   void ResetExternalPollRun();
+  void YieldToLoopGuard();
 
   // CPUState hooks (module -> chassis environment). `cpu->external_user_data`
   // is the StaticRecompCore*.
@@ -209,6 +210,16 @@ private:
   u32 m_poll_address = 0;
   u64 m_poll_value = 0;
   u32 m_poll_run = 0;
+  // Consecutive reads of the same register from the same instruction, whatever
+  // they returned. The run above needs a *stable* value; this one does not, and
+  // that is the difference between a heuristic and a liveness guarantee.
+  static constexpr u32 POLL_SITE_SPIN_READS = 256;
+  // Comfortably above DOLRECOMP_C_LOOP_CYCLE_BUDGET (256), which is the budget
+  // the generated loop guards test against and which the chassis has no way to
+  // read out of a module. Overshooting it only costs a spin loop a few cycles of
+  // guest time it was not going to use.
+  static constexpr s64 LOOP_GUARD_YIELD_CYCLES = 4096;
+  u32 m_poll_site_run = 0;
   bool m_poll_run_live = false;
   bool m_poll_skip_enabled = true;
   u64 m_poll_reads = 0;

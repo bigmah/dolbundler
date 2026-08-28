@@ -17,6 +17,10 @@ enum class WindowSystemType
   Wayland,
   FBDev,
   Haiku,
+  // A browser canvas. Separate from Headless because the video backend must
+  // still present, and separate from every other type because the "window
+  // handle" is a CSS selector rather than a pointer.
+  Emscripten,
 };
 
 struct WindowSystemInfo

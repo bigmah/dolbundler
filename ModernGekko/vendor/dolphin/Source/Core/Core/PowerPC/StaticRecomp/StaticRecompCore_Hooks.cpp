@@ -30,15 +30,80 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
 void StaticRecompCore::ResetExternalPollRun()
 {
   m_poll_run = 0;
+  m_poll_site_run = 0;
   m_poll_run_live = false;
+}
+
+// Give the guest's charge back to the loop guard so the generated code side-exits
+// at its loop head and the chassis can advance the hardware the guest is waiting
+// for. Charging the slice remainder rather than merely zeroing Dolphin's
+// downcount is deliberate: the guest timebase has to advance by the interval that
+// was skipped, or the game runs ahead of its own clock.
+void StaticRecompCore::YieldToLoopGuard()
+{
+  auto& ppc = m_system.GetPPCState();
+  // Charging the slice remainder rather than merely zeroing Dolphin's downcount
+  // is deliberate: the guest timebase has to advance by the interval that was
+  // skipped, or the game runs ahead of its own clock.
+  //
+  // The floor is not cosmetic. Once the slice is spent -- which is exactly what
+  // happens when a generated loop has been spinning inside one dispatch --
+  // ppc.downcount is already negative and the remainder is nothing, so the old
+  // `if (downcount > 0)` yielded no charge at all. The loop guard then never
+  // trips (FlushGuestCharge zeroed the accumulator it tests on the way into this
+  // hook), the dispatch never returns, and the hardware the guest is waiting for
+  // never advances. That is a hang, and it is what Disney skate does during ARAM
+  // init: 4.3 billion reads of DSPCR inside one dispatch.
+  const s64 remaining = static_cast<s64>(ppc.downcount);
+  m_guest.downcount =
+      std::min(m_guest.downcount, -std::max<s64>(remaining, LOOP_GUARD_YIELD_CYCLES));
+  ++m_poll_yields;
 }
 
 void StaticRecompCore::TrackExternalRead(u32 pc, u32 address, u64 value)
 {
-  if (!m_poll_skip_enabled || m_lockstep_verifier->IsEnabled())
+  if (m_lockstep_verifier->IsEnabled())
     return;
 
   ++m_poll_reads;
+
+  // Liveness, before any heuristic. A generated loop that reads a hardware
+  // register every iteration cannot side-exit on its own: HookExternalRead
+  // calls FlushGuestCharge() first, which zeroes the accumulator the loop guard
+  // tests, so the guard is only ever reached with a fresh count. The run below
+  // rescues that when the register reads back the same value each time -- and
+  // silently does not when it does not, which is an infinite loop inside one
+  // dispatch with the hardware frozen. Disney skate hangs in exactly that shape
+  // waiting on DSPCR during ARAM init.
+  //
+  // So: the same instruction reading the same address this many times in a row
+  // is a spin whatever the values are, and a spin must yield. Nothing that is
+  // making progress reads one register 256 times without touching anything
+  // else, so this costs real work nothing.
+  if (m_poll_run_live && m_poll_pc == pc && m_poll_address == address)
+  {
+    if (++m_poll_site_run >= POLL_SITE_SPIN_READS)
+    {
+      YieldToLoopGuard();
+      ResetExternalPollRun();
+      return;
+    }
+  }
+  else
+  {
+    m_poll_site_run = 1;
+  }
+
+  if (!m_poll_skip_enabled)
+  {
+    // The heuristic is off, but the run above still has to track the site or
+    // the liveness guard never accumulates.
+    m_poll_pc = pc;
+    m_poll_address = address;
+    m_poll_value = value;
+    m_poll_run_live = true;
+    return;
+  }
   if (m_poll_run_live && m_poll_pc == pc && m_poll_address == address && m_poll_value == value)
   {
     if (m_poll_run < POLL_SPIN_READS)
@@ -88,10 +153,7 @@ void StaticRecompCore::TrackExternalRead(u32 pc, u32 address, u64 value)
   // FlushGuestCharge() advances both CoreTiming and the guest timebase by exactly
   // the skipped interval. Merely zeroing Dolphin's downcount would yield without
   // advancing the guest timebase and make the game run ahead of its own clock.
-  auto& ppc = m_system.GetPPCState();
-  if (ppc.downcount > 0)
-    m_guest.downcount = std::min(m_guest.downcount, -static_cast<s64>(ppc.downcount));
-  ++m_poll_yields;
+  YieldToLoopGuard();
 
   // A remembered site should fire on the first read of the next native burst.
   // Clear the current run so that read takes the remembered-site path instead

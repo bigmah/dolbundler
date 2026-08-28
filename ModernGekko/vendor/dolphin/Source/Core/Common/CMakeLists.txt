@@ -313,6 +313,16 @@ target_sources(common PRIVATE
   GL/GLExtensions/GLExtensions.h
 )
 
+if(EMSCRIPTEN)
+  # A browser has no EGL, GLX or WGL. Emscripten's own html5 API creates the
+  # WebGL2 context instead; see GLInterface/Emscripten.cpp for why the context
+  # has to be proxied rather than owned by the thread that renders.
+  target_sources(common PRIVATE
+    GL/GLInterface/Emscripten.cpp
+    GL/GLInterface/Emscripten.h
+  )
+endif()
+
 if(ENABLE_EGL AND EGL_FOUND)
   target_sources(common PRIVATE
     GL/GLInterface/EGL.cpp

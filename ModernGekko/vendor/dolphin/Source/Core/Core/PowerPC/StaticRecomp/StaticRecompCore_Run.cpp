@@ -54,6 +54,21 @@ struct FileCloser
 
 using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
 
+// One line every 2^20 dispatches is right for a running game and useless for a
+// boot that hangs after a few thousand. STATICRECOMP_TRACE_EVERY makes the
+// interval a power of two of the caller's choosing, which is what turns the
+// trace into a "where is it spinning" tool.
+u64 DispatchTraceMask()
+{
+  const char* every = std::getenv("STATICRECOMP_TRACE_EVERY");
+  if (!every || !*every)
+    return 0xFFFFFu;
+  const u64 value = std::strtoull(every, nullptr, 0);
+  if (value < 2)
+    return 0;
+  return value - 1;
+}
+
 FilePtr OpenDispatchTrace()
 {
   const char* path = std::getenv("STATICRECOMP_TRACE_FILE");
@@ -225,6 +240,7 @@ void StaticRecompCore::Run()
   auto& memory = m_system.GetMemory();
   const CPU::State* state_ptr = m_system.GetCPU().GetStatePtr();
   FilePtr dispatch_trace = OpenDispatchTrace();
+  const u64 dispatch_trace_mask = DispatchTraceMask();
   NativeSamplerStart();
 
   m_guest.ram = memory.GetRAM();
@@ -286,7 +302,7 @@ void StaticRecompCore::Run()
         ++m_bursts;
         do
         {
-          if (dispatch_trace && (m_native_dispatches & 0xFFFFFu) == 0)
+          if (dispatch_trace && (m_native_dispatches & dispatch_trace_mask) == 0)
           {
             std::fprintf(dispatch_trace.get(), "%llu,%08x,%08x,%08x,%08x,%llu,%d\n",
                          static_cast<unsigned long long>(m_native_dispatches), m_guest.pc,
