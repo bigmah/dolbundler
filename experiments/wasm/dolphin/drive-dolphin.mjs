@@ -84,14 +84,23 @@ await cdp.send('Page.enable');
 await cdp.send('Log.enable');
 
 const lines = [];
+// Printed as they arrive, not collected and dumped at the end: a run that
+// stalls is otherwise indistinguishable from a run that is working, and this
+// harness spends minutes at a time with nothing to say.
+function note(text) {
+  lines.push(text);
+  if (/\[perf\]|\[gl\]|\[swap\]|exception|error|Failed|audio/i.test(text))
+    console.log(text);
+}
+
 cdp.on((m) => {
   if (m.method === 'Runtime.consoleAPICalled')
-    lines.push(m.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
+    note(m.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
   if (m.method === 'Log.entryAdded')
-    lines.push('[browser] ' + m.params.entry.text);
+    note('[browser] ' + m.params.entry.text);
   if (m.method === 'Runtime.exceptionThrown')
-    lines.push('[exception] ' + (m.params.exceptionDetails.exception?.description ||
-                                 m.params.exceptionDetails.text));
+    note('[exception] ' + (m.params.exceptionDetails.exception?.description ||
+                           m.params.exceptionDetails.text));
 });
 
 const env = (opt.env ? String(opt.env).split(';') : [])
@@ -166,7 +175,6 @@ const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
 writeFileSync(opt.shot, Buffer.from(shot.data, 'base64'));
 
 const perf = lines.filter((l) => l.startsWith('[perf]'));
-console.log(lines.join('\n'));
 console.log('---');
 console.log(`screenshot: ${opt.shot}`);
 if (perf.length) {
