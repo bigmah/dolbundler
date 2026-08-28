@@ -1,6 +1,9 @@
 // Copyright 2023 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string>
+
 #include "VideoBackends/OGL/OGLConfig.h"
 
 #include <cstdio>
@@ -283,9 +286,19 @@ bool PopulateConfig(GLContext* m_main_gl_context)
 
   g_backend_info.bSupportsDualSourceBlend = (GLExtensions::Supports("GL_ARB_blend_func_extended") ||
                                              GLExtensions::Supports("GL_EXT_blend_func_extended"));
+  // WebGL2 is GLES 3.0, which reports version 300 -- so the desktop >= 310 test
+  // says no. But GLES 3.0 has GL_PRIMITIVE_RESTART_FIXED_INDEX and it is always
+  // on, with the fixed index for u16 being 0xFFFF, which is exactly the index
+  // IndexGenerator writes. Saying no here does not disable a feature that is
+  // there anyway; it sends every strip and fan down the TriangleList fallback
+  // in IndexGenerator, a path nothing else exercises.
+#ifdef __EMSCRIPTEN__
+  g_backend_info.bSupportsPrimitiveRestart = true;
+#else
   g_backend_info.bSupportsPrimitiveRestart =
       !DriverDetails::HasBug(DriverDetails::BUG_PRIMITIVE_RESTART) &&
       ((GLExtensions::Version() >= 310) || GLExtensions::Supports("GL_NV_primitive_restart"));
+#endif
   g_backend_info.bSupportsGSInstancing = GLExtensions::Supports("GL_ARB_gpu_shader5");
   g_backend_info.bSupportsSSAA = GLExtensions::Supports("GL_ARB_gpu_shader5") &&
                                  GLExtensions::Supports("GL_ARB_sample_shading");
@@ -728,6 +741,44 @@ bool PopulateConfig(GLContext* m_main_gl_context)
 
   g_Config.VerifyValidity();
   UpdateActiveConfig();
+
+  // MODERNGEKKO_GL_DISABLE=BaseVertex,DepthClamp,... turns capabilities off on a
+  // desktop that has them. It exists so that a defect which only appears in the
+  // browser can be bisected here, at full speed, against a build whose only
+  // difference is which fallback paths it takes -- WebGL2 is missing a dozen of
+  // these at once and the browser is the slowest place to find out which one
+  // matters.
+  if (const char* disable = std::getenv("MODERNGEKKO_GL_DISABLE"))
+  {
+    const std::string list = std::string(",") + disable + ",";
+    const auto off = [&list](const char* name) {
+      return list.find(std::string(",") + name + ",") != std::string::npos;
+    };
+    const auto clear = [&](const char* name, bool& flag) {
+      if (off(name) && flag)
+      {
+        flag = false;
+        INFO_LOG_FMT(VIDEO, "MODERNGEKKO_GL_DISABLE: {} off", name);
+      }
+    };
+    clear("BaseVertex", g_ogl_config.bSupportsGLBaseVertex);
+    clear("BufferStorage", g_ogl_config.bSupportsGLBufferStorage);
+    clear("PinnedMemory", g_ogl_config.bSupportsGLPinnedMemory);
+    clear("DualSourceBlend", g_backend_info.bSupportsDualSourceBlend);
+    clear("PrimitiveRestart", g_backend_info.bSupportsPrimitiveRestart);
+    clear("EarlyZ", g_backend_info.bSupportsEarlyZ);
+    clear("GSInstancing", g_backend_info.bSupportsGSInstancing);
+    clear("GeometryShaders", g_backend_info.bSupportsGeometryShaders);
+    clear("SSAA", g_backend_info.bSupportsSSAA);
+    clear("ClipControl", g_backend_info.bSupportsClipControl);
+    clear("DepthClamp", g_backend_info.bSupportsDepthClamp);
+    clear("ReversedDepthRange", g_backend_info.bSupportsReversedDepthRange);
+    clear("BitfieldManipulation", g_backend_info.bSupportsBitfield);
+    clear("LogicOp", g_backend_info.bSupportsLogicOp);
+    clear("BackgroundCompiling", g_backend_info.bSupportsBackgroundCompiling);
+    clear("CopyImageSubData", g_ogl_config.bSupportsCopySubImage);
+    clear("TextureSubImage", g_ogl_config.bSupportsTextureSubImage);
+  }
 
   OSD::AddMessage(fmt::format("Video Info: {}, {}, {}", g_ogl_config.gl_vendor,
                               g_ogl_config.gl_renderer, g_ogl_config.gl_version),

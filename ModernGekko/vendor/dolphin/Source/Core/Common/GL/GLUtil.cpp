@@ -98,7 +98,13 @@ void EnablePrimitiveRestart(const GLContext* context)
 
   if (context->IsGLES())
   {
+#ifdef __EMSCRIPTEN__
+    // WebGL2 has the fixed index permanently enabled and no toggle for it, so
+    // the enable is an INVALID_ENUM rather than a no-op.
+    (void)PRIMITIVE_RESTART_INDEX;
+#else
     glEnable(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+#endif
   }
   else
   {
