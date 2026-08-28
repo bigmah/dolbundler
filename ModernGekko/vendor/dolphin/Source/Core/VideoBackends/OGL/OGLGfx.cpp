@@ -1,6 +1,9 @@
 // Copyright 2023 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string>
+
 #include "VideoBackends/OGL/OGLGfx.h"
 
 #include "Common/GL/GLContext.h"
@@ -531,12 +534,27 @@ void OGLGfx::ApplyDepthState(const DepthState state)
 
   const GLenum glCmpFuncs[8] = {GL_NEVER,   GL_LESS,     GL_EQUAL,  GL_LEQUAL,
                                 GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+  // Diagnostics for the reversed-depth-range problem, not settings, and off by
+  // default. MODERNGEKKO_DEPTH=always takes the depth test out of the picture
+  // entirely -- with it the whole scene draws, which is how we know the
+  // geometry and transforms are fine and only the test rejects them.
+  // =flip inverts the comparison the way VKPipeline.cpp does when
+  // bSupportsReversedDepthRange is false. That is the documented contract, and
+  // on this backend it is *not* sufficient: it turns the missing geometry into
+  // a grey frame, so the stored depths are degenerate rather than merely
+  // inverted, and something else in the path still assumes the reversed range.
+  const GLenum glCmpFuncsInverted[8] = {GL_NEVER,  GL_GREATER,  GL_EQUAL,  GL_GEQUAL,
+                                        GL_LESS,   GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS};
+  static const char* depth_mode = std::getenv("MODERNGEKKO_DEPTH");
+  const bool force_always = depth_mode && std::string(depth_mode) == "always";
+  const GLenum* funcs = (depth_mode && std::string(depth_mode) == "flip") ?
+                            glCmpFuncsInverted : glCmpFuncs;
 
   if (state.test_enable)
   {
     glEnable(GL_DEPTH_TEST);
     glDepthMask(state.update_enable ? GL_TRUE : GL_FALSE);
-    glDepthFunc(glCmpFuncs[u32(state.func.Value())]);
+    glDepthFunc(force_always ? GL_ALWAYS : funcs[u32(state.func.Value())]);
   }
   else
   {

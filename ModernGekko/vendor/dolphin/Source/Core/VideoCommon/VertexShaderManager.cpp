@@ -1,6 +1,12 @@
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <set>
+
 #include "VideoCommon/VertexShaderManager.h"
 
 #include <array>
@@ -41,6 +47,25 @@ void VertexShaderManager::Init()
 Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 {
   const auto& rawProjection = xfmem.projection.rawProjection;
+
+  // Every distinct projection the guest sets. Geometry that lands in part of
+  // the frame is either wrong vertices or a wrong projection, and these six
+  // numbers are the second half of that question.
+  static const bool log_proj = std::getenv("DOLWEB_LOG_PROJ") != nullptr;
+  if (log_proj)
+  {
+    static std::set<std::array<u32, 7>> seen;
+    std::array<u32, 7> key{static_cast<u32>(xfmem.projection.type)};
+    for (int i = 0; i < 6; ++i)
+      std::memcpy(&key[i + 1], &rawProjection[i], sizeof(u32));
+    if (seen.insert(key).second)
+    {
+      std::printf("[proj] type=%d  %.4f %.4f %.4f %.4f %.4f %.4f\n",
+                  static_cast<int>(xfmem.projection.type), rawProjection[0], rawProjection[1],
+                  rawProjection[2], rawProjection[3], rawProjection[4], rawProjection[5]);
+      std::fflush(stdout);
+    }
+  }
 
   switch (xfmem.projection.type)
   {
@@ -137,7 +162,17 @@ bool VertexShaderManager::UseVertexDepthRange()
     return false;
 
   // We can't compute the depth range in the vertex shader if we don't support depth clamp.
-  if (!g_backend_info.bSupportsDepthClamp)
+  //
+  // Except where there is no other mechanism left. WebGL has neither: it forbids
+  // depthRange(zNear > zFar), so the reversed-range trick is out, and it has no
+  // depth clamp, so this bails and the shader leaves depth alone -- with the
+  // result that a console reverse-Z range produces depths the test rejects, and
+  // whole objects disappear. Computing the range here is right except when the
+  // console asks for one larger than 0..1, which then clips instead of clamping.
+  // That is a much smaller wrong than an empty screen.
+  static const bool ignore_clamp =
+      std::getenv("MODERNGEKKO_VERTEX_DEPTH_WITHOUT_CLAMP") != nullptr;
+  if (!g_backend_info.bSupportsDepthClamp && !ignore_clamp)
     return false;
 
   // We need a full depth range if a ztexture is used.
