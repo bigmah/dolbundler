@@ -149,8 +149,20 @@ static void* EmuThreadTrampoline(void* raw)
 // Returns false if the thread could not be started at all; a canvas that could
 // not be transferred is not a failure, because a build linked without
 // OFFSCREENCANVAS_SUPPORT still gets a working, proxied context.
-static bool StartCanvasOwningThread(pthread_t* thread, void* (*entry)(void*), void* arg)
+static bool StartCanvasOwningThread(pthread_t* thread, void* (*entry)(void*), void* arg,
+                                    bool wants_canvas)
 {
+  // Only take the canvas when something is going to draw on it. A headless run
+  // -- the Null backend, and every measurement made with it -- has no canvas in
+  // its WindowSystemInfo at all, and moving one to a thread that will never
+  // create a context is a transfer that can only go wrong. It went wrong on
+  // iOS: the transfer is proxied to the browser's main thread by postMessage,
+  // so a refusal there is a thread that is never created and a pthread_create
+  // that has already returned success. The emulation thread simply never ran,
+  // with no error anywhere.
+  if (!wants_canvas)
+    return pthread_create(thread, nullptr, entry, arg) == 0;
+
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   // Named the same way the page and GLContextEmscripten name it.
@@ -339,7 +351,8 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
     // from the thread that currently holds it, so reaching the video thread
     // means passing through the thread that creates it. This is the first of
     // those two hops; GetInitializedVideoGuard() makes the second.
-    if (!StartCanvasOwningThread(&s_emu_pthread, EmuThreadTrampoline, args))
+    if (!StartCanvasOwningThread(&s_emu_pthread, EmuThreadTrampoline, args,
+                                 prepared_wsi.type == WindowSystemType::Emscripten))
     {
       delete args;
       return false;
@@ -587,7 +600,8 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
       (*body)();
       return nullptr;
     };
-    if (!StartCanvasOwningThread(&gpu_pthread, gpu_entry, gpu_closure))
+    if (!StartCanvasOwningThread(&gpu_pthread, gpu_entry, gpu_closure,
+                                 wsi.type == WindowSystemType::Emscripten))
     {
       delete gpu_closure;
       return ReturnType{};

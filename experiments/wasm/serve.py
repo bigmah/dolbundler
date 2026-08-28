@@ -105,6 +105,8 @@ def make_handler(root, iso_path=None):
         def do_HEAD(self):
             if iso_path and self.path.split("?")[0] == "/disc.iso":
                 return self.serve_iso(head_only=True)
+            if self.headers.get("Range"):
+                return self.serve_range(head_only=True)
             return super().do_HEAD()
 
         def serve_range(self, head_only=False):

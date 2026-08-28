@@ -22,7 +22,13 @@ const startBtn = document.getElementById('start');
 const canvas = document.getElementById('canvas');
 
 let lines = [];
+// The first sixty lines, kept forever. They are the boot narrative -- which
+// backend, which module, how far the core got -- and on a phone they are the
+// only account there is: the tail has scrolled past them by the time anything
+// goes wrong, and there is no console to scroll back through.
+const head = [];
 function log(text) {
+  if (head.length < 140) head.push(text);
   lines.push(text);
   // A Dolphin boot is thousands of lines and a phone will not thank us for
   // keeping them all in the DOM.
@@ -58,8 +64,11 @@ if (REPORT) {
     // Linear memory is the number that decides whether a phone can run this at
     // all: the module is 91.6 MB of code on top of whatever the heap grows to,
     // and a WebContent process that crosses its jetsam limit just disappears.
+    // The head goes with the first few reports only; after that it has been
+    // seen and the tail is what is changing.
     report({ tick: ++ticks, perf, heapMB: +(heapBytes() / 1048576).toFixed(1),
-             tail: lines.slice(-8) });
+             backend: BACKEND, tail: lines.slice(-8),
+             ...(ticks <= 6 ? { head } : {}) });
   }, 5000);
 }
 
@@ -318,7 +327,13 @@ async function boot() {
 
   const module = await createDolWeb({
     canvas,
-    arguments: [GAME, '/user', BACKEND, SECONDS, ...ENV],
+    // Reporting is a diagnostic mode, so turn Dolphin's own boot log on with it
+    // unless the caller asked for a level. On a phone the alternative is typing
+    // a URL-encoded parameter by hand, and the run that needed it has usually
+    // already happened.
+    arguments: [GAME, '/user', BACKEND, SECONDS, ...ENV,
+                ...(REPORT && !ENV.some((e) => e.startsWith('DOLWEB_DEBUG_LOG'))
+                    ? ['DOLWEB_DEBUG_LOG=1'] : [])],
     print: log,
     printErr: log,
     onTitle: (t) => { document.title = t; status(t); },

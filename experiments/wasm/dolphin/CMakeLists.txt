@@ -219,6 +219,24 @@ else()
     message(WARNING
       "No staged Sys tree at ${DOLWEB_SYS_DIR}; run stage-sys.sh first")
   endif()
+  # Handing the canvas to the thread that renders makes every GL call local
+  # instead of a queued cross-thread call, and on a Mac that is worth about 14%.
+  # It is off by default because it does not work on iOS: pthread_create with a
+  # transfer list is proxied to the browser's main thread by postMessage, and
+  # there it intermittently never delivers -- the emulation thread simply never
+  # runs, Dolphin prints nothing at all, and the CPU sits in PowerDown with no
+  # error anywhere. Without it the canvas stays on the browser's main thread and
+  # the context is created there and proxied, which is slower and works.
+  option(DOLWEB_OFFSCREEN_CANVAS
+         "Hand the canvas to the rendering thread (faster; broken on iOS)" OFF)
+  if(DOLWEB_OFFSCREEN_CANVAS)
+    target_link_options(dolweb PRIVATE
+      -sOFFSCREENCANVAS_SUPPORT=1
+      # Quoted: an unquoted # starts a CMake comment and the setting reaches
+      # emscripten empty.
+      "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas,#dolweb-probe")
+  endif()
+
   target_link_options(dolweb PRIVATE
     # WASMFS rather than the JS filesystem: its state lives in linear memory, so
     # every thread sees the same tree. The JS one does not -- it is per-worker
@@ -229,15 +247,6 @@ else()
     -sEXPORT_ES6=0
     -sEXPORT_NAME=createDolWeb
     -sEXPORTED_RUNTIME_METHODS=[ccall,cwrap,HEAPU8,HEAPU32]
-    # OffscreenCanvas first, the proxied framebuffer as the fallback. The
-    # difference is not subtle: a proxied context turns every GL call into a
-    # queued cross-thread call, and Dolphin issues enough of them per frame that
-    # the present alone measured 99 ms. With the canvas transferred to the
-    # emulation thread the calls are local and the present is a no-op.
-    -sOFFSCREENCANVAS_SUPPORT=1
-    # Quoted: an unquoted # starts a CMake comment, and the setting reaches
-    # emscripten empty.
-    "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas,#dolweb-probe"
     -sOFFSCREEN_FRAMEBUFFER=1
   )
 endif()
