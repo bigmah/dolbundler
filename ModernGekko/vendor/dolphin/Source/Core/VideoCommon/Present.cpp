@@ -1,6 +1,9 @@
 // Copyright 2023 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "VideoCommon/Present.h"
 
 #include "Common/ChunkFile.h"
@@ -156,6 +159,20 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
 
     m_xfb_entry->AcquireContentLock();
   }
+  // What the VI is asking for, printed whenever it changes. A menu that renders
+  // into part of the frame and leaves the rest black is either a presentation
+  // bug or an XFB that is only partly filled, and these four numbers plus the
+  // rect the texture cache hands back are what tells the two apart.
+  static const bool log_xfb = std::getenv("DOLWEB_LOG_XFB") != nullptr;
+  if (log_xfb && (fb_width != m_last_xfb_width || fb_height != m_last_xfb_height ||
+                  fb_stride != m_last_xfb_stride))
+  {
+    std::printf("[xfb] addr=%08x %ux%u stride=%u -> rect %d,%d %dx%d\n", xfb_addr, fb_width,
+                fb_height, fb_stride, m_xfb_rect.left, m_xfb_rect.top, m_xfb_rect.GetWidth(),
+                m_xfb_rect.GetHeight());
+    std::fflush(stdout);
+  }
+
   m_last_xfb_addr = xfb_addr;
   m_last_xfb_ticks = ticks;
   m_last_xfb_width = fb_width;

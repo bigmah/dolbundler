@@ -1,6 +1,9 @@
 // Copyright 2010 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <set>
+#include <cstdio>
+#include <cstdlib>
 #include "VideoCommon/TextureCacheBase.h"
 
 #include <algorithm>
@@ -2132,6 +2135,26 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     float gamma, bool clamp_top, bool clamp_bottom,
     const CopyFilterCoefficients::Values& filter_coefficients)
 {
+  // Every EFB copy, once per distinct shape. A menu whose backdrop comes out at
+  // half height is either a bad copy or a bad draw of the copy, and the source
+  // and destination sizes here say which.
+  static const bool log_copies = std::getenv("DOLWEB_LOG_EFB_COPY") != nullptr;
+  if (log_copies)
+  {
+    static std::set<u64> seen;
+    const u64 key = (u64(width) << 40) | (u64(height) << 24) | (u64(dstStride) << 8) |
+                    (is_depth_copy ? 1 : 0);
+    if (seen.insert(key).second)
+    {
+      std::printf("[efbcopy] dst=%08x %ux%u stride=%u src=%d,%d %dx%d yscale=%.3f depth=%d "
+                  "half=%d\n",
+                  dstAddr, width, height, dstStride, srcRect.left, srcRect.top,
+                  srcRect.GetWidth(), srcRect.GetHeight(), y_scale, is_depth_copy ? 1 : 0,
+                  scaleByHalf ? 1 : 0);
+      std::fflush(stdout);
+    }
+  }
+
   // Emulation methods:
   //
   // - EFB to RAM:

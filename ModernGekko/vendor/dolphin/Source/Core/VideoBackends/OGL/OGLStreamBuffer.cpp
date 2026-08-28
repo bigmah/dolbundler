@@ -1,6 +1,9 @@
 // Copyright 2013 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string>
+
 #include "VideoBackends/OGL/OGLStreamBuffer.h"
 
 #include "Common/Align.h"
@@ -350,6 +353,14 @@ std::unique_ptr<StreamBuffer> StreamBuffer::Create(u32 type, u32 size)
   if (!g_ogl_config.bSupportsGLBaseVertex)
   {
 #ifdef __EMSCRIPTEN__
+    // DOLWEB_STREAM_BUFFER=subdata puts the old path back. It is a diagnostic:
+    // if a defect disappears with it, the orphaning below is dropping data that
+    // pending draws still needed.
+    if (const char* forced = std::getenv("DOLWEB_STREAM_BUFFER"))
+    {
+      if (std::string(forced) == "subdata")
+        return std::make_unique<BufferSubData>(type, size);
+    }
     // WebGL is one of the drivers the comment on BufferData is about, and it is
     // not a small effect. BufferSubData writes over a buffer the pending draws
     // still reference, so every upload waits for them; measured in Disney skate,

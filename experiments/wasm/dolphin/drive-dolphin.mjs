@@ -87,8 +87,19 @@ const lines = [];
 // Printed as they arrive, not collected and dumped at the end: a run that
 // stalls is otherwise indistinguishable from a run that is working, and this
 // harness spends minutes at a time with nothing to say.
+// The guest's own clock, read off the perf line. Acts can be scheduled against
+// it, which is what makes a script survive a build that runs at a twentieth of
+// the speed -- an interpreter run reaches the same menu, just twenty minutes
+// later, and wall-clock cues would all fire during the logos.
+let guestSeconds = 0;
+let guestHz = 0;
+
 function note(text) {
   lines.push(text);
+  const clk = /guest clock (\d+) Hz/.exec(text);
+  if (clk) guestHz = +clk[1];
+  const t = /\[perf\].*ticks=(\d+)/.exec(text);
+  if (t && guestHz) guestSeconds = +t[1] / guestHz;
   if (/\[perf\]|\[gl\]|\[swap\]|exception|error|Failed|audio/i.test(text))
     console.log(text);
 }
@@ -121,6 +132,15 @@ await cdp.eval("document.getElementById('start').click(); 'clicked'");
 
 // Screenshots as it goes, not only at the end: a game is somewhere different
 // every second and one picture of a fade-to-black says nothing.
+// "25:5" taps control 5 at t+25 s of wall clock; "g25:5" waits for guest second
+// 25 instead.
+const acts = (opt.acts ? String(opt.acts).split(',') : []).map((spec) => {
+  const [at, control, hold] = spec.split(':');
+  const guest = at.startsWith('g');
+  return { at: +(guest ? at.slice(1) : at), guest, control: +control,
+           hold: +(hold || 140), done: false };
+}).sort((a, b) => a.at - b.at);
+
 const every = opt.shotEvery ? +opt.shotEvery * 1000 : 0;
 let nextShot = every ? Date.now() + every : Infinity;
 let shotIndex = 0;
@@ -141,11 +161,28 @@ while (Date.now() < deadline && !done) {
   // seconds, but only while getting through the attract loop: once the game is
   // running, START pauses it, and a paused game draws a black screen that looks
   // exactly like a renderer that stopped working.
+  // --acts is a timeline: "22:5,26:0,30:7" taps control 5 at t+22 s, 0 at t+26
+  // and 7 at t+30. Holding a button down every second walks straight past any
+  // menu that uses it to confirm, which is why reaching a specific screen needs
+  // taps at known times rather than a stream of presses.
+  if (acts.length) {
+    const t = (Date.now() - startedAt) / 1000;
+    for (const a of acts) {
+      if (a.done || (a.guest ? guestSeconds : t) < a.at) continue;
+      a.done = true;
+      console.log(`[act] ${a.guest ? 'guest' : 'wall'} ${a.at}s control ${a.control}` +
+                  ` (wall ${t.toFixed(0)}s, guest ${guestSeconds.toFixed(0)}s)`);
+      await cdp.eval(`(() => { const c = window.dolweb && window.cwrapSetControl;
+        if (!c) return 'no'; c(${a.control}, 1);
+        setTimeout(() => c(${a.control}, 0), ${a.hold}); return 'ok'; })()`).catch(() => {});
+    }
+  }
   if (opt.press && Date.now() - startedAt < (+opt.press) * 1000) {
     // START first, then A: START gets past the attract loop and the title, and
     // A is what walks through the menus after it. Alternating is enough to
     // reach a menu screen without knowing the game.
-    const control = (Date.now() - startedAt) < (+opt.press) * 500 ? 5 : 0;
+    const control = opt.pressOnly !== undefined ? +opt.pressOnly
+                  : (Date.now() - startedAt) < (+opt.press) * 500 ? 5 : 0;
     await cdp.eval(`(() => { const c = window.dolweb && window.cwrapSetControl;
       if (!c) return 'no'; c(${control}, 1); setTimeout(() => c(${control}, 0), 120); return 'ok'; })()`)
       .catch(() => {});
@@ -180,6 +217,14 @@ if (opt.cat) {
 
 const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
 writeFileSync(opt.shot, Buffer.from(shot.data, 'base64'));
+
+// Everything the page said, not just the lines worth printing live: a boot
+// narrative is thousands of lines and the one that explains a defect is never
+// the one that matched the filter.
+if (opt.dumplog) {
+  writeFileSync(opt.dumplog, lines.join('\n'));
+  console.log(`log: ${opt.dumplog} (${lines.length} lines)`);
+}
 
 const perf = lines.filter((l) => l.startsWith('[perf]'));
 console.log('---');

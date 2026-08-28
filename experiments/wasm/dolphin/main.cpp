@@ -25,6 +25,8 @@
 
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
+#include "Common/Config/Config.h"
+#include "Core/Config/GraphicsSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/GCPad.h"
@@ -35,6 +37,7 @@
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 #include "InputCommon/InputConfig.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#include "VideoCommon/VideoConfig.h"
 
 #include <emscripten/emscripten.h>
 
@@ -374,6 +377,17 @@ int main(int argc, char** argv)
   // thing that is busy.
   if (const char* scale = std::getenv("DOLWEB_EFB_SCALE"))
     config.graphics.internal_resolution_scale = std::atoi(scale);
+  // A diagnostic more than a setting: Stretch takes the presenter's draw-rect
+  // arithmetic out of the picture, which is how you tell "the image is being
+  // placed wrong" from "the XFB only has content in part of it".
+  if (const char* aspect = std::getenv("DOLWEB_ASPECT"))
+  {
+    Config::SetBase(Config::GFX_ASPECT_RATIO,
+                    std::string(aspect) == "stretch" ? AspectMode::Stretch :
+                    std::string(aspect) == "raw"     ? AspectMode::Raw :
+                                                       AspectMode::Auto);
+    std::printf("[dolweb] aspect=%s\n", aspect);
+  }
 
   const std::string disc_id = ReadDiscId(game_root);
   const ModernGekkoModuleDesc* module = FindModule(disc_id);

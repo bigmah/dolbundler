@@ -1,6 +1,10 @@
 // Copyright 2009 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+
 #include "VideoCommon/BPFunctions.h"
 
 #include <algorithm>
@@ -265,6 +269,29 @@ void SetScissorAndViewport(FramebufferManager* frame_buffer_manager, ScissorPos 
     y = static_cast<float>(g_gfx->GetCurrentFramebuffer()->GetHeight()) - y - height;
 
   g_gfx->SetViewport(x, y, width, height, near_depth, far_depth);
+
+  // Every distinct scissor/viewport pair. A backdrop that stops at a fixed row
+  // while later draws still appear below it is scissor-shaped, and this is the
+  // cheapest way to see whether the guest asked for that or we computed it.
+  static const bool log_rects = std::getenv("DOLWEB_LOG_RECTS") != nullptr;
+  if (log_rects)
+  {
+    static std::set<u64> seen;
+    const u64 key = (u64(u16(converted_rc.top)) << 48) | (u64(u16(converted_rc.bottom)) << 32) |
+                    (u64(u16(int(y))) << 16) | u64(u16(int(height)));
+    if (seen.insert(key).second)
+    {
+      std::printf("[rects] scissor %d,%d %dx%d  viewport %.0f,%.0f %.0fx%.0f  "
+                  "native %d,%d %dx%d off=%d,%d fb=%dx%d\n",
+                  converted_rc.left, converted_rc.top, converted_rc.GetWidth(),
+                  converted_rc.GetHeight(), x, y, width, height, native_rc.rect.left,
+                  native_rc.rect.top, native_rc.rect.GetWidth(), native_rc.rect.GetHeight(),
+                  native_rc.x_off, native_rc.y_off,
+                  g_gfx->GetCurrentFramebuffer()->GetWidth(),
+                  g_gfx->GetCurrentFramebuffer()->GetHeight());
+      std::fflush(stdout);
+    }
+  }
 
   g_gfx->StoreViewportAndScissor(AbstractGfx::ViewportAndScissor{.scissor_rect = converted_rc,
                                                                  .viewport_x = x,
