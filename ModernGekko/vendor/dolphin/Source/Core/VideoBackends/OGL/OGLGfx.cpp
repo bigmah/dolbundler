@@ -376,6 +376,17 @@ void OGLGfx::SetAndClearFramebuffer(AbstractFramebuffer* framebuffer, const Clea
     glDepthMask(m_current_depth_state.update_enable);
 }
 
+// The clear value and the comparison have to agree: either both are flipped or
+// neither is, and MODERNGEKKO_DEPTH=noflip turns both off together so the old
+// behaviour can be measured against the new one on the same scene.
+static bool OGLDepthNeedsFlip()
+{
+  if (g_backend_info.bSupportsReversedDepthRange)
+    return false;
+  static const char* mode = std::getenv("MODERNGEKKO_DEPTH");
+  return !(mode && std::string(mode) == "noflip");
+}
+
 void OGLGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEnable,
                          bool alphaEnable, bool zEnable, u32 color, u32 z)
 {
@@ -398,7 +409,7 @@ void OGLGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEn
     // buffer to the near plane instead of the far one, and then every object
     // the game draws fails its depth test and vanishes.
     float clear_depth = float(z & 0xFFFFFF) / 16777216.0f;
-    if (!g_backend_info.bSupportsReversedDepthRange)
+    if (OGLDepthNeedsFlip())
       clear_depth = 1.0f - clear_depth;
     glClearDepthf(clear_depth);
     clear_mask |= GL_DEPTH_BUFFER_BIT;
@@ -552,15 +563,12 @@ void OGLGfx::ApplyDepthState(const DepthState state)
   // ClearRegion: either one alone is worse than neither.
   const GLenum glCmpFuncsInverted[8] = {GL_NEVER,  GL_GREATER,  GL_EQUAL,  GL_GEQUAL,
                                         GL_LESS,   GL_NOTEQUAL, GL_LEQUAL, GL_ALWAYS};
-  const GLenum* funcs =
-      g_backend_info.bSupportsReversedDepthRange ? glCmpFuncs : glCmpFuncsInverted;
+  const GLenum* funcs = OGLDepthNeedsFlip() ? glCmpFuncsInverted : glCmpFuncs;
   // MODERNGEKKO_DEPTH=always drops the depth test entirely, which is what
   // separates "the depth values are wrong" from "the comparison is the wrong
   // way round". Kept: it is the measurement that found this.
   static const char* depth_mode = std::getenv("MODERNGEKKO_DEPTH");
   const bool force_always = depth_mode && std::string(depth_mode) == "always";
-  if (depth_mode && std::string(depth_mode) == "noflip")
-    funcs = glCmpFuncs;
 
   if (state.test_enable)
   {

@@ -30,7 +30,12 @@ const REPORT = params.get('report') === '1';
 // again. Reports carry `ab` so the two halves separate afterwards.
 const AB = params.get('ab') ? +params.get('ab') : 0;
 const AB_PHASE = +(params.get('abphase') || '1');
-const AB_BACKEND = AB_PHASE === 1 ? 'Null' : 'OGL';
+// ?abflip=1 runs OpenGL first. The order matters on a phone: the second half
+// always runs on a hotter device, so a fixed order biases every comparison
+// against whichever backend goes second. Run it both ways before believing a
+// difference.
+const AB_FLIP = params.get('abflip') === '1';
+const AB_BACKEND = (AB_PHASE === 1) !== AB_FLIP ? 'Null' : 'OGL';
 // The window, in guest seconds since boot. It starts well past the logos so
 // that both halves measure the game rather than a fade.
 const AB_FROM = +(params.get('abfrom') || '45');

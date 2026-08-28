@@ -380,6 +380,26 @@ int main(int argc, char** argv)
   // A diagnostic more than a setting: Stretch takes the presenter's draw-rect
   // arithmetic out of the picture, which is how you tell "the image is being
   // placed wrong" from "the XFB only has content in part of it".
+  // DOLWEB_GFX_HACK=name[,name] flips Dolphin's EFB hacks from here, so a
+  // surface that renders black can be walked through the copy paths without a
+  // rebuild each time. (Wireframe is not among them: it needs glPolygonMode,
+  // which GLES and WebGL do not have.)
+  if (const char* hacks = std::getenv("DOLWEB_GFX_HACK"))
+  {
+    const std::string list = std::string(",") + hacks + ",";
+    const auto on = [&list](const char* name) {
+      return list.find(std::string(",") + name + ",") != std::string::npos;
+    };
+    if (on("SkipEFBCopyToRam"))
+      Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, true);
+    if (on("DisableCopyToVRAM"))
+      Config::SetBase(Config::GFX_HACK_DISABLE_COPY_TO_VRAM, true);
+    if (on("NoEFBAccess"))
+      Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, false);
+    if (on("NoCopyEFBScaled"))
+      Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+    std::printf("[dolweb] gfx hacks: %s\n", hacks);
+  }
   if (const char* aspect = std::getenv("DOLWEB_ASPECT"))
   {
     Config::SetBase(Config::GFX_ASPECT_RATIO,
