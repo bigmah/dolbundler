@@ -281,6 +281,35 @@ every texture bound over the next half second -- stage, address, size, format,
 source bytes, non-zero count, both hashes -- in both builds, reached in the
 browser as `?env=DOLWEB_TEX_CENSUS=150`.
 
+### The census answers it: guest RAM is identical
+
+Run in both builds at guest 150 in Andy's House:
+
+| | |
+|---|---|
+| distinct textures, native | 84 |
+| distinct textures, Chrome | 77 |
+| in both, native has data and Chrome is all zero | **0** |
+| in both, non-zero counts differ at all | **0** |
+| bound only in Chrome | **0** |
+| bound only natively | 7 |
+
+The 7 are one contiguous cluster of small CMPR textures,
+`0x008e2b80`-`0x008e63a0`, 256 to 4096 bytes each -- HUD or font glyphs the
+browser did not happen to bind inside the same half-second. Not missing data.
+
+**Every texture the browser draws with has byte-identical source data to the
+build that renders the floor correctly.** So the black ground is not a data
+problem at any level: not the disc, not the recompiled code, not a DMA, not the
+transport. Those are all now excluded by measurement rather than by argument.
+
+It also retires the framing this file has used throughout. "A texture that
+decodes to nothing but zeros" was the whole theory of the defect, and the
+textures that decode to zero are the *same ones in both builds* -- so whatever
+the browser draws the floor with, it has real bytes behind it and comes out
+black anyway. The remaining ground is **decode, upload, or shading**, which is
+a much smaller space than the one this file has been searching.
+
 ### So where it actually stands
 
 Ruled out, each by measurement: the renderer, mipmaps, texture coordinates, GL

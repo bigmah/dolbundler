@@ -1815,6 +1815,41 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
                                        expanded_height);
       }
 
+      // DOLWEB_DECODE_CENSUS=1 reports what came *out* of the decoder for every
+      // texture, once per address and format: how many source bytes were
+      // non-zero and how many decoded bytes were. Run in two builds and diffed,
+      // it isolates the decoder itself -- DOLWEB_TEX_CENSUS already proved the
+      // two builds feed it byte-identical input, so any texture whose output
+      // differs is a decode bug and nothing else. Worth having as its own
+      // instrument because the existing logging only speaks up when a decode is
+      // entirely zero, and "decoded differently" is a larger class than
+      // "decoded to nothing".
+      static const bool decode_census = std::getenv("DOLWEB_DECODE_CENSUS") != nullptr;
+      if (decode_census)
+      {
+        static std::set<u64> seen_decode;
+        const u64 key = (u64)texture_info.GetRawAddress() << 8 |
+                        (u64)texture_info.GetTextureFormat();
+        if (seen_decode.insert(key).second)
+        {
+          const u8* src = texture_info.GetData();
+          const size_t src_size = texture_info.GetTextureSize();
+          size_t src_nz = 0;
+          for (size_t i = 0; src && i < src_size; ++i)
+            src_nz += src[i] != 0;
+          size_t dst_nz = 0;
+          for (size_t i = 0; i < decoded_texture_size; ++i)
+            dst_nz += dst_buffer[i] != 0;
+          std::printf("[decode] addr=%#010x %ux%u fmt=%u %s src=%zu srcnz=%zu "
+                      "dst=%zu dstnz=%zu levels=%u\n",
+                      texture_info.GetRawAddress(), width, height,
+                      (unsigned)texture_info.GetTextureFormat(),
+                      texture_info.IsFromTmem() ? "tmem" : "ram", src_size, src_nz,
+                      decoded_texture_size, dst_nz, texture_info.GetLevelCount());
+          std::fflush(stdout);
+        }
+      }
+
       // DOLWEB_LOG_TEXTURE=1: a texture that decodes to nothing but zeros is a
       // surface that renders black with every GL call succeeding, and the two
       // reasons for it have nothing in common -- the guest never wrote the
@@ -1929,6 +1964,15 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
       dst_buffer += decoded_texture_size;
     }
 
+    // How many levels actually got bytes. The texture is allocated with
+    // texLevels levels up front, and every path below that skips one leaves a
+    // level allocated and never written. A desktop driver samples level 0 for
+    // such a texture; WebGL renders it black -- so an incomplete chain is
+    // invisible on the desktop and is a black surface in the browser, which is
+    // exactly the shape of this port's floor defect. Counted rather than
+    // trusted, because the skip below logs through ERROR_LOG_FMT(VIDEO), and
+    // that channel is off unless Dolphin's logging is configured.
+    u32 levels_loaded = 1;
     for (const auto& mip_level : texture_info.GetMipMapLevels())
     {
       if (no_mips)
@@ -1963,6 +2007,27 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
                                         mip_level.GetExpandedWidth(), dst_buffer);
 
         dst_buffer += decoded_mip_size;
+        ++levels_loaded;
+      }
+    }
+
+    // DOLWEB_LOG_MIPS=1 reports every texture whose allocated levels were not
+    // all written, once per (address, level count).
+    static const bool log_mips = std::getenv("DOLWEB_LOG_MIPS") != nullptr;
+    if (log_mips && !no_mips && levels_loaded < texLevels)
+    {
+      static std::set<u64> seen_incomplete;
+      static u64 incomplete_total = 0;
+      ++incomplete_total;
+      const u64 key = (u64)texture_info.GetRawAddress() << 8 | texLevels;
+      if (seen_incomplete.insert(key).second)
+      {
+        std::printf("[mips] INCOMPLETE addr=%#010x %ux%u fmt=%u: %u of %u levels written "
+                    "(%llu incomplete uploads so far)\n",
+                    texture_info.GetRawAddress(), width, height,
+                    (unsigned)texture_info.GetTextureFormat(), levels_loaded, texLevels,
+                    (unsigned long long)incomplete_total);
+        std::fflush(stdout);
       }
     }
 
