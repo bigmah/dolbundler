@@ -22,11 +22,12 @@ disc that is never downloaded, in a page.
 | module, Null backend, unthrottled | 160-250% |
 | module, OpenGL, gameplay, unthrottled | **101-123%**, steady 60 fps |
 | macOS Safari | 85-92% |
-| iOS Simulator (WKWebView) | 81-88% |
-| module | 91.6 MB of wasm, 12.8 MB gzipped |
+| module | 86.5 MB of wasm, 256-instruction chunks |
 
-Neither Safari figure predicts a phone: both run on this Mac's CPU. The device
-number is the one that is still missing.
+**And on the phone** (iPhone 15 Pro Max, Safari, warm, matched guest window
+45-90 s): **CPU only 157%, with rendering 40%.** The recompiled code has
+headroom on the device; the renderer does not, and that is the opposite of what
+this Mac measures. See `OVER-THE-LINE.md`.
 
 ## Building
 
@@ -125,6 +126,9 @@ answered by reading code, and all three are worth keeping:
 
 `STATICRECOMP_FALLBACK_RANGES=80000000-90000000` forces everything to the
 interpreter in the same binary, which is the only honest baseline.
+
+**What is left to finish this is in `OVER-THE-LINE.md`** -- the device numbers,
+the two open defects, and the habit that found today's.
 
 ## What is still open
 
