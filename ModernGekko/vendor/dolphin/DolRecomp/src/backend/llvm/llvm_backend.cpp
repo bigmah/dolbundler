@@ -145,6 +145,26 @@ static constexpr const char *kPassPipeline =
     "combine,"
     "tailcallelim),cgscc(inline),ipsccp,globaldce";
 
+// DOLRECOMP_LLVM_PIPELINE=size drops the three vectorisers and the inliner.
+// A whole game is tens of megabytes of generated code and the wasm module is
+// most of the binary, so on a target where the module has to be downloaded and
+// held in a phone's memory, code size is a first-class cost rather than a
+// rounding error -- and vectorising for a target built without SIMD is paying
+// that cost for nothing.
+static constexpr const char *kSizePassPipeline =
+    "function(mem2reg,early-cse<memssa>,instcombine<no-verify-fixpoint>,"
+    "simplifycfg,sccp,"
+    "correlated-propagation,jump-threading,gvn,dse,adce,loop-simplify,"
+    "loop-rotate,loop-mssa(licm),"
+    "tailcallelim),ipsccp,globaldce";
+
+static const char *passPipeline() {
+  const char *choice = getenv("DOLRECOMP_LLVM_PIPELINE");
+  if (choice && std::string(choice) == "size")
+    return kSizePassPipeline;
+  return kPassPipeline;
+}
+
 // The profile path, and a content hash of it, resolved once. The hash is what
 // goes in the cache key: two different profiles written to the same path must
 // not share objects, and a profile regenerated in place by a collection script
@@ -566,7 +586,7 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
       passes.addPass(llvm::PGOInstrumentationUse(pgoProfilePath()));
     }
     if (llvm::Error error =
-            passBuilder.parsePassPipeline(passes, kPassPipeline)) {
+            passBuilder.parsePassPipeline(passes, passPipeline())) {
       fprintf(diagnostics,
               "dolllvm: cannot construct optimization pipeline: %s\n",
               llvm::toString(std::move(error)).c_str());
@@ -739,7 +759,7 @@ extern "C" bool dolllvm_codegen_fingerprint(const char *requested, char *out,
       std::string(LLVM_VERSION_STRING) + "|" + triple.str() + "|" +
       targetCPU(triple) + "|" + targetFeatures(triple) + "|pic|small|minos=" +
       targetMinimumVersion(triple).getAsString() + "|layout=" +
-      std::to_string(dolnative_state_layout_hash()) + "|" + kPassPipeline +
+      std::to_string(dolnative_state_layout_hash()) + "|" + passPipeline() +
       (dolllvm_pgo_mode() == DOLLLVM_PGO_GEN ? "|pgo=gen" : "") +
       (dolllvm_pgo_mode() == DOLLLVM_PGO_USE
            ? "|pgo=use:" + pgoProfileFingerprint()

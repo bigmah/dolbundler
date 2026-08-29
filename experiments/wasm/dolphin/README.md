@@ -222,10 +222,19 @@ the two open defects, and the habit that found today's.
   is needed by the C build, which is what `web/` points at.
 
   **And it is 213.8 MB against the C backend's 86.5 MB** -- 2.5x *larger*, not
-  smaller, which is the opposite of what this file used to predict. Whether -Os
-  or the pass pipeline closes that is unmeasured. On a phone whose heap already
-  reaches 614 MB, a 213 MB module is not shippable as it stands, so size is now
-  part of this route's cost rather than part of its promise.
+  smaller, which is the opposite of what this file used to predict. On a phone
+  whose heap already reaches 614 MB, a 213 MB module is not shippable, so size
+  is this route's central problem rather than its promise.
+
+  **The pass pipeline is not where it comes from**, which is measured:
+  `DOLRECOMP_LLVM_PIPELINE=size` drops `loop-vectorize`, `slp-vectorizer`,
+  `vector-combine` and the inliner -- vectorising for a target built without
+  SIMD -- and the objects come out at **212.89 MB either way**, identical to two
+  decimal places. (The build id changes, so the pipeline really did, and these
+  are not cached objects.) So the size is inherent to what the backend emits for
+  this target, and the next place to look is the emission shape itself: 7417
+  objects each carrying a per-function entry point and a dispatch preamble,
+  against the C path's 1855 translation units.
 
   Historical note, kept because it bounded the work: what was left was exactly
   the CPUState layout, and it was precisely bounded.
