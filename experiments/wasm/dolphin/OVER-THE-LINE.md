@@ -64,10 +64,13 @@ the engine. In the level, throttled:
 | | |
 |---|---|
 | Chrome, in the level | 92-100% (keeping up) |
-| Safari, in the level | **43-51%** (not keeping up) |
+| Safari, in the level | slower, by an amount not yet honestly measured |
 
-Roughly half, on identical hardware. That is an engine cost, not a GPU one, and
-it is a large part of what the phone has been showing.
+**The first Safari level readings -- 43-51% throttled, 18-23% unthrottled -- were
+taken while a `dolrecomp` compile was running eight jobs on the same machine, so
+they measure the contention as much as the engine.** They are recorded here only
+so nobody quotes them. A measurement of an emulator is worth exactly as much as
+the machine was idle.
 
 **But the `?ab=45` window does not see it.** Anchored at guest second 45, it
 lands in the attract loop and the title, not in gameplay -- Andy's House starts
