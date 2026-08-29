@@ -168,6 +168,10 @@ if(DOLWEB_FAST_LINK)
   target_link_options(dolweb PRIVATE -O1)
 endif()
 
+# CMake does not join adjacent strings, so this docstring is one argument.
+set(DOLWEB_STACK_SIZE "8MB" CACHE STRING
+    "Host stack for the emulation thread; the LLVM module needs far more than the C one because its calls are real calls")
+
 target_link_options(dolweb PRIVATE
   -pthread
   -sPROXY_TO_PTHREAD
@@ -175,7 +179,11 @@ target_link_options(dolweb PRIVATE
   -sALLOW_MEMORY_GROWTH=1
   -sINITIAL_MEMORY=${DOLWEB_TOTAL_MEMORY}
   -sMAXIMUM_MEMORY=${DOLWEB_MAX_MEMORY}
-  -sSTACK_SIZE=8MB
+  # The LLVM backend emits per-function entry points and real calls where the C
+  # backend returns through the dispatcher, so guest recursion becomes host-stack
+  # recursion. 8 MB is enough for the C module and not for that one, which dies
+  # in the boot with "Maximum call stack size exceeded".
+  "-sSTACK_SIZE=${DOLWEB_STACK_SIZE}"
   -sASSERTIONS=0
   # A whole recompiled game is tens of megabytes of code; the default table and
   # export handling copes, but the linker needs room for the chunk functions.

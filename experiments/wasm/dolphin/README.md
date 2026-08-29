@@ -189,11 +189,19 @@ the two open defects, and the habit that found today's.
   Then it dies in the boot with `RangeError: Maximum call stack size exceeded`.
   That is the LLVM backend's whole shape showing up: it emits per-function entry
   points and *real calls* where the C backend returns through the dispatcher, so
-  guest recursion becomes host-stack recursion and runs out of the 8 MB
-  `-sSTACK_SIZE`. Two things to try, in order: raise `STACK_SIZE`, and cap
-  recursion depth the way the C backend's `DOLRECOMP_C_MAX_CALL_DEPTH` does --
-  the same knob, for the same reason, on a backend that never needed it on a
-  host with a real stack.
+  guest recursion becomes host-stack recursion.
+
+  **A bigger stack is not the fix, and that is measured rather than assumed.**
+  `-sSTACK_SIZE` is a cache variable now (`DOLWEB_STACK_SIZE`); 8 MB and 64 MB
+  fail identically, and 256 MB fails differently and earlier -- `Aborted()`
+  before the first tick, because a quarter-gigabyte stack out of a 512 MB
+  `INITIAL_MEMORY` leaves nothing to start in. So the recursion is unbounded,
+  not merely deep.
+
+  What it needs is a depth cap: the same thing `DOLRECOMP_C_MAX_CALL_DEPTH`
+  does for the C backend, which falls back to the dispatcher once calls nest too
+  far. The C backend has one because it had to; this backend never needed one on
+  a host with a real stack, and on wasm it does.
 
   **And it is 213.8 MB against the C backend's 86.5 MB** -- 2.5x *larger*, not
   smaller, which is the opposite of what this file used to predict. Whether -Os
