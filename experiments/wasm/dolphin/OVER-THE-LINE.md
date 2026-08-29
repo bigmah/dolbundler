@@ -55,6 +55,27 @@ process that crosses its jetsam limit just disappears -- which looks exactly
 like a crash in the emulator. Measure it on the phone before optimising
 anything else about memory.
 
+### Safari is not Chrome, and the A/B window has been measuring the menus
+
+`sim-run.sh` puts the page in **simulator Safari** -- the same WebKit as the
+phone, on the same Mac GPU as the Chrome numbers above, so the only variable is
+the engine. In the level, throttled:
+
+| | |
+|---|---|
+| Chrome, in the level | 92-100% (keeping up) |
+| Safari, in the level | **43-51%** (not keeping up) |
+
+Roughly half, on identical hardware. That is an engine cost, not a GPU one, and
+it is a large part of what the phone has been showing.
+
+**But the `?ab=45` window does not see it.** Anchored at guest second 45, it
+lands in the attract loop and the title, not in gameplay -- Andy's House starts
+around guest 110. Over that window Safari reads Null 166% / OpenGL 156% against
+Chrome's 199% / 215%, a 20% gap rather than a 2x one. **Every figure in this
+file taken with `abfrom=45`, including the device ones, is a menu figure.** Use
+`?ab=30&abfrom=125` together with the `acts=` timeline that reaches the level.
+
 Retake them before doing anything else with the renderer. What the earlier work
 did establish, and what survives:
 
