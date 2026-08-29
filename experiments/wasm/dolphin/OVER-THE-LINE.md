@@ -67,23 +67,28 @@ the window is **inside Andy's House** rather than in the attract loop:
 | | |
 |---|---|
 | simulator Safari, **Null**, in the level | **85%** (median 87, 64-103) |
-| simulator Safari, OpenGL, in the level | not yet measured -- see below |
+| simulator Safari, **OpenGL**, in the level | **51%** (median 51, 31-82) |
 | simulator Safari, Null / OpenGL, menus | 166% / 156% |
 | Chrome, Null / OpenGL, menus | 199% / 215% |
 
-**Read the first row twice.** With the renderer switched off entirely, WebKit
-runs the recompiled code at **85% of realtime in gameplay**. The CPU is already
-short before the renderer is asked for anything, on an M4 -- and the phone's core
-is slower than an M4, not faster. Whatever the renderer costs on top, **the CPU
-half is not done after all**, and that is the opposite of what the menu-window
-numbers have been saying all along.
+**Read the first two rows twice.** With the renderer switched off entirely,
+WebKit runs the recompiled code at **85% of realtime in gameplay** -- the CPU is
+already short before the renderer is asked for anything, on an M4, whose core is
+faster than the phone's. Turning the renderer on takes it to **51%**. The work
+splits almost exactly in half: the CPU cannot keep up alone, and the renderer
+costs about as much again.
 
-That is the argument for the LLVM backend, and it is now an argument from a
-measurement rather than from a prior. See `README.md`: the backend already
-recompiles the whole disc for wasm32.
+Both halves need roughly a 2x, and neither one alone is enough. That is the
+opposite of what the menu-window numbers have been saying, and it is why the
+menu window mattered so much: over 45-90 s the same build reads 166/156, which
+would have said the CPU was done and the renderer nearly free.
 
-The OpenGL half of that A/B needs `--seconds 700` or so: phase two restarts from
-boot and has to reach guest 125 s again at 85% speed, which does not fit in 420.
+For the CPU half that is now an argument from measurement rather than from a
+prior -- see `README.md`, where the LLVM backend already recompiles the whole
+disc for wasm32 and needs only the CPUState tail. For the renderer half,
+`DOLWEB_TIME_SWAP=1` still has never been run anywhere, and it is the one
+measurement that separates "blocked waiting for the GPU" from "busy in
+VideoCommon".
 
 **And a measurement is worth exactly what the machine's idleness was.** The first
 Safari level readings here -- 43-51% throttled, 18-23% unthrottled -- were taken
