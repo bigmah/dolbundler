@@ -1762,11 +1762,20 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
                           (u64)texture_info.GetTextureFormat();
           if (seen_zero.insert(key).second)
           {
+            // For a paletted format the palette is the other half of the
+            // answer: a C8 texture whose TLUT is all zeros decodes to black no
+            // matter what its own bytes say.
+            const u8* tlut = texture_info.GetTlutAddress();
+            const size_t tlut_size = creation_info.palette_size;
+            bool tlut_zero = tlut != nullptr && tlut_size > 0;
+            for (size_t i = 0; tlut_zero && i < tlut_size; ++i)
+              tlut_zero = tlut[i] == 0;
             std::printf("[tex] decoded to zero: %ux%u fmt=%u tlut=%u addr=%#010x src=%zu bytes, "
-                        "source itself %s\n",
+                        "source itself %s, tlut %zu bytes %s\n",
                         width, height, (unsigned)texture_info.GetTextureFormat(),
                         (unsigned)texture_info.GetTlutFormat(), texture_info.GetRawAddress(),
-                        src_size, src_zero ? "is zero too" : "is NOT zero");
+                        src_size, src_zero ? "is zero too" : "is NOT zero", tlut_size,
+                        tlut == nullptr ? "absent" : (tlut_zero ? "is ZERO" : "is not zero"));
             std::fflush(stdout);
           }
         }

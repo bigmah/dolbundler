@@ -1,6 +1,10 @@
 // Copyright 2009 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+
 #include "VideoCommon/BPStructs.h"
 
 #include <algorithm>
@@ -417,6 +421,36 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
 
     auto& memory = system.GetMemory();
     memory.CopyFromEmu(s_tex_mem.data() + tmem_addr, addr, tmem_transfer_count);
+
+    // DOLWEB_LOG_TEXTURE=1: a palette that arrives empty makes every paletted
+    // texture using it decode to black, and the decoder is not at fault. Say
+    // whether the *guest* bytes were zero, because that separates "the game had
+    // not written the palette yet" from "we copied from the wrong place".
+    {
+      static const bool log_tlut = std::getenv("DOLWEB_LOG_TEXTURE") != nullptr;
+      if (log_tlut && tmem_transfer_count > 0)
+      {
+        bool zero = true;
+        for (u32 i = 0; zero && i < tmem_transfer_count; ++i)
+          zero = s_tex_mem[tmem_addr + i] == 0;
+        static std::set<u64> seen;
+        static u32 loads = 0;
+        static u32 zero_loads = 0;
+        ++loads;
+        if (zero)
+        {
+          ++zero_loads;
+          const u64 key = (u64)tmem_addr << 32 | addr;
+          if (seen.insert(key).second)
+          {
+            std::printf("[tex] TLUT load is zero: tmem %#06x <- %#010x, %u bytes "
+                        "(%u of %u loads so far)\n",
+                        tmem_addr, addr, tmem_transfer_count, zero_loads, loads);
+            std::fflush(stdout);
+          }
+        }
+      }
+    }
 
     if (OpcodeDecoder::g_record_fifo_data)
       system.GetFifoRecorder().UseMemory(addr, tmem_transfer_count, MemoryUpdate::Type::TMEM);

@@ -63,71 +63,62 @@ did establish, and what survives:
   without the LAN certificate. It is a correctness proxy, not a speed one: the
   GPU underneath is the Mac's.
 
-## 2. The black ground -- the correctness
+## 2. The black ground -- a palette that arrives empty
 
-Whole floor surfaces render black while the walls, ramps, props and skater in
-the same frame are correct. It is **not Olliewood-only**: Andy's House -- the
-first career level, zero LEFT presses on the skater carousel -- shows it on
-roughly half of a run's frames, so the repro no longer needs a specific level.
-Three minutes:
+**It is not a renderer defect.** Whole floor surfaces render black while the
+walls, ramps, props and skater in the same frame are correct, and the cause is a
+256x256 **C8** texture -- 8-bit paletted, IA8 palette -- that decodes to pure
+black:
+
+    [tex] decoded to zero: 256x256 fmt=9 tlut=0 addr=0x001faca0 src=65536 bytes,
+          source itself is NOT zero, tlut 512 bytes is ZERO
+
+Its 64 KB of indices are present and non-zero. Its 512-byte palette in TMEM is
+entirely zero, so `TexDecoder_Decode` maps every index to black and is right to.
+`DOLWEB_PAINT_ZERO_TEXTURES=1` uploads magenta wherever the decoded bytes are
+all zero, and over the window where the base build has seven black frames out of
+seven, the painted build has **none**.
+
+`BPMEM_LOADTLUT1` copies the palette from guest memory at
+`bpmem.tmem_config.tlut_src << 5` into `s_tex_mem`. So the remaining question is
+whether the guest bytes at that address are zero -- the game, or the recompiled
+code running it, never wrote the palette -- or the copy lands somewhere else.
+`DOLWEB_LOG_TEXTURE=1` now reports every TLUT load that arrives empty, with the
+TMEM offset and the source address, which is where to pick this up.
+
+Worth knowing while chasing it: **this target is the only one that takes
+Dolphin's CPU palette path at all.** `bSupportsPaletteConversion` needs texture
+buffer objects and WebGL2 has none, so paletted textures are decoded on the CPU
+here where every other backend converts on the GPU. (The same flag also makes
+Dolphin hand back a paletted *EFB copy* without applying its palette --
+`TextureCacheBase.cpp:1470` -- which is a second, separate hazard on this
+target.)
+
+**The repro, three minutes:**
 
     node drive-dolphin.mjs --backend OGL --seconds 190 --shotEvery 10 \
       --acts "g25:5,g40:5,g52:5,g70:0,g76:0,g82:0,\
               g110:15:9000,g135:15:9000,g160:15:9000"
 
-Frames 9 onward show it. Judge them by the fraction of near-black pixels in the
-lower half of the canvas rect (192,18)-(768,458) rather than by eye: ~0.9 is the
-defect, ~0.05 is a good frame, and a screenshot of a fade looks like both.
+Frames 9 onward. Judge them by the fraction of near-black pixels in the lower
+half of the canvas rect (192,18)-(768,458), not by eye: ~0.9 is the defect, ~0.05
+is a good frame, and a screenshot of a fade looks like both.
 
-**The earlier narrowing was wrong, and it was the instrument's fault.**
-`MODERNGEKKO_FLAT_SHADE=tex` wrote `textemp.rgb` into `main()`, where the TEV
-temporaries do not exist -- they live inside
-`dolphin_process_emulated_fragment` and only `frag_output` crosses back. 114
+**Ruled out, each measured, do not re-check:** the depth test, the scissor and
+viewport, the XFB, EFB copies and their paths, mipmap completeness
+(`MODERNGEKKO_NO_MIPMAP=1`), shader compilation, the texture coordinates
+(`MODERNGEKKO_FLAT_SHADE=uv` draws a clean tiled ramp across the black floor),
+GL errors (`DOLWEB_GL_ERRORS=1`: none in a full run), failed uploads (none), the
+texture cache binding nothing (never), and the disc corruption of section 0.
+
+**And the instrument that lied.** `MODERNGEKKO_FLAT_SHADE=tex` wrote
+`textemp.rgb` into `main()`, where the TEV temporaries are out of scope: 114
 shaders failed to compile in a three-minute run and the screen went flat grey.
-So "the inputs are right and the TEV combination produces black", and the
-`StreamBuffer` ring and pool experiments that followed from it, rest on a shader
-that never ran. Fixed in `fd230c5`; the inputs travel out through
-`DolphinFragmentOutput` now, and a `tex` run reports zero compile failures.
-
-**What the fixed instrument says: the texture input is black.** With
-`=tex`, the whole scene shows its texture samples -- sky, fence, boxes,
-characters all textured -- and the ground is black, in exactly the frames where
-the finished image is black. So the defect is upstream of the TEV combination,
-not in it. (Caveat worth keeping: `textemp` holds the *last* stage's sample, so
-this says a texture used by a late stage on floor materials samples zero.)
-
-**Ruled out, each measured, do not re-check:** the depth test
-(`MODERNGEKKO_DEPTH=always` and `=noflip`), the scissor and viewport, the XFB,
-the EFB copy and its paths (`DOLWEB_GFX_HACK=SkipEFBCopyToRam,DisableCopyToVRAM`),
-**mipmap completeness** (`MODERNGEKKO_NO_MIPMAP=1`, re-run 2026-08-29 on the
-fixed build: identical black frames in the same places), shader compilation (the
-base build logs zero failures), and the disc corruption of section 0 -- the
-defect survives that fix.
-
-**And now, with the texture path instrumented, ruled out as well:**
-
-- **GL is rejecting nothing.** `DOLWEB_GL_ERRORS=1` drains `glGetError` once a
-  frame; a full run through the black region reports none. This matters because
-  WebGL drops a call it rejects and reports nothing to the console, so a failed
-  upload is a black surface with no other trace.
-- **No upload fails, and no texture arrives empty.** `DOLWEB_LOG_TEXTURE=1`
-  reports the shape of every distinct texture, a GL error after each upload, and
-  whether the bytes handed to GL were already all zero. Over a full run the only
-  all-zero textures are a 1x1, a 64x64 and two full-screen ones; nothing
-  floor-shaped.
-- **The texture cache always binds something.** The same flag logs every stage
-  where `GetTexture` returns null, which would leave the unit holding whatever
-  was there before. Zero in a full run.
-- **`bSupportsTextureStorage` is true here** after all -- every texture logs
-  `storage=1` -- so the mutable `glTexImage3D` path with its `depth=1` bug is
-  not in play. (`MODERNGEKKO_GL_ENABLE=` exists now for the general case: some
-  capability flags test for a *desktop* extension name that GLES cannot report
-  even when GLES core has the feature.)
-
-**So the data is right, the upload is right, and the binding happens.** What is
-left is the *coordinate* or the sampler: `MODERNGEKKO_FLAT_SHADE=uv` emits the
-last stage's `tevcoord` as a ramp, which separates "the texture is black" from
-"we are sampling somewhere black" in one run. That is the next step.
+"The inputs are right and the TEV combination produces black", and the
+`StreamBuffer` ring and pool experiments that followed from it, came out of a
+shader that never ran -- including the ring that "fixed" the ground at a cost of
+6x, which was only changing when the texture cache re-decoded. Fixed in
+`fd230c5`. **Check that the instrument compiled before believing what it shows.**
 
 ## 3. Not yet swept
 
