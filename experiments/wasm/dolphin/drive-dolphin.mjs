@@ -242,6 +242,10 @@ if (perf.length) {
 
 try { ws.close(); } catch (e) {}
 try { chrome.kill(); } catch (e) {}
-setTimeout(() => { try { rmSync(profile, { recursive: true, force: true }); } catch (e) {} },
-           500).unref();
+// Synchronously, and after waiting for Chrome to actually exit: this used to be
+// an unref'd timer, which process.exit never gave a chance to fire. Seventy-two
+// abandoned profiles and twenty gigabytes later, it does not do that any more.
+for (let i = 0; i < 40 && chrome.exitCode === null && chrome.signalCode === null; i++)
+  await sleep(50);
+try { rmSync(profile, { recursive: true, force: true }); } catch (e) {}
 process.exit(0);
