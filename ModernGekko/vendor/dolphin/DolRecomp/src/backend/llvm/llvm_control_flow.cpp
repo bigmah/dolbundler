@@ -1,6 +1,8 @@
 #include "backend/llvm/llvm_function_emitter.h"
 #include "cpu/cpu.h"
 
+#include "backend/llvm/llvm_target_layout.h"
+
 #include <cstdio>
 
 #include <llvm/IR/BasicBlock.h>
@@ -183,10 +185,10 @@ bool FunctionEmitter::emitTerminator(const DolIRTerminator &term,
     }
     storeContext(DOLIR_STATE_PC, target);
     Value *downcount =
-        loadOffset(Type::getInt64Ty(context_), offsetof(CPUState, downcount));
+        loadOffset(Type::getInt64Ty(context_), dolllvm::targetLayout().downcount);
     Value *cycles = builder_.CreateLoad(Type::getInt64Ty(context_), cycles_);
     builder_.CreateStore(builder_.CreateSub(downcount, cycles),
-                         bytePtr(offsetof(CPUState, downcount)));
+                         bytePtr(dolllvm::targetLayout().downcount));
     builder_.CreateRetVoid();
     return true;
   }

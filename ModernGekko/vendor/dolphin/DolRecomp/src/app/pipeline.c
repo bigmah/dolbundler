@@ -259,7 +259,13 @@ static void emit_llvm_metadata(FILE* header, FILE* manifest, u64 build_id) {
     dolllvm_target_cpu(requested, cpu, sizeof(cpu));
     dolllvm_target_features(requested, features, sizeof(features));
     dolllvm_codegen_fingerprint(requested, fingerprint, sizeof(fingerprint));
-    const u64 layout = dolnative_state_layout_hash();
+    // The offsets the header publishes are the *target's*, not this host's:
+    // module-template's static asserts compile against them for the target, and
+    // the objects have the same offsets baked in (llvm_target_layout.h). The
+    // two have to agree, and neither may be the host's when they differ.
+    const u32 pointer_size = dolllvm_target_pointer_size(requested);
+    const DolNativeTargetLayout target = dolnative_target_layout(pointer_size);
+    const u64 layout = dolnative_state_layout_hash_for(&target);
 
     fprintf(header,
             "\n// Immutable native-code build identity\n"
@@ -283,8 +289,10 @@ static void emit_llvm_metadata(FILE* header, FILE* manifest, u64 build_id) {
 #define DOLNATIVE_EMIT_FIELD(id, field, count)                                 \
     fprintf(header, "#define DOLRECOMP_NATIVE_OFFSET_" #id " %lluull\n"       \
                     "#define DOLRECOMP_NATIVE_SIZE_" #id " %lluull\n",        \
-            (unsigned long long)offsetof(CPUState, field),                     \
-            (unsigned long long)sizeof(((CPUState*)0)->field));
+            (unsigned long long)dolnative_target_field_offset(&target,          \
+                                                              DOLNATIVE_FIELD_##id), \
+            (unsigned long long)dolnative_target_field_size(&target,            \
+                                                            DOLNATIVE_FIELD_##id));
     DOLNATIVE_LAYOUT_FIELDS(DOLNATIVE_EMIT_FIELD)
 #undef DOLNATIVE_EMIT_FIELD
 
@@ -313,7 +321,11 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
     const char* symbol_prefix = getenv("DOLRECOMP_LLVM_SYMBOL_PREFIX");
     if (symbol_prefix)
         hash = hash_bytes(hash, symbol_prefix, strlen(symbol_prefix));
-    u64 state_layout = dolnative_state_layout_hash();
+    // Same layout the header publishes: a cache entry built for one target must
+    // not be handed to another.
+    const DolNativeTargetLayout job_target = dolnative_target_layout(
+        dolllvm_target_pointer_size(getenv("DOLRECOMP_LLVM_TARGET")));
+    u64 state_layout = dolnative_state_layout_hash_for(&job_target);
     hash = hash_bytes(hash, &state_layout, sizeof(state_layout));
     // Host triples must distinguish caches when no target was requested.
     char triple[256];

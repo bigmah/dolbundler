@@ -5,6 +5,8 @@
 #define DOLNATIVE_WITH_DOLIR 1
 #include "core/native_state_layout.h"
 
+#include "backend/llvm/llvm_target_layout.h"
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -372,6 +374,31 @@ static bool matchesMachO(const std::vector<unsigned char> &bytes,
 
 } // namespace
 
+namespace dolllvm {
+
+namespace {
+// Host layout until an emission says otherwise, which is correct for every
+// target that shares the host's pointer size.
+DolNativeTargetLayout g_layout = dolnative_target_layout(sizeof(void *));
+}  // namespace
+
+void setTargetLayout(unsigned pointer_size) {
+  g_layout = dolnative_target_layout(pointer_size);
+}
+
+const DolNativeTargetLayout &targetLayout() { return g_layout; }
+
+size_t targetStateOffset(DolIRStateSlot slot) {
+  // The only slot past the pointers. Everything else is in the prefix, where
+  // every target agrees.
+  if (slot == DOLIR_STATE_DOWNCOUNT)
+    return g_layout.downcount;
+  return dolnative_state_offset(slot);
+}
+
+}  // namespace dolllvm
+
+
 extern "C" bool dolllvm_emit_object(const DolIRModule *source,
                                     const char *object_path,
                                     const DolLLVMOptions *options,
@@ -419,6 +446,19 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     fprintf(diagnostics, "dolllvm: failed to create target machine\n");
     return false;
   }
+
+  // The offsets baked into the objects have to be the target's, and wasm32's
+  // pointer-bearing CPUState tail does not line up with a 64-bit host's. Ask
+  // the target's own DataLayout rather than inferring from the triple.
+  if (!dolnative_target_layout_matches_host()) {
+    fprintf(diagnostics,
+            "dolllvm: the CPUState tail walker disagrees with this compiler, so "
+            "every offset it produces would be wrong -- native_state_layout.h "
+            "has drifted from cpu.h\n");
+    return false;
+  }
+  const unsigned pointer_size = machine->createDataLayout().getPointerSize();
+  dolllvm::setTargetLayout(pointer_size);
 
   llvm::LLVMContext context;
   llvm::Module module("dolrecomp_native", context);
@@ -595,6 +635,11 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   codegen.run(module);
   objectFile.flush();
   return true;
+}
+
+extern "C" unsigned dolllvm_target_pointer_size(const char *requested) {
+  const llvm::Triple triple(resolveTriple(requested));
+  return triple.isArch32Bit() ? 4u : 8u;
 }
 
 extern "C" bool dolllvm_effective_triple(const char *requested, char *out,

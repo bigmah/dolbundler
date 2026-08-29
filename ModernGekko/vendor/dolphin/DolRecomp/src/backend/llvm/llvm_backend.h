@@ -33,6 +33,10 @@ bool dolllvm_emit_object(const DolIRModule* module, const char* object_path,
 // Resolve an optional target to the triple used for emission.
 bool dolllvm_effective_triple(const char* requested, char* out, size_t size);
 
+// The target's pointer size in bytes, which is what decides whether CPUState's
+// pointer-bearing tail lays out like the host's. 8 for every target but wasm32.
+unsigned dolllvm_target_pointer_size(const char* requested);
+
 // Validate an object's complete identity against the effective target triple.
 // Mach-O validation includes architecture, MH_OBJECT, platform, and min OS.
 bool dolllvm_object_matches_triple(const char* path, const char* requested);

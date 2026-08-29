@@ -5,6 +5,8 @@
 #include "core/dispatch_gate.h"
 #include "core/native_state_layout.h"
 
+#include "backend/llvm/llvm_target_layout.h"
+
 #include <cstdio>
 
 #include <llvm/ADT/SmallVector.h>
@@ -145,7 +147,7 @@ Type *FunctionEmitter::type(DolIRType t) {
 }
 
 size_t FunctionEmitter::stateOffset(DolIRStateSlot slot) const {
-  return dolnative_state_offset(slot);
+  return dolllvm::targetStateOffset(slot);
 }
 
 Value *FunctionEmitter::bytePtr(size_t offset) {
@@ -364,16 +366,16 @@ void FunctionEmitter::emitEntry() {
   // body is executing. Keep one SSA snapshot so calls that legitimately
   // mutate architectural CPUState do not pessimize every memory operation.
   Type *pointer = PointerType::getUnqual(context_);
-  ram_ = loadOffset(pointer, offsetof(CPUState, ram));
+  ram_ = loadOffset(pointer, dolllvm::targetLayout().ram);
   ram_size_ =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
+      loadOffset(Type::getInt32Ty(context_), dolllvm::targetLayout().ram_size);
   if (gamecube_) {
     exram_ = ConstantPointerNull::get(cast<PointerType>(pointer));
     exram_size_ = builder_.getInt32(0);
   } else {
-    exram_ = loadOffset(pointer, offsetof(CPUState, exram));
+    exram_ = loadOffset(pointer, dolllvm::targetLayout().exram);
     exram_size_ =
-        loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
+        loadOffset(Type::getInt32Ty(context_), dolllvm::targetLayout().exram_size);
   }
   const std::string gateName = symbolName("dolrecomp_native_gate");
   GlobalVariable *gate = module_.getGlobalVariable(gateName, true);
@@ -392,17 +394,17 @@ void FunctionEmitter::emitEntry() {
     return builder_.CreateLoad(fieldType, field);
   };
   gate_chunk_open_ = gateField(
-      pointer, offsetof(StaticRecompDispatchGate, chunk_open));
+      pointer, dolllvm::targetLayout().gate_chunk_open);
   gate_budget_ =
-      gateField(pointer, offsetof(StaticRecompDispatchGate, budget));
+      gateField(pointer, dolllvm::targetLayout().gate_budget);
   gate_pending_ =
-      gateField(pointer, offsetof(StaticRecompDispatchGate, pending));
+      gateField(pointer, dolllvm::targetLayout().gate_pending);
   gate_pending_sync_ = gateField(
       Type::getInt32Ty(context_),
-      offsetof(StaticRecompDispatchGate, pending_sync));
+      dolllvm::targetLayout().gate_pending_sync);
   gate_pending_async_ = gateField(
       Type::getInt32Ty(context_),
-      offsetof(StaticRecompDispatchGate, pending_async));
+      dolllvm::targetLayout().gate_pending_async);
   Value *pc = loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, pc));
   BasicBlock *bad = BasicBlock::Create(context_, "entry_miss", function_);
   auto *dispatch = builder_.CreateSwitch(pc, bad, source_.block_count);
@@ -440,11 +442,11 @@ void FunctionEmitter::materialize(u32 pc) {
   storeContext(DOLIR_STATE_PC,
                ConstantInt::get(Type::getInt32Ty(context_), pc));
   Value *downcount =
-      loadOffset(Type::getInt64Ty(context_), offsetof(CPUState, downcount));
+      loadOffset(Type::getInt64Ty(context_), dolllvm::targetLayout().downcount);
   // Only unmaterialized cycles are owed to downcount.
   Value *cycles = builder_.CreateLoad(Type::getInt64Ty(context_), cycles_);
   builder_.CreateStore(builder_.CreateSub(downcount, cycles),
-                       bytePtr(offsetof(CPUState, downcount)));
+                       bytePtr(dolllvm::targetLayout().downcount));
 }
 
 void FunctionEmitter::sideExit(u32 pc) {
@@ -490,7 +492,7 @@ void FunctionEmitter::emitBudgetGuard(u32 pc) {
   // Hooks flush materialized charge and reset ctx->downcount.  Add only the
   // charge not materialized yet; a lifetime counter would double-count every
   // hook, the same failure mode the cross-chunk gate explicitly avoids.
-  Value *materialized = loadOffset(i64, offsetof(CPUState, downcount));
+  Value *materialized = loadOffset(i64, dolllvm::targetLayout().downcount);
   Value *unmaterialized = builder_.CreateLoad(i64, cycles_);
   Value *unflushed = builder_.CreateAdd(builder_.CreateNeg(materialized),
                                         unmaterialized);

@@ -1,6 +1,8 @@
 #include "backend/llvm/llvm_function_emitter.h"
 #include "cpu/cpu.h"
 
+#include "backend/llvm/llvm_target_layout.h"
+
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -34,7 +36,7 @@ Value *FunctionEmitter::endianLoad(Value *pointer, Type *resultType,
 
 Value *FunctionEmitter::externalRead(Value *address, u32 width) {
   Type *ptr = PointerType::getUnqual(context_);
-  Value *fn = loadOffset(ptr, offsetof(CPUState, external_read));
+  Value *fn = loadOffset(ptr, dolllvm::targetLayout().external_read);
   BasicBlock *call = BasicBlock::Create(context_, "read_external", function_);
   BasicBlock *zero = BasicBlock::Create(context_, "read_unmapped", function_);
   BasicBlock *join = BasicBlock::Create(context_, "read_slow_join", function_);
@@ -196,7 +198,7 @@ void FunctionEmitter::endianStore(Value *pointer, Value *value, u32 width) {
 
 void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
   Type *ptr = PointerType::getUnqual(context_);
-  Value *fn = loadOffset(ptr, offsetof(CPUState, external_write));
+  Value *fn = loadOffset(ptr, dolllvm::targetLayout().external_write);
   BasicBlock *call = BasicBlock::Create(context_, "write_external", function_);
   BasicBlock *done = BasicBlock::Create(context_, "write_slow_done", function_);
   builder_.CreateCondBr(builder_.CreateIsNotNull(fn), call, done);
