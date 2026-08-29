@@ -49,7 +49,26 @@ instead of running this is a way to lose a day.
 Run it on the Mac too, for a baseline: the interesting entries are the ones the
 phone weights very differently.
 
-Where it will probably point, in order of prior:
+**First device reading, from a menu scene** (not a level -- get one from a
+level before leaning on it): `[gl] 33.4 ms/frame ... glBufferData 0.0ms/6`.
+Essentially no time inside the wrapped calls, against 17.8 ms/frame and 0.3 ms
+on the Mac. If that holds in a level it rules the wrapped calls out, and the
+157% -> 40% gap is one of two other things, which need different fixes:
+
+- **the unwrapped per-draw calls** -- state, uniforms, bindings. In WebGL every
+  one crosses into JS and is validated, and a tile-based GPU charges for
+  framebuffer switches that no single call attributes.
+- **Dolphin's own CPU-side renderer work** -- the texture cache, vertex loading,
+  shader generation. The Null backend skips much of this too, so it is inside
+  the Null-versus-OpenGL difference and is not GL at all.
+
+Telling those apart: count draw calls and state changes per frame (Dolphin
+already keeps `g_stats.this_frame`), and check the wrapped call *counts* against
+it -- the Mac level reading was 385 glBufferData and 141 glDrawElements per
+hundred frames, which is low enough to be worth confirming the shim sees
+everything it should.
+
+Where it will otherwise probably point, in order of prior:
 
 - **EFB copies.** A tile-based GPU resolves the whole tile buffer on every
   render-target change. `DOLWEB_LOG_EFB_COPY` already prints them; Disney skate
