@@ -41,6 +41,27 @@ def symbols(nm: str, paths: list[pathlib.Path]) -> tuple[set[str], set[str]]:
     return defined, undefined
 
 
+# wasm objects reference these three by name and wasm-ld supplies them; they are
+# not symbols a module is reaching for. Listing them rather than pattern-matching
+# on "starts with an underscore" keeps the audit's whole point intact: anything
+# else undefined is still a module asking the chassis for something.
+WASM_LINKER_GLOBALS = frozenset({
+    "__indirect_function_table",
+    "_indirect_function_table",
+    "__memory_base",
+    "_memory_base",
+    "__stack_pointer",
+    "_stack_pointer",
+    "__table_base",
+    "_table_base",
+})
+
+# The one libm entry point the paired-single lowering emits. The C backend gets
+# it from the same libm; on a target where the compiler open-codes an FMA it
+# does not appear at all.
+LIBM = frozenset({"fma", "fmaf"})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--nm", required=True)
@@ -74,6 +95,8 @@ def main() -> int:
         "GXRuntime CPU helper": [],
         "memory journal": [],
         "LLVM profile runtime": [],
+        "wasm linker global": [],
+        "libm": [],
         "unexpected": [],
     }
     for name in sorted(undefined):
@@ -88,6 +111,10 @@ def main() -> int:
             categories["memory journal"].append(name)
         elif args.allow_profile_runtime and name in PROFILE_RUNTIME:
             categories["LLVM profile runtime"].append(name)
+        elif name in WASM_LINKER_GLOBALS:
+            categories["wasm linker global"].append(name)
+        elif name in LIBM:
+            categories["libm"].append(name)
         else:
             categories["unexpected"].append(name)
 
