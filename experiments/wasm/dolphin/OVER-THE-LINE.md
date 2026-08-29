@@ -77,21 +77,37 @@ did establish, and what survives:
   without the LAN certificate. It is a correctness proxy, not a speed one: the
   GPU underneath is the Mac's.
 
-## 2. The black ground -- a palette that arrives empty
+## 2. The black ground -- a texture that decodes to nothing
 
 **It is not a renderer defect.** Whole floor surfaces render black while the
 walls, ramps, props and skater in the same frame are correct, and the cause is a
-256x256 **C8** texture -- 8-bit paletted, IA8 palette -- that decodes to pure
-black:
+texture that decodes to nothing but zeros. `DOLWEB_PAINT_ZERO_TEXTURES=1`
+uploads magenta wherever the decoded bytes are all zero, and over the window
+where the base build has seven black frames out of seven, the painted build has
+**none**.
+
+**Which** empty texture is not pinned yet. A run reports five distinct ones, and
+they fall into two classes that have nothing to do with each other:
+
+1. **An empty palette over real indices.** A 256x256 **C8** texture -- 8-bit
+   paletted, IA8 palette -- whose own 64 KB of indices are present and non-zero:
 
     [tex] decoded to zero: 256x256 fmt=9 tlut=0 addr=0x001faca0 src=65536 bytes,
           source itself is NOT zero, tlut 512 bytes is ZERO
 
-Its 64 KB of indices are present and non-zero. Its 512-byte palette in TMEM is
-entirely zero, so `TexDecoder_Decode` maps every index to black and is right to.
-`DOLWEB_PAINT_ZERO_TEXTURES=1` uploads magenta wherever the decoded bytes are
-all zero, and over the window where the base build has seven black frames out of
-seven, the painted build has **none**.
+   Its 512-byte palette in TMEM is entirely zero, so `TexDecoder_Decode` maps
+   every index to black and is right to.
+
+2. **Source bytes that were already zero** -- three textures (a 256x256 C4, a
+   64x64 C4, two 640x480 RGBA8) whose data in guest RAM is all zeros, which for
+   a texture the game has not loaded yet is not a defect at all.
+
+`DOLWEB_PAINT_ZERO_TEXTURES=palette` and `=source` paint one class at a time and
+are how to settle it. A first `=source` run came back not-black in the frames
+the base run had black, which would put the floor in class 2 -- but the floor in
+those frames is a plain red carpet with no magenta in it, so the run is more
+likely to have been a different moment of the level than a painted floor. **Run
+both halves and compare against the same guest ticks before believing either.**
 
 **The palette is loaded correctly. One register names the wrong slot.** Over a
 run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of

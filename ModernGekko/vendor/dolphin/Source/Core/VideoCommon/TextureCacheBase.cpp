@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <set>
+#include <string_view>
 #include <cstdio>
 #include <cstdlib>
 #include "VideoCommon/TextureCacheBase.h"
@@ -1757,7 +1758,19 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
           bool src_zero = src != nullptr;
           for (size_t i = 0; src_zero && i < src_size; ++i)
             src_zero = src[i] == 0;
+          // Not deduped away entirely: the first version keyed on the texture's
+          // address and format, which reported the *first* empty decode and hid
+          // every repeat -- so a harmless one at boot and a permanent one during
+          // play looked identical. The running total is what separates them.
           static std::set<u64> seen_zero;
+          static u64 zero_decodes = 0;
+          ++zero_decodes;
+          if (zero_decodes % 2000 == 0)
+          {
+            std::printf("[tex] %llu decodes to zero so far\n",
+                        (unsigned long long)zero_decodes);
+            std::fflush(stdout);
+          }
           const u64 key = (u64)texture_info.GetRawAddress() << 8 |
                           (u64)texture_info.GetTextureFormat();
           if (seen_zero.insert(key).second)
@@ -1774,14 +1787,46 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
             // matched against the destinations the TLUT loads actually used.
             const u8* tmem_base = TexDecoder_GetTmemSpan(0).data();
             const long tlut_offset = tlut && tmem_base ? (long)(tlut - tmem_base) : -1;
-            std::printf("[tex] decoded to zero: %ux%u fmt=%u tlut=%u addr=%#010x src=%zu bytes, "
-                        "source itself %s, tlut %zu bytes at tmem %#06lx %s\n",
+            std::printf("[tex] decoded to zero: stage %u, %ux%u fmt=%u tlut=%u addr=%#010x "
+                        "src=%zu bytes, source itself %s, tlut %zu bytes at tmem %#06lx %s\n",
+                        texture_info.GetStage(),
                         width, height, (unsigned)texture_info.GetTextureFormat(),
                         (unsigned)texture_info.GetTlutFormat(), texture_info.GetRawAddress(),
                         src_size, src_zero ? "is zero too" : "is NOT zero", tlut_size,
                         tlut_offset, tlut == nullptr ? "absent" :
                                      (tlut_zero ? "is ZERO" : "is not zero"));
             std::fflush(stdout);
+          }
+        }
+      }
+
+      // DOLWEB_PAINT_ZERO_TEXTURES=palette|source paints only one of the two
+      // ways a texture can decode to nothing -- an empty palette over real
+      // indices, or source bytes that were already zero. Painting both at once
+      // says a black surface is one of them; painting one at a time says which.
+      if (const char* paint = std::getenv("DOLWEB_PAINT_ZERO_TEXTURES"))
+      {
+        bool dst_zero = true;
+        for (size_t i = 0; dst_zero && i < decoded_texture_size; ++i)
+          dst_zero = dst_buffer[i] == 0;
+        if (dst_zero)
+        {
+          const u8* src = texture_info.GetData();
+          const size_t src_size = texture_info.GetTextureSize();
+          bool src_zero = src != nullptr;
+          for (size_t i = 0; src_zero && i < src_size; ++i)
+            src_zero = src[i] == 0;
+          const std::string_view mode(paint);
+          const bool want = mode == "palette" ? !src_zero : mode == "source" ? src_zero : true;
+          if (want)
+          {
+            for (size_t i = 0; i + 3 < decoded_texture_size; i += 4)
+            {
+              dst_buffer[i] = 0xff;
+              dst_buffer[i + 1] = 0x00;
+              dst_buffer[i + 2] = 0xff;
+              dst_buffer[i + 3] = 0xff;
+            }
           }
         }
       }
