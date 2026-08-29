@@ -105,9 +105,23 @@ static std::string targetCPU(const llvm::Triple &triple) {
   return cpu;
 }
 
-static std::string targetFeatures(const llvm::Triple &) {
+// wasm objects carry the feature set they were built with, and wasm-ld refuses
+// to give shared memory to a module any of whose objects lacks atomics and
+// bulk-memory: "--shared-memory is disallowed by chunk_....o because it was not
+// compiled with 'atomics' or 'bulk-memory' features". The emulator is threaded,
+// so every object has to agree with the rest of the build. This is the same
+// trap build.sh documents for the C backend, where -pthread has to reach every
+// translation unit and not just the link.
+static constexpr const char *kWasmTargetFeatures =
+    "+atomics,+bulk-memory,+mutable-globals,+sign-ext";
+
+static std::string targetFeatures(const llvm::Triple &triple) {
   const char *features = getenv("DOLRECOMP_LLVM_FEATURES");
-  return features ? features : kDefaultTargetFeatures;
+  if (features)
+    return features;
+  if (triple.isWasm())
+    return kWasmTargetFeatures;
+  return kDefaultTargetFeatures;
 }
 
 // instcombine's fixpoint check is a self-diagnostic for the pass, not a

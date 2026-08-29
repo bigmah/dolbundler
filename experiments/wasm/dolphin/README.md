@@ -159,6 +159,25 @@ the two open defects, and the habit that found today's.
   spr[1024]` against `spr_read`/`spr_write`). The walker stops at `EXRAM_SIZE`
   now, where `DOLNATIVE_LAYOUT_FIELDS` stops.
 
+  **Two more gates stood behind the layout, and both are the kind that read as
+  a mystery if nobody wrote them down:**
+
+  - The LLVM object symbol audit did not know wasm. A wasm object references
+    `__indirect_function_table`, `__memory_base` and `__stack_pointer` by name
+    and wasm-ld supplies them; `fma` is the one libm entry point the
+    paired-single lowering emits. They are listed in `verify_llvm_objects.py`
+    rather than pattern-matched, so anything else undefined is still caught.
+  - **wasm objects carry their feature set**, and the link fails with
+    `--shared-memory is disallowed by chunk_....o because it was not compiled
+    with 'atomics' or 'bulk-memory' features`. The backend now emits
+    `+atomics,+bulk-memory,+mutable-globals,+sign-ext` for a wasm triple. This
+    is the same trap `build.sh` documents for the C backend, where `-pthread`
+    has to reach every translation unit and not only the link.
+
+  Worth knowing for the build shape: the LLVM path links objects directly
+  instead of compiling 1855 C files, so the browser build is **1258 ninja
+  targets against the C backend's 3113**.
+
   Historical note, kept because it bounded the work: what was left was exactly
   the CPUState layout, and it was precisely bounded.
   Compiling `core/native_state_layout.h` against the generated header with
