@@ -148,6 +148,17 @@ const acts = (opt.acts ? String(opt.acts).split(',') : []).map((spec) => {
            hold: +(hold || 140), done: false };
 }).sort((a, b) => a.at - b.at);
 
+// --shotAt g135,g145 screenshots when the *guest* reaches those seconds, and
+// names the file after the moment rather than a counter. Wall-clock intervals
+// cannot be compared against the desktop build: the two reach a given point in
+// the game at different wall times, so "frame 15 here" and "frame 15 there" are
+// different scenes, and every cross-build comparison in this project that used
+// them had to be thrown away. MODERNGEKKO_SHOT_AT is the desktop's equivalent
+// and takes the same guest seconds.
+const shotAt = (opt.shotAt ? String(opt.shotAt).split(',') : [])
+  .map((v) => ({ at: +String(v).replace(/^g/i, ''), done: false }))
+  .sort((a, b) => a.at - b.at);
+
 const every = opt.shotEvery ? +opt.shotEvery * 1000 : 0;
 let nextShot = every ? Date.now() + every : Infinity;
 let shotIndex = 0;
@@ -163,6 +174,14 @@ while (Date.now() < deadline && !done) {
     const name = opt.shot.replace(/\.png$/, `-${String(++shotIndex).padStart(2, '0')}.png`);
     writeFileSync(name, Buffer.from(png.data, 'base64'));
     console.log(`[shot] ${name}`);
+  }
+  for (const sa of shotAt) {
+    if (sa.done || guestSeconds < sa.at) continue;
+    sa.done = true;
+    const png = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    const name = opt.shot.replace(/\.png$/, `-g${sa.at}.png`);
+    writeFileSync(name, Buffer.from(png.data, 'base64'));
+    console.log(`[shot] ${name} at guest ${guestSeconds.toFixed(1)}s`);
   }
   // Hold START (control 5, InputOverrider.h) down for a moment every few
   // seconds, but only while getting through the attract loop: once the game is
