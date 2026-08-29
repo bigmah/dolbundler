@@ -117,10 +117,17 @@ did establish, and what survives:
   | Chrome | 0.30 ms | 16.0 ms | **2%** |
   | simulator Safari | **5.0 ms** (up to 10.3) | 26.5 ms | **~19%** |
 
-  Same Mac, same GPU. **Safari blocks in the present about 17x longer than
-  Chrome does**, so a meaningful part of the renderer's cost on the engine that
-  has to ship is the present itself -- and none of it is visible on Chrome,
-  which is where every previous renderer measurement was taken.
+  Same Mac, same GPU. Safari blocks in the present about 17x longer than Chrome
+  does, and none of that is visible on Chrome, which is where every previous
+  renderer measurement was taken.
+
+  **Treat the Safari row as a lead, not a device fact.** It is the *simulator*,
+  whose GL reaches the Mac's Metal through extra layers, and this file has
+  already been wrong twice by reading one machine's renderer as another's. What
+  it does establish is that the present is worth timing at all -- on Chrome it
+  is 2% and could be dismissed. It is not the proxied-canvas fallback:
+  `Core::Init` logs a warning when the canvas cannot be handed to the rendering
+  thread, and neither engine logged one.
 
   On Chrome the rest is not GL either: every wrapped call sums to ~1.0-1.4 ms of
   a 16-23 ms frame (`glBufferData` 0.3-0.7 ms over ~270-615 calls,
