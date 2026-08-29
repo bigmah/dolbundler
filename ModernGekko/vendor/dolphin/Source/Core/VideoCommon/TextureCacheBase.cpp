@@ -1804,7 +1804,10 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
       // ways a texture can decode to nothing -- an empty palette over real
       // indices, or source bytes that were already zero. Painting both at once
       // says a black surface is one of them; painting one at a time says which.
-      if (const char* paint = std::getenv("DOLWEB_PAINT_ZERO_TEXTURES"))
+      // Read once. This runs per decode, and an instrument that is off should
+      // cost nothing at all.
+      static const char* const paint = std::getenv("DOLWEB_PAINT_ZERO_TEXTURES");
+      if (paint)
       {
         bool dst_zero = true;
         for (size_t i = 0; dst_zero && i < decoded_texture_size; ++i)
