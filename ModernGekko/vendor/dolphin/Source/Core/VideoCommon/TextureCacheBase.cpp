@@ -1824,28 +1824,67 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
       // instrument because the existing logging only speaks up when a decode is
       // entirely zero, and "decoded differently" is a larger class than
       // "decoded to nothing".
-      static const bool decode_census = std::getenv("DOLWEB_DECODE_CENSUS") != nullptr;
-      if (decode_census)
+      static const char* const decode_census_env = std::getenv("DOLWEB_DECODE_CENSUS");
+      if (decode_census_env)
       {
-        static std::set<u64> seen_decode;
+        // Gate on guest time, and key on the decoded *content* as well as the
+        // address. Both matter, and the first version of this had neither.
+        //
+        // Guest addresses are reused: the same buffer holds a menu texture at
+        // guest 30 and a level texture at guest 150. Deduping by address alone
+        // therefore reported the *first* decode at each address and hid every
+        // later one -- so a diff of two builds compared their menus and called
+        // the level identical. That is the same mistake as anchoring the act
+        // timeline to wall clock: comparing two different moments and
+        // believing the answer.
+        static const double census_from = std::strtod(decode_census_env, nullptr);
+        bool in_window = true;
+        if (census_from > 0.0)
+        {
+          auto& system = Core::System::GetInstance();
+          const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+          const double now =
+              hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
+          in_window = now >= census_from;
+        }
+        static std::set<std::pair<u64, unsigned long long>> seen_decode;
         const u64 key = (u64)texture_info.GetRawAddress() << 8 |
                         (u64)texture_info.GetTextureFormat();
-        if (seen_decode.insert(key).second)
+        unsigned long long content = 1469598103934665603ull;
+        for (size_t i = 0; i < decoded_texture_size; ++i)
+          content = (content ^ dst_buffer[i]) * 1099511628211ull;
+        if (in_window && seen_decode.insert({key, content}).second)
         {
           const u8* src = texture_info.GetData();
           const size_t src_size = texture_info.GetTextureSize();
           size_t src_nz = 0;
           for (size_t i = 0; src && i < src_size; ++i)
             src_nz += src[i] != 0;
+          // A non-zero byte count is too coarse on its own: a texture that
+          // decodes to (1,1,1) everywhere has every byte non-zero and still
+          // renders black. Carry the mean and an order-sensitive checksum as
+          // well, so "decoded differently" is visible and not just "decoded to
+          // nothing". The checksum is FNV-1a rather than Dolphin's own hash on
+          // purpose -- GetHash64 is hardware CRC on ARM and xxhash on wasm, so
+          // it cannot be compared across the two builds at all.
           size_t dst_nz = 0;
+          unsigned long long sum = 0;
+          unsigned long long fnv = 1469598103934665603ull;
           for (size_t i = 0; i < decoded_texture_size; ++i)
-            dst_nz += dst_buffer[i] != 0;
+          {
+            const u8 v = dst_buffer[i];
+            dst_nz += v != 0;
+            sum += v;
+            fnv = (fnv ^ v) * 1099511628211ull;
+          }
+          const double mean = decoded_texture_size ? (double)sum / decoded_texture_size : 0.0;
           std::printf("[decode] addr=%#010x %ux%u fmt=%u %s src=%zu srcnz=%zu "
-                      "dst=%zu dstnz=%zu levels=%u\n",
+                      "dst=%zu dstnz=%zu mean=%.2f fnv=%016llx levels=%u\n",
                       texture_info.GetRawAddress(), width, height,
                       (unsigned)texture_info.GetTextureFormat(),
                       texture_info.IsFromTmem() ? "tmem" : "ram", src_size, src_nz,
-                      decoded_texture_size, dst_nz, texture_info.GetLevelCount());
+                      decoded_texture_size, dst_nz, mean, fnv,
+                      texture_info.GetLevelCount());
           std::fflush(stdout);
         }
       }
@@ -1912,6 +1951,43 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
                                      (tlut_zero ? "is ZERO" : "is not zero"));
             std::fflush(stdout);
           }
+        }
+      }
+
+      // DOLWEB_PAINT_BY_ADDRESS=1 replaces every decoded texture with a flat
+      // colour derived from its guest address. The picture becomes a map of
+      // which texture is on which surface, which is the question that has been
+      // unanswerable all along: the floor's texture has never been identified,
+      // only guessed at, and one guess (0x009a9e60) turned out to be a texture
+      // the desktop binds too while rendering the floor correctly.
+      //
+      // Run in both builds and compare the colour under the floor. Same colour
+      // means the same texture is bound and the difference is in the upload or
+      // the sampling; different colours mean the two builds are drawing the
+      // floor with different textures, which is a different defect entirely.
+      static const bool paint_addr = std::getenv("DOLWEB_PAINT_BY_ADDRESS") != nullptr;
+      if (paint_addr)
+      {
+        // Spread neighbouring addresses far apart in colour: textures that
+        // matter here sit within a few KB of each other, so the low bits are
+        // what distinguishes them and a plain byte-slice would make every
+        // surface the same shade.
+        const u32 a = texture_info.GetRawAddress();
+        const u32 h = a * 2654435761u;
+        const u8 r = (u8)(h >> 24), g = (u8)(h >> 16), b = (u8)(h >> 8);
+        for (size_t i = 0; i + 3 < decoded_texture_size; i += 4)
+        {
+          dst_buffer[i] = r;
+          dst_buffer[i + 1] = g;
+          dst_buffer[i + 2] = b;
+          dst_buffer[i + 3] = 0xff;
+        }
+        static std::set<u32> painted;
+        if (painted.insert(a).second)
+        {
+          std::printf("[paint] addr=%#010x -> rgb(%u,%u,%u) %ux%u fmt=%u\n", a, r, g, b,
+                      width, height, (unsigned)texture_info.GetTextureFormat());
+          std::fflush(stdout);
         }
       }
 

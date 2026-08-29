@@ -310,6 +310,40 @@ the browser draws the floor with, it has real bytes behind it and comes out
 black anyway. The remaining ground is **decode, upload, or shading**, which is
 a much smaller space than the one this file has been searching.
 
+### And it is the decoded content, measured by painting over it
+
+`DOLWEB_PAINT_BY_ADDRESS=1` replaces every decoded texture with a flat colour
+derived from its guest address. In the browser, in the level, **the black ground
+disappears completely**: 0.014-0.022 near-black on every frame of the window
+against 0.84-0.98 on the same timeline unpainted. The floor comes out bright
+pink, which is a texture identity colour and not a coincidence.
+
+That places the defect exactly. The texture is found, bound, uploaded, sampled,
+shaded and lit correctly -- every one of those steps is exercised by the painted
+run and every one of them works. **What is wrong is the bytes the decoder
+produces for one texture.**
+
+Two eliminations on the way there, both taken in the level rather than in the
+menus, which is where several earlier ones went wrong:
+
+| | |
+|---|---|
+| `MODERNGEKKO_FLAT_SHADE=tex` | floor still black (0.55-0.97): not the shading |
+| `MODERNGEKKO_NO_MIPMAP=1` | floor still black (0.91-0.98): not mipmap completeness, despite `SamplerCache.cpp` describing exactly this symptom |
+
+**And the first decode census missed it**, which is worth recording as a
+measurement error rather than quietly fixing. It reported only whether a decode
+came out *entirely* zero, and by that test the browser had exactly one offender
+-- the boot C8 at `0x001faca0` -- which pointed away from the truth. A texture
+that decodes to (1,1,1) everywhere has every byte non-zero and still renders
+black. The census carries the decoded mean and an FNV-1a checksum now.
+
+The checksum is deliberately **not** Dolphin's `GetHash64`: that is hardware CRC
+on ARM and xxhash on wasm, so it differs between the builds for identical bytes
+and cannot be compared across them at all. Every `base_hash` in the texture
+census differs between the two builds for exactly this reason, and it means
+nothing.
+
 ### So where it actually stands
 
 Ruled out, each by measurement: the renderer, mipmaps, texture coordinates, GL
