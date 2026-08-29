@@ -139,6 +139,14 @@ elseif(APPLE)
     ControllerInterface/Quartz/Quartz.mm
     ControllerInterface/Quartz/QuartzKeyboardAndMouse.h
     ControllerInterface/Quartz/QuartzKeyboardAndMouse.mm
+    # The touch overrider on the desktop too. It has no platform dependencies of
+    # its own -- it is just a way to feed control states in from the host -- and
+    # it is what lets moderngekko-run replay the same MODERNGEKKO_ACTS timeline
+    # the browser build drives itself with. Reproducing a browser defect here is
+    # the comparison that says whether it belongs to that port at all, and until
+    # now there was no way to reach a level in this build without hands.
+    ControllerInterface/Touch/InputOverrider.cpp
+    ControllerInterface/Touch/InputOverrider.h
   )
   target_link_libraries(inputcommon PRIVATE
     ${COREFOUNDATION_LIBRARY}

@@ -157,14 +157,25 @@ whole-file path and the race `dolweb-fetch.js` removes), and TMEM preload.
 What is established: **a texture the game draws the floor with has no data
 behind it in guest RAM**, and the guest is executing correctly.
 
-**The next step is the desktop.** The interpreter result says this should
-reproduce in the native build, and if it does, it is a Dolphin defect that has
-nothing to do with this port -- which is the single most useful thing left to
-know, because it decides whether this blocks the phone at all. Nobody has looked,
-because `moderngekko-run` has no scripted input to reach the level with. Teaching
-it the same `?acts=` timeline is the missing piece:
-`ciface::Touch::RegisterGameCubeInputOverrider(0)` and `SetControlState`, which
-is exactly what `main.cpp` already does for the browser build.
+**And the desktop reproduces it.** `moderngekko-run` takes the same timeline now
+(`MODERNGEKKO_ACTS="25:5,40:5,52:5,70:0,76:0,82:0,110:15:9000,..."`, wall-clock
+seconds rather than guest ones, since a native run has no `[perf]` line to
+anchor to), and running the same disc on native macOS OpenGL prints the same
+lines at the same guest addresses:
+
+    [tex] decoded to zero: stage 0, from RAM, 256x256 fmt=9 tlut=0
+          addr=0x001faca0 src=65536 bytes, source itself is NOT zero,
+          tlut 512 bytes at tmem 000000 is ZERO
+
+No wasm, no emscripten filesystem, no WebGL anywhere in the picture, and the
+same texture with the same empty palette. **This defect does not belong to this
+port**, which is the thing that needed knowing: it is not what stands between
+Disney skate and the phone. It is a Dolphin question about this game, and it can
+be chased on the desktop at desktop speed from here.
+
+(The desktop run's acts are wall-clock, so it lands somewhere different in the
+menus than the browser's guest-anchored ones. Reaching the *level* natively needs
+the timings retuned -- the boot-time decodes above are identical either way.)
 
 **The palette is loaded correctly. One register names the wrong slot.** Over a
 run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of

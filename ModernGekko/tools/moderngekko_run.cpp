@@ -6,6 +6,7 @@
 #include "netplay_session.hpp"
 
 #include "Common/StringUtil.h"
+#include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 
 #include <SDL3/SDL.h>
 
@@ -18,6 +19,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <algorithm>
+#include <thread>
+#include <vector>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -449,6 +453,53 @@ int RunMain(int argc, char **argv) {
   if (!created) {
     std::cerr << "initialization failed: " << created.error->message << '\n';
     return 1;
+  }
+
+  // MODERNGEKKO_ACTS is the same timeline the browser build drives itself with
+  // (experiments/wasm/dolphin, ?acts=): "25:5,60:8,110:15:9000" presses control
+  // 5 at second 25, 8 at 60, and holds 15 for nine seconds from 110. It exists
+  // so that a defect found in the browser can be checked here, which is the one
+  // comparison that says whether a defect belongs to this port at all -- and
+  // until now there was no way to reach a level in this build without hands.
+  //
+  // Seconds are wall clock, not the guest's: this build runs at about realtime,
+  // and a native run has no [perf] line to anchor to. A build running at a
+  // fraction of speed will land somewhere else, so check where it got to.
+  std::jthread act_driver;
+  if (const char* acts = std::getenv("MODERNGEKKO_ACTS")) {
+    struct Act { double at; int control; double state; int hold_ms; };
+    std::vector<Act> timeline;
+    for (const std::string& spec : SplitString(acts, ',')) {
+      const std::vector<std::string> parts = SplitString(spec, ':');
+      if (parts.size() < 2) continue;
+      std::string at = parts[0];
+      if (!at.empty() && (at[0] == 'g' || at[0] == 'G')) at.erase(0, 1);
+      timeline.push_back({std::strtod(at.c_str(), nullptr),
+                          std::atoi(parts[1].c_str()), 1.0,
+                          parts.size() > 2 ? std::atoi(parts[2].c_str()) : 140});
+    }
+    std::ranges::sort(timeline, {}, &Act::at);
+    act_driver = std::jthread([timeline](std::stop_token stop) {
+      constexpr int kPad = 0;
+      ciface::Touch::RegisterGameCubeInputOverrider(kPad);
+      const auto start = std::chrono::steady_clock::now();
+      for (const Act& act : timeline) {
+        while (!stop.stop_requested()) {
+          const double now = std::chrono::duration<double>(
+              std::chrono::steady_clock::now() - start).count();
+          if (now >= act.at) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (stop.stop_requested()) break;
+        std::cout << "[act] control " << act.control << " at "
+                  << act.at << " s\n" << std::flush;
+        ciface::Touch::SetControlState(
+            kPad, static_cast<ciface::Touch::ControlID>(act.control), act.state);
+        std::this_thread::sleep_for(std::chrono::milliseconds(act.hold_ms));
+        ciface::Touch::SetControlState(
+            kPad, static_cast<ciface::Touch::ControlID>(act.control), 0.0);
+      }
+    });
   }
   std::cout << "audio backend: " << created.runtime->GetConfig().audio.backend
             << '\n';
