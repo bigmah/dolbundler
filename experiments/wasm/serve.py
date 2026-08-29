@@ -240,7 +240,12 @@ def make_handler(root, iso_path=None):
             # response to its probe. SimpleHTTPRequestHandler does not send it,
             # so any game file that reaches the default path advertises no
             # range support and gets pulled down in full.
-            if self.path.startswith("/game/"):
+            # Once, and only once. serve_range and the Range-HEAD path already
+            # send it, and a second copy is not harmless: HTTP joins repeated
+            # headers with a comma, so fetch() reports "bytes, bytes" and
+            # emscripten's `== 'bytes'` test fails -- which sends every game
+            # file down the download-it-all path this header exists to avoid.
+            if self.path.startswith("/game/") and not getattr(self, "_ranges_set", False):
                 self.send_header("Accept-Ranges", "bytes")
             if not getattr(self, "_cache_set", False):
                 cacheable = (self.path.startswith("/game/") and
@@ -297,6 +302,8 @@ def make_handler(root, iso_path=None):
                 self._sent_length = value
             if k == "cache-control":
                 self._cache_set = True
+            if k == "accept-ranges":
+                self._ranges_set = True
             super().send_header(key, value)
 
         def log_message(self, *a):
