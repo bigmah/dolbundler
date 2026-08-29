@@ -109,9 +109,28 @@ did establish, and what survives:
   frame. With the state calls and the texture uploads wrapped as well, the total
   is ~4% of the frame on both machines. **Whatever the gap is, it is not in a GL
   call the shim can see.**
-- `DOLWEB_TIME_SWAP=1` **has still never been run on the device.** It is the one
-  measurement that separates "blocked waiting for the GPU" from "busy in
-  VideoCommon", and they have opposite fixes. Run it first.
+- `DOLWEB_TIME_SWAP=1` **has been run now, in gameplay, and the two engines
+  answer differently** -- which is the single most useful thing in this file:
+
+  | | swap (the present) | frame | swap share |
+  |---|---|---|---|
+  | Chrome | 0.30 ms | 16.0 ms | **2%** |
+  | simulator Safari | **5.0 ms** (up to 10.3) | 26.5 ms | **~19%** |
+
+  Same Mac, same GPU. **Safari blocks in the present about 17x longer than
+  Chrome does**, so a meaningful part of the renderer's cost on the engine that
+  has to ship is the present itself -- and none of it is visible on Chrome,
+  which is where every previous renderer measurement was taken.
+
+  On Chrome the rest is not GL either: every wrapped call sums to ~1.0-1.4 ms of
+  a 16-23 ms frame (`glBufferData` 0.3-0.7 ms over ~270-615 calls,
+  `glDrawElements` under 0.1 ms, the state calls a tenth each). **About 92% of a
+  Chrome frame is in code the shim cannot see**, which is VideoCommon: texture
+  cache, vertex loading, EFB copy processing.
+
+  So the renderer half splits: **a present cost that only WebKit pays**, and a
+  VideoCommon cost both pay. `-sOFFSCREENCANVAS_SUPPORT` and how the frame is
+  committed are the levers for the first; the second is a profile away.
 - Internal resolution is **already at the floor**: `GFX_EFB_SCALE` defaults to 1
   (native 640x528) and the wasm build does not override it. That question is
   answered; `DOLWEB_EFB_SCALE` is only useful as an A/B.
