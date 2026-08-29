@@ -139,12 +139,32 @@ race is real but was not happening here. Keep the replacement: it removes a
 genuine race, reads a comma-joined `Accept-Ranges` correctly, and turns a silent
 short read into an error. It is not the cure.
 
-What is left to try, in order: whether the empty texture's source is a span of
-**TMEM** rather than of guest RAM (`DOLWEB_LOG_TEXTURE=1` now says which, and
-TMEM preload is only partly emulated in Dolphin), and then whether the same
-surface is black in the desktop build -- which the interpreter result says it
-should be, and which no one has looked at because `moderngekko-run` has no
-scripted input to reach the level with.
+**Nor is it TMEM preload.** Every empty texture logs `from RAM`, so none of them
+is a preloaded texture read out of Dolphin's emulated TMEM. The floor's is a
+256x256 **C4** at guest `0x009a9e60` on stage 0 (and a 64x64 C4 at `0x009b1e80`
+on stage 5) whose 32 KB of indices in guest RAM are entirely zero, with a
+perfectly good 32-byte palette. Note what that means: `TexDecoder_Decode` is
+right again -- an index buffer of all zeros through a palette whose entry 0 is
+black *is* black. The question is only why the indices are not there.
+
+### So where it actually stands
+
+Ruled out, each by measurement: the renderer, mipmaps, texture coordinates, GL
+errors, failed uploads, an unbound texture unit, shader compilation, the
+recompiled code (the interpreter shows it too), the disc transport (both the
+whole-file path and the race `dolweb-fetch.js` removes), and TMEM preload.
+
+What is established: **a texture the game draws the floor with has no data
+behind it in guest RAM**, and the guest is executing correctly.
+
+**The next step is the desktop.** The interpreter result says this should
+reproduce in the native build, and if it does, it is a Dolphin defect that has
+nothing to do with this port -- which is the single most useful thing left to
+know, because it decides whether this blocks the phone at all. Nobody has looked,
+because `moderngekko-run` has no scripted input to reach the level with. Teaching
+it the same `?acts=` timeline is the missing piece:
+`ciface::Touch::RegisterGameCubeInputOverrider(0)` and `SetControlState`, which
+is exactly what `main.cpp` already does for the browser build.
 
 **The palette is loaded correctly. One register names the wrong slot.** Over a
 run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of
