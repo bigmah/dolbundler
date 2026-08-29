@@ -142,7 +142,25 @@ the two open defects, and the habit that found today's.
   recompiles the whole disc for `wasm32-unknown-emscripten` — 7417 objects, no
   errors. The codegen was never the problem.
 
-  What is left is exactly the CPUState layout, and it is now precisely bounded.
+  **The layout is done.** `dolnative_target_layout()` walks the pointer-bearing
+  tail for a given pointer size, `pipeline.c` publishes the target's offsets and
+  hash, and the emitters read the same layout through `llvm_target_layout.h`, so
+  the header cannot describe something the objects do not contain. The check that
+  refused every previous wasm32 module now passes with zero assertion failures:
+
+      #define DOLRECOMP_NATIVE_OFFSET_RAM       3428ull   (was 3456)
+      #define DOLRECOMP_NATIVE_SIZE_RAM         4ull      (was 8)
+      #define DOLRECOMP_NATIVE_OFFSET_DOWNCOUNT 3440ull   (was 3480)
+
+  Two guards keep it honest. `dolnative_target_layout_matches_host()` checks the
+  walker against the host compiler before any other pointer size is trusted, and
+  emission refuses if it fails -- which it did immediately, because DolRecomp's
+  `cpu.h` and GXRuntime's agree up to `exram_size` and then diverge (`u32
+  spr[1024]` against `spr_read`/`spr_write`). The walker stops at `EXRAM_SIZE`
+  now, where `DOLNATIVE_LAYOUT_FIELDS` stops.
+
+  Historical note, kept because it bounded the work: what was left was exactly
+  the CPUState layout, and it was precisely bounded.
   Compiling `core/native_state_layout.h` against the generated header with
   `emcc` names every field that disagrees, and it is only the pointer-bearing
   tail: `external_read`, `external_write`, `ram`, `ram_size`, `downcount`,
