@@ -691,6 +691,26 @@ bool PopulateConfig(GLContext* m_main_gl_context)
     }
   }
 
+  // MODERNGEKKO_NO_PALETTE_CONVERSION=1 makes this backend claim it has no
+  // texture buffer objects. That is the one capability WebGL2 lacks and every
+  // desktop GL driver has, and it decides which of two quite different paths a
+  // paletted texture takes: with it, the palette is applied on the GPU at draw
+  // time; without it, Dolphin decodes on the CPU and bakes the palette into the
+  // texture at the moment it is decoded. The browser build is the only target
+  // that takes the CPU path, so a defect confined to it cannot be reproduced
+  // here without this switch -- and with it, a savestate turns a two-minute
+  // browser run into a few seconds.
+  if (const char* off = std::getenv("MODERNGEKKO_NO_PALETTE_CONVERSION");
+      off != nullptr && off[0] != '\0' && off[0] != '0')
+  {
+    g_backend_info.bSupportsPaletteConversion = false;
+    // printf, not a log macro: Dolphin's VIDEO log is off unless configured,
+    // and an instrument whose confirmation is invisible is one that gets
+    // believed without having run.
+    std::printf("[gfx] MODERNGEKKO_NO_PALETTE_CONVERSION: CPU palette path forced\n");
+    std::fflush(stdout);
+  }
+
   // We require texel buffers, image load store, and compute shaders to enable GPU texture decoding.
   // If the driver doesn't expose the extensions, but supports GL4.3/GLES3.1, it will still be
   // enabled in the version check below.

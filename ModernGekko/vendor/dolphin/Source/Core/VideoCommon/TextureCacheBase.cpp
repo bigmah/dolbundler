@@ -36,6 +36,8 @@
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/FifoPlayer/FifoRecorder.h"
 #include "Core/HW/Memmap.h"
+#include "Core/CoreTiming.h"
+#include "Core/HW/SystemTimers.h"
 #include "Core/System.h"
 
 #include "VideoCommon/AbstractFramebuffer.h"
@@ -1379,6 +1381,61 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
   else
   {
     full_hash = base_hash;
+  }
+
+  // DOLWEB_TEX_CENSUS=<guest seconds> prints one line for every texture bound
+  // over the ~half second after the guest reaches that point, and then stops.
+  //
+  // It exists to be run in two builds at the same moment of the same game and
+  // diffed. A defect that appears in the browser and not on the desktop is
+  // either the guest naming different textures or the same texture having
+  // different bytes behind it, and those two have nothing in common -- one is
+  // the recompiled code or the disc, the other is the renderer. Nothing short
+  // of the whole frame's list says which, because the interesting texture is
+  // the one nobody thought to look at.
+  static const char* const census_env = std::getenv("DOLWEB_TEX_CENSUS");
+  if (census_env)
+  {
+    static const double census_at = std::strtod(census_env, nullptr);
+    static bool census_done = false;
+    if (!census_done)
+    {
+      auto& system = Core::System::GetInstance();
+      const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+      const double now =
+          hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
+      if (now >= census_at)
+      {
+        static double census_until = 0.0;
+        if (census_until == 0.0)
+          census_until = now + 0.5;
+        if (now <= census_until)
+        {
+          const u8* src = texture_info.GetData();
+          const size_t src_size = texture_info.GetTextureSize();
+          size_t nonzero = 0;
+          for (size_t i = 0; src && i < src_size; ++i)
+            nonzero += src[i] != 0;
+          // Sorted by nothing: the order textures are bound in is itself part
+          // of what may differ, so it is left alone.
+          std::printf("[census] %.2f stage=%u addr=%#010x %ux%u fmt=%u %s "
+                      "src=%zu nonzero=%zu tlutfmt=%u base=%016llx full=%016llx\n",
+                      now, texture_info.GetStage(), texture_info.GetRawAddress(),
+                      texture_info.GetRawWidth(), texture_info.GetRawHeight(),
+                      (unsigned)texture_info.GetTextureFormat(),
+                      texture_info.IsFromTmem() ? "tmem" : "ram", src_size, nonzero,
+                      (unsigned)texture_info.GetTlutFormat(),
+                      (unsigned long long)base_hash, (unsigned long long)full_hash);
+          std::fflush(stdout);
+        }
+        else
+        {
+          census_done = true;
+          std::printf("[census] end\n");
+          std::fflush(stdout);
+        }
+      }
+    }
   }
 
   // Search the texture cache for textures by address

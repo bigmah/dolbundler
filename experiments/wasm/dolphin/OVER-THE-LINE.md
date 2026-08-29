@@ -38,22 +38,35 @@ This Mac, on the fixed build, matched guest window 45-90 s, throttle off
 | heap at steady state | **614 MB**, on top of an 86.5 MB module |
 
 So the renderer is free on the Mac, and that half of the old reading survives
-the transport fix. The device half does not:
+the transport fix.
+
+### The phone, measured
+
+The old device row here read 157% Null / 40% OpenGL. Both were taken while the
+phone was pulling 1.2 GB of disc over Wi-Fi on every boot, and a WASMFS fetch
+blocks the emulation thread, so both were measuring the download. **They are
+withdrawn.** Replaced 2026-08-29 by a run on the real phone -- iPhone 15 Pro
+Max, iOS 18.7, Safari 26.6.1, ranged fetches, the `acts=` timeline driving
+itself into Andy's House, window `?ab=30&abfrom=125`:
 
 | | |
 |---|---|
-| iPhone 15 Pro Max, Null | 157% |
-| iPhone 15 Pro Max, OpenGL | 40% |
+| iPhone 15 Pro Max, **Null**, in the level | **95%** (median 102, 70-134) |
+| iPhone 15 Pro Max, **OpenGL**, in the level | *pending* |
 
-**Read those as suspect, not as facts.** Both were taken while the phone was
-pulling 1.2 GB of disc over Wi-Fi, and a WASMFS fetch blocks the emulation
-thread.
+The phone's CPU half is **not** the problem: 95% against the simulator's 85%,
+on a core that ought to be slower than the M4's. The gap is the other way round
+because the simulator shares the Mac's GPU and its Safari is not the phone's
+driver stack -- so **treat the simulator as a correctness tool and a rough CPU
+proxy, and take performance numbers from the phone.**
 
-**And the heap is a device number nobody has taken.** 614 MB resident plus the
-module is close to what a WebContent process gets before iOS kills it, and a
-process that crosses its jetsam limit just disappears -- which looks exactly
-like a crash in the emulator. Measure it on the phone before optimising
-anything else about memory.
+**The heap, finally measured on hardware.** 512 MB with the Null backend,
+**614 MB with OpenGL** -- the same figure Chrome reports, so it is the
+emulator's own footprint and not a desktop-only artifact. It survives on the
+device, but not with much room: during the OpenGL pass the tab **reloaded
+itself once** at guest ~40 s and started over. That is what an iOS jetsam kill
+looks like from the outside. It bounds anything memory-hungry -- see the LLVM
+module's 213.8 MB below, which would land on top of this.
 
 ### Safari is not Chrome, and the A/B window has been measuring the menus
 
@@ -191,7 +204,10 @@ they fall into two classes that have nothing to do with each other:
    64x64 C4, two 640x480 RGBA8) whose data in guest RAM is all zeros, which for
    a texture the game has not loaded yet is not a defect at all.
 
-**It is class 2.** Painting the two classes in *different colours* in one run --
+**It is class 2 -- but "class 2" is a large and mostly innocent class.** See
+below: all-zero textures are ordinary here, and the particular one this file
+went on to name is bound on the desktop too, where the floor is fine. Painting
+the two classes in *different colours* in one run --
 magenta for the empty palette, green for the empty source -- settles it without
 comparing two runs at two different moments of a level, which is what made the
 first attempt at this useless. The floor comes back **green**: its texture data
@@ -199,9 +215,20 @@ in guest RAM is all zeros. The empty palette is real but is a different, and so
 far harmless, defect.
 
 So the question is why a texture the game is drawing with has no data behind it.
-Two things are already known about it: **the interpreter shows the same**, so the
-guest is not failing to write it, and **`DOLWEB_FETCH_CHUNK=8192` does not fix
-it**, so simply downloading files whole is not enough.
+One thing is known about it: **`DOLWEB_FETCH_CHUNK=8192` does not fix it**, so
+simply downloading files whole is not enough.
+
+**The interpreter has never been tested against this texture.** This file said
+it had -- "the interpreter shows the same, so the guest is not failing to write
+it" -- and that is wrong, in a way worth spelling out because it sent the search
+in the wrong direction for a day. The interpreter run
+(`STATICRECOMP_FALLBACK_RANGES=80000000-90000000`) lasted three minutes at 6% of
+realtime. It reproduced the *boot* decode at guest 1.2 s, which is the empty-
+**palette** texture at `0x001faca0`. At 6% of realtime it cannot have reached
+Andy's House, so it never saw the floor's C4 at `0x009a9e60`. **Whether the
+recompiled code is responsible for the floor is still open**, and it is now
+cheap to settle: an interpreter run needs ~35 wall minutes to reach guest 120 s,
+and can simply be left going.
 
 The open suspect is the transport again, but the *other* half of it.
 emscripten's WASMFS fetch backend creates a file's range table after an awaited
@@ -229,42 +256,87 @@ genuine race, reads a comma-joined `Accept-Ranges` correctly, and turns a silent
 short read into an error. It is not the cure.
 
 **Nor is it TMEM preload.** Every empty texture logs `from RAM`, so none of them
-is a preloaded texture read out of Dolphin's emulated TMEM. The floor's is a
-256x256 **C4** at guest `0x009a9e60` on stage 0 (and a 64x64 C4 at `0x009b1e80`
-on stage 5) whose 32 KB of indices in guest RAM are entirely zero, with a
-perfectly good 32-byte palette. Note what that means: `TexDecoder_Decode` is
-right again -- an index buffer of all zeros through a palette whose entry 0 is
-black *is* black. The question is only why the indices are not there.
+is a preloaded texture read out of Dolphin's emulated TMEM.
+
+**And `0x009a9e60` is not the floor.** This file named the 256x256 **C4** at
+guest `0x009a9e60` on stage 0 as the floor's texture, on the grounds that its
+32 KB of indices are entirely zero behind a perfectly good palette. It is bound
+on the **native** build too, at the same guest second, where the floor renders
+correctly -- so it cannot be what makes the floor black. A frame in Andy's House
+binds **87 distinct textures, 3 of them all-zero**: an empty texture is ordinary
+in this game and is not evidence of anything by itself. Whichever empty texture
+the browser draws the floor with, it has to be identified by *diffing the two
+builds*, not by being the only empty one in a log.
+
+**Not the CPU palette path either.** WebGL2 has no texture buffer objects, so
+`bSupportsPaletteConversion` is false and the browser is the only target that
+decodes a paletted texture on the CPU -- baking the palette in when the texture
+is decoded -- instead of applying it on the GPU at draw time. A real and unique
+difference, and the best remaining suspect.
+`MODERNGEKKO_NO_PALETTE_CONVERSION=1` forces the same path on the desktop; the
+floor stays clean (0.051 against the defect's 0.84-0.98). Eliminated.
+
+**`DOLWEB_TEX_CENSUS=<guest s>`** is the instrument for the diff: it prints
+every texture bound over the next half second -- stage, address, size, format,
+source bytes, non-zero count, both hashes -- in both builds, reached in the
+browser as `?env=DOLWEB_TEX_CENSUS=150`.
 
 ### So where it actually stands
 
 Ruled out, each by measurement: the renderer, mipmaps, texture coordinates, GL
-errors, failed uploads, an unbound texture unit, shader compilation, the
-recompiled code (the interpreter shows it too), the disc transport (both the
-whole-file path and the race `dolweb-fetch.js` removes), and TMEM preload.
+errors, failed uploads, an unbound texture unit, shader compilation, the disc
+transport (both the whole-file path and the race `dolweb-fetch.js` removes), and
+TMEM preload. **Not** ruled out: the recompiled code -- see above, the
+interpreter never reached the level.
 
 What is established: **a texture the game draws the floor with has no data
 behind it in guest RAM**, and the guest is executing correctly.
 
-**And the desktop reproduces it.** `moderngekko-run` takes the same timeline now
-(`MODERNGEKKO_ACTS="25:5,40:5,52:5,70:0,76:0,82:0,110:15:9000,..."`, wall-clock
-seconds rather than guest ones, since a native run has no `[perf]` line to
-anchor to), and running the same disc on native macOS OpenGL prints the same
-lines at the same guest addresses:
+**The desktop does NOT reproduce it, and this file said the opposite.**
 
-    [tex] decoded to zero: stage 0, from RAM, 256x256 fmt=9 tlut=0
-          addr=0x001faca0 src=65536 bytes, source itself is NOT zero,
-          tlut 512 bytes at tmem 000000 is ZERO
+The claim was: run the same disc on native macOS OpenGL, get the same lines at
+the same guest addresses, therefore the defect is Dolphin's rather than this
+port's. The lines did match -- but they were the *boot* decode at
+`0x001faca0`, the empty-**palette** texture, which is a different defect from
+the floor and by all evidence a harmless one. The native run never reached a
+level, because `MODERNGEKKO_ACTS` was anchored to **wall clock** while the
+browser's `?acts=` is anchored to **guest** seconds, and this build boots from
+local disk far faster than the browser streams the same files. At wall second
+110 the native run was still in the menus. So the floor's texture was never
+tested natively at all, and "the desktop reproduces it" was a conclusion about
+the wrong texture.
 
-No wasm, no emscripten filesystem, no WebGL anywhere in the picture, and the
-same texture with the same empty palette. **This defect does not belong to this
-port**, which is the thing that needed knowing: it is not what stands between
-Disney skate and the phone. It is a Dolphin question about this game, and it can
-be chased on the desktop at desktop speed from here.
+`MODERNGEKKO_ACTS` is now anchored to guest seconds too (the same string drives
+both builds; `MODERNGEKKO_ACTS_WALL=1` restores the old behaviour), and with it
+the native build reaches Andy's House and **renders the floor correctly** --
+wooden floorboards, correct textures, no black anywhere:
 
-(The desktop run's acts are wall-clock, so it lands somewhere different in the
-menus than the browser's guest-anchored ones. Reaching the *level* natively needs
-the timings retuned -- the boot-time decodes above are identical either way.)
+    MODERNGEKKO_ACTS="25:5,40:5,52:5,70:0,76:0,82:0,110:15:9000,135:15:9000,160:15:9000" \
+    MODERNGEKKO_SHOT_AT="120:g120,130:g130" \
+    MODERNGEKKO_SAVE_STATE_AT="145:/tmp/level.sav" MODERNGEKKO_QUIT_AT=170 \
+    ./ModernGekko/build/moderngekko-run --game build-wasm/gexe52 \
+      --graphics OGL --audio nullsound
+
+**So the black ground is this port's defect after all.** Same disc, same
+recompiled module, same guest moment, same VideoCommon -- and the difference is
+the wasm build and its WebGL backend. That is a much better position than the
+one this file recorded: the search belongs in the port, and it is now a
+differential rather than a hunt.
+
+Three instruments came out of establishing that, and they are the reason the
+next attempt is minutes rather than a day:
+
+- **`MODERNGEKKO_ACTS` on the guest clock.** One timeline string reaches the
+  same moment of the game in the browser and on the desktop. Without it the two
+  builds cannot be compared at all.
+- **`MODERNGEKKO_SAVE_STATE_AT="<guest s>:<path>"`** writes a savestate at a
+  point in the *game*, and `--load-state` brings it back. Chasing a defect that
+  only appears in a level cost a two-minute boot and a scripted menu walk per
+  attempt; it now costs seconds.
+- **`MODERNGEKKO_SHOT_AT="<guest s>:<name>"`** writes the emulator's own
+  framebuffer to `ScreenShots/`, and **`MODERNGEKKO_QUIT_AT=<guest s>`** ends a
+  run at a fixed point in the game rather than after a fixed wall time, so two
+  runs at different speeds capture the same frame.
 
 **The palette is loaded correctly. One register names the wrong slot.** Over a
 run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of

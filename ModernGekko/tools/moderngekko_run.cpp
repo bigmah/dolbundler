@@ -6,6 +6,11 @@
 #include "netplay_session.hpp"
 
 #include "Common/StringUtil.h"
+#include "Core/Core.h"
+#include "Core/CoreTiming.h"
+#include "Core/HW/SystemTimers.h"
+#include "Core/State.h"
+#include "Core/System.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 
 #include <SDL3/SDL.h>
@@ -462,9 +467,107 @@ int RunMain(int argc, char **argv) {
   // comparison that says whether a defect belongs to this port at all -- and
   // until now there was no way to reach a level in this build without hands.
   //
-  // Seconds are wall clock, not the guest's: this build runs at about realtime,
-  // and a native run has no [perf] line to anchor to. A build running at a
-  // fraction of speed will land somewhere else, so check where it got to.
+  // Seconds are the *guest's*, the same anchor the browser build uses, so one
+  // timeline string reaches the same moment of the game on both. Wall clock is
+  // not good enough for that: this build boots from local disk in a fraction of
+  // the time the browser takes to stream the same files, so at wall second 110
+  // the two builds are minutes apart in the game -- which is why every earlier
+  // native run landed in the menus while the browser reached the level.
+  // Set MODERNGEKKO_ACTS_WALL=1 for the old wall-clock behaviour.
+  // One clock for everything scheduled against the game rather than the wall.
+  const char* const wall_env_global = std::getenv("MODERNGEKKO_ACTS_WALL");
+  const bool wall_clock_global = wall_env_global != nullptr &&
+                                 wall_env_global[0] != '\0' &&
+                                 std::string_view(wall_env_global) != "0";
+  const auto run_start = std::chrono::steady_clock::now();
+  auto guest_seconds = [run_start, wall_clock_global]() -> double {
+    if (!wall_clock_global) {
+      auto& system = Core::System::GetInstance();
+      const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+      if (hz != 0)
+        return static_cast<double>(system.GetCoreTiming().GetTicks()) / hz;
+    }
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - run_start).count();
+  };
+
+  // MODERNGEKKO_SAVE_STATE_AT="130:/tmp/level.sav" writes a savestate once the
+  // guest reaches second 130, and keeps running. It exists because chasing a
+  // defect that only appears in a level costs a two-minute boot and a scripted
+  // menu walk on every attempt; with a state to load, the same experiment is a
+  // few seconds. MODERNGEKKO_QUIT_AT=<guest s> then ends the run at a fixed
+  // point in the game rather than after a fixed wall time, so two runs capture
+  // the same moment even at different speeds.
+  std::jthread state_timer;
+  {
+    struct SaveAt { double at; std::string path; };
+    std::vector<SaveAt> saves;
+    if (const char* spec = std::getenv("MODERNGEKKO_SAVE_STATE_AT")) {
+      for (const std::string& one : SplitString(spec, ',')) {
+        const std::size_t colon = one.find(':');
+        if (colon == std::string::npos) continue;
+        std::string at = one.substr(0, colon);
+        if (!at.empty() && (at[0] == 'g' || at[0] == 'G')) at.erase(0, 1);
+        saves.push_back({std::strtod(at.c_str(), nullptr), one.substr(colon + 1)});
+      }
+      std::ranges::sort(saves, {}, &SaveAt::at);
+    }
+    // MODERNGEKKO_SHOT_AT="140:floor,150:floor2" writes the emulator's own
+    // framebuffer to the user directory's ScreenShots at those guest seconds.
+    // Capturing the Mac's screen instead would photograph whatever else is on
+    // it, and would catch the window decorations rather than the frame.
+    struct ShotAt { double at; std::string name; };
+    std::vector<ShotAt> shots;
+    if (const char* spec = std::getenv("MODERNGEKKO_SHOT_AT")) {
+      for (const std::string& one : SplitString(spec, ',')) {
+        const std::size_t colon = one.find(':');
+        if (colon == std::string::npos) continue;
+        std::string at = one.substr(0, colon);
+        if (!at.empty() && (at[0] == 'g' || at[0] == 'G')) at.erase(0, 1);
+        shots.push_back({std::strtod(at.c_str(), nullptr), one.substr(colon + 1)});
+      }
+      std::ranges::sort(shots, {}, &ShotAt::at);
+    }
+    double quit_at = 0.0;
+    if (const char* q = std::getenv("MODERNGEKKO_QUIT_AT")) {
+      std::string at = q;
+      if (!at.empty() && (at[0] == 'g' || at[0] == 'G')) at.erase(0, 1);
+      quit_at = std::strtod(at.c_str(), nullptr);
+    }
+    if (!saves.empty() || !shots.empty() || quit_at > 0.0) {
+      auto* runtime = created.runtime.get();
+      state_timer = std::jthread([saves, shots, quit_at, guest_seconds, runtime](
+                                     std::stop_token stop) {
+        std::size_t next = 0;
+        std::size_t next_shot = 0;
+        while (!stop.stop_requested()) {
+          const double now = guest_seconds();
+          while (next_shot < shots.size() && now >= shots[next_shot].at) {
+            std::cout << "[shot] " << shots[next_shot].name << " at " << now
+                      << " s guest\n" << std::flush;
+            Core::SaveScreenShot(shots[next_shot].name);
+            ++next_shot;
+          }
+          while (next < saves.size() && now >= saves[next].at) {
+            std::cout << "[state] saving at " << now << " s guest -> "
+                      << saves[next].path << '\n' << std::flush;
+            State::SaveAs(Core::System::GetInstance(), saves[next].path);
+            ++next;
+          }
+          if (quit_at > 0.0 && now >= quit_at) {
+            std::cout << "[state] quit at " << now << " s guest\n" << std::flush;
+            // The compress-and-dump of a state just requested runs on its own
+            // thread; stopping the core immediately would race it.
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            runtime->RequestStop();
+            return;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+      });
+    }
+  }
+
   std::jthread act_driver;
   if (const char* acts = std::getenv("MODERNGEKKO_ACTS")) {
     struct Act { double at; int control; double state; int hold_ms; };
@@ -479,20 +582,37 @@ int RunMain(int argc, char **argv) {
                           parts.size() > 2 ? std::atoi(parts[2].c_str()) : 140});
     }
     std::ranges::sort(timeline, {}, &Act::at);
-    act_driver = std::jthread([timeline](std::stop_token stop) {
+    const char* const wall_env = std::getenv("MODERNGEKKO_ACTS_WALL");
+    const bool wall_clock = wall_env != nullptr && wall_env[0] != '\0' &&
+                            std::string_view(wall_env) != "0";
+    act_driver = std::jthread([timeline, wall_clock](std::stop_token stop) {
       constexpr int kPad = 0;
       ciface::Touch::RegisterGameCubeInputOverrider(kPad);
       const auto start = std::chrono::steady_clock::now();
+      // Guest seconds come from the same clock the emulator schedules on, so a
+      // build running at 40% of realtime waits longer in wall time and still
+      // presses the button at the same point in the game. Before the core has
+      // booted the tick rate reads zero; fall back to wall clock until then so
+      // an act at second 0 cannot deadlock.
+      auto& system = Core::System::GetInstance();
+      auto elapsed = [&system, &start, wall_clock]() -> double {
+        if (!wall_clock) {
+          const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+          if (hz != 0)
+            return static_cast<double>(system.GetCoreTiming().GetTicks()) / hz;
+        }
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count();
+      };
       for (const Act& act : timeline) {
         while (!stop.stop_requested()) {
-          const double now = std::chrono::duration<double>(
-              std::chrono::steady_clock::now() - start).count();
-          if (now >= act.at) break;
+          if (elapsed() >= act.at) break;
           std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         if (stop.stop_requested()) break;
         std::cout << "[act] control " << act.control << " at "
-                  << act.at << " s\n" << std::flush;
+                  << act.at << (wall_clock ? " s wall\n" : " s guest\n")
+                  << std::flush;
         ciface::Touch::SetControlState(
             kPad, static_cast<ciface::Touch::ControlID>(act.control), act.state);
         std::this_thread::sleep_for(std::chrono::milliseconds(act.hold_ms));
