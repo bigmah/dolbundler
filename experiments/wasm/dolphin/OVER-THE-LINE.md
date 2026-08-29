@@ -133,6 +133,19 @@ replacement backend that does each piece of work once (one in-flight promise per
 file, one per chunk) and returns `EIO` rather than throwing when a chunk is
 missing, so the next occurrence says so instead of going quiet.
 
+**It is not that either.** With the replacement backend linked in, the floor is
+still black in the same frames, and not one chunk-missing error fires -- so the
+race is real but was not happening here. Keep the replacement: it removes a
+genuine race, reads a comma-joined `Accept-Ranges` correctly, and turns a silent
+short read into an error. It is not the cure.
+
+What is left to try, in order: whether the empty texture's source is a span of
+**TMEM** rather than of guest RAM (`DOLWEB_LOG_TEXTURE=1` now says which, and
+TMEM preload is only partly emulated in Dolphin), and then whether the same
+surface is black in the desktop build -- which the interpreter result says it
+should be, and which no one has looked at because `moderngekko-run` has no
+scripted input to reach the level with.
+
 **The palette is loaded correctly. One register names the wrong slot.** Over a
 run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of
 them, not one empty. Every TLUT *select* the game issues names that same slot:

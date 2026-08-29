@@ -1787,9 +1787,14 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
             // matched against the destinations the TLUT loads actually used.
             const u8* tmem_base = TexDecoder_GetTmemSpan(0).data();
             const long tlut_offset = tlut && tmem_base ? (long)(tlut - tmem_base) : -1;
-            std::printf("[tex] decoded to zero: stage %u, %ux%u fmt=%u tlut=%u addr=%#010x "
+            // from_tmem matters: a preloaded texture's "source" is a span of
+            // Dolphin's emulated TMEM, not of guest RAM, and TMEM preload is
+            // only partly emulated. Zeros mean two completely different things
+            // in the two cases.
+            std::printf("[tex] decoded to zero: stage %u, %s, %ux%u fmt=%u tlut=%u addr=%#010x "
                         "src=%zu bytes, source itself %s, tlut %zu bytes at tmem %#06lx %s\n",
                         texture_info.GetStage(),
+                        texture_info.IsFromTmem() ? "from TMEM" : "from RAM",
                         width, height, (unsigned)texture_info.GetTextureFormat(),
                         (unsigned)texture_info.GetTlutFormat(), texture_info.GetRawAddress(),
                         src_size, src_zero ? "is zero too" : "is NOT zero", tlut_size,
@@ -1823,11 +1828,19 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
           const bool want = mode == "palette" ? !src_zero : mode == "source" ? src_zero : true;
           if (want)
           {
+            // Two colours, because the two classes are two different defects and
+            // comparing two runs by eye cannot tell them apart -- a level is
+            // somewhere different every second. **Magenta** is an empty palette
+            // over real indices; **green** is source bytes that were already
+            // zero. One run now says which one a black surface was sampling.
+            const u8 r = src_zero ? 0x00 : 0xff;
+            const u8 g = src_zero ? 0xff : 0x00;
+            const u8 b = src_zero ? 0x00 : 0xff;
             for (size_t i = 0; i + 3 < decoded_texture_size; i += 4)
             {
-              dst_buffer[i] = 0xff;
-              dst_buffer[i + 1] = 0x00;
-              dst_buffer[i + 2] = 0xff;
+              dst_buffer[i] = r;
+              dst_buffer[i + 1] = g;
+              dst_buffer[i + 2] = b;
               dst_buffer[i + 3] = 0xff;
             }
           }
