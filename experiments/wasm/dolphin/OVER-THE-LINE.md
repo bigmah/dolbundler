@@ -66,7 +66,30 @@ written to chase. (Mac, same instrument: 17 ms/frame, 0.4 ms.) So the
   shader generation. The Null backend skips much of this too, so it is inside
   the Null-versus-OpenGL difference and is not GL at all.
 
-**The instrument now covers the state calls too** -- glUseProgram,
+**The instrument now covers the state calls and the texture uploads too** --
+and Dolphin's textures are 2D *arrays*, so uploads go through
+`glTexSubImage3D` and none of the 2D entry points the shim originally wrapped
+are ever called. Texture uploads were invisible in every reading before that
+was fixed.
+
+With all of it wrapped, the total is **~4% of the frame on both machines** --
+and the Mac pays nothing for the renderer while the phone pays 117 points. So
+the cost is not in any GL call the shim can see, and the two candidates above
+are down to one plus a third that was never on the list:
+
+- **Dolphin's CPU-side renderer work** (VideoCommon: texture decode, vertex
+  loading, EFB copy processing) -- the Null backend skips much of it, so it sits
+  inside the same Null-versus-OpenGL difference.
+- **Waiting for the GPU.** Time spent blocked in the present is charged to no
+  CPU-side call at all. `DOLWEB_TIME_SWAP=1` measures exactly that and **has
+  never been run on the device**. Run it before anything else: if the frame is
+  sitting in the swap, this is GPU-bound and the levers are resolution, EFB
+  copies and overdraw; if it is not, the work is in VideoCommon and the backend
+  is the wrong place to look entirely.
+
+      ...&env=DOLWEB_TIME_GL%3D1&env=DOLWEB_TIME_SWAP%3D1
+
+**The old note said the state calls** -- glUseProgram,
 glBindTexture, glBindFramebuffer, glBindBufferRange, glBindSampler,
 glUniform4fv -- so the next device run separates them directly. On the Mac they
 are 0.1 ms of 17; if they are tens of milliseconds on the phone it is chattiness

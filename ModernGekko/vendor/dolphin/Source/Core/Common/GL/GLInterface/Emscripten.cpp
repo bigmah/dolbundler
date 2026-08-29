@@ -182,6 +182,15 @@ enum GLProfileIndex
   GLP_BindBufferRange,
   GLP_BindSampler,
   GLP_Uniform4fv,
+  // Dolphin's textures are 2D *arrays*, so every upload goes through the 3D
+  // entry points and none of the 2D ones above are ever called. Wrapping only
+  // those made texture uploads invisible in every reading taken before this.
+  GLP_TexSubImage3D,
+  GLP_CompressedTexSubImage3D,
+  GLP_TexImage3D,
+  GLP_TexStorage3D,
+  GLP_CopyTexSubImage3D,
+  GLP_GenerateMipmap,
   GLP_COUNT,
 };
 
@@ -193,7 +202,9 @@ GLProfileEntry g_gl_profile[GLP_COUNT] = {
     {"glUnmapBuffer"},     {"glBlitFramebuffer"},{"glDrawArrays"},
     {"glDrawElements"},   {"glUseProgram"},     {"glBindTexture"},
     {"glBindFramebuffer"},{"glBindBufferRange"},{"glBindSampler"},
-    {"glUniform4fv"},
+    {"glUniform4fv"},     {"glTexSubImage3D"},  {"glCompressedTexSubImage3D"},
+    {"glTexImage3D"},     {"glTexStorage3D"},   {"glCopyTexSubImage3D"},
+    {"glGenerateMipmap"},
 };
 
 struct GLProfileScope
@@ -330,6 +341,44 @@ void ProfiledUniform4fv(GLint location, GLsizei count, const GLfloat* value)
   glUniform4fv(location, count, value);
 }
 
+void ProfiledTexSubImage3D(GLenum target, GLint level, GLint xo, GLint yo, GLint zo,
+                           GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type,
+                           const void* pixels)
+{
+  DOLWEB_GL_SHIM(GLP_TexSubImage3D);
+  glTexSubImage3D(target, level, xo, yo, zo, w, h, d, format, type, pixels);
+}
+void ProfiledCompressedTexSubImage3D(GLenum target, GLint level, GLint xo, GLint yo, GLint zo,
+                                     GLsizei w, GLsizei h, GLsizei d, GLenum format,
+                                     GLsizei size, const void* data)
+{
+  DOLWEB_GL_SHIM(GLP_CompressedTexSubImage3D);
+  glCompressedTexSubImage3D(target, level, xo, yo, zo, w, h, d, format, size, data);
+}
+void ProfiledTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h,
+                        GLsizei d, GLint border, GLenum format, GLenum type, const void* pixels)
+{
+  DOLWEB_GL_SHIM(GLP_TexImage3D);
+  glTexImage3D(target, level, internalformat, w, h, d, border, format, type, pixels);
+}
+void ProfiledTexStorage3D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei w,
+                          GLsizei h, GLsizei d)
+{
+  DOLWEB_GL_SHIM(GLP_TexStorage3D);
+  glTexStorage3D(target, levels, internalformat, w, h, d);
+}
+void ProfiledCopyTexSubImage3D(GLenum target, GLint level, GLint xo, GLint yo, GLint zo, GLint x,
+                               GLint y, GLsizei w, GLsizei h)
+{
+  DOLWEB_GL_SHIM(GLP_CopyTexSubImage3D);
+  glCopyTexSubImage3D(target, level, xo, yo, zo, x, y, w, h);
+}
+void ProfiledGenerateMipmap(GLenum target)
+{
+  DOLWEB_GL_SHIM(GLP_GenerateMipmap);
+  glGenerateMipmap(target);
+}
+
 const struct
 {
   const char* name;
@@ -357,6 +406,12 @@ const struct
     {"glBindBufferRange", (void*)&ProfiledBindBufferRange},
     {"glBindSampler", (void*)&ProfiledBindSampler},
     {"glUniform4fv", (void*)&ProfiledUniform4fv},
+    {"glTexSubImage3D", (void*)&ProfiledTexSubImage3D},
+    {"glCompressedTexSubImage3D", (void*)&ProfiledCompressedTexSubImage3D},
+    {"glTexImage3D", (void*)&ProfiledTexImage3D},
+    {"glTexStorage3D", (void*)&ProfiledTexStorage3D},
+    {"glCopyTexSubImage3D", (void*)&ProfiledCopyTexSubImage3D},
+    {"glGenerateMipmap", (void*)&ProfiledGenerateMipmap},
 };
 
 bool GLProfilingEnabled()
