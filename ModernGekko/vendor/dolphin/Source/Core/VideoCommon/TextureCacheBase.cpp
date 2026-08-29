@@ -1739,6 +1739,39 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
                                        expanded_height);
       }
 
+      // DOLWEB_LOG_TEXTURE=1: a texture that decodes to nothing but zeros is a
+      // surface that renders black with every GL call succeeding, and the two
+      // reasons for it have nothing in common -- the guest never wrote the
+      // bytes, or the decode dropped them. Say which by checking the *source*
+      // as well.
+      static const bool log_zero = std::getenv("DOLWEB_LOG_TEXTURE") != nullptr;
+      if (log_zero)
+      {
+        bool dst_zero = true;
+        for (size_t i = 0; dst_zero && i < decoded_texture_size; ++i)
+          dst_zero = dst_buffer[i] == 0;
+        if (dst_zero)
+        {
+          const u8* src = texture_info.GetData();
+          const size_t src_size = texture_info.GetTextureSize();
+          bool src_zero = src != nullptr;
+          for (size_t i = 0; src_zero && i < src_size; ++i)
+            src_zero = src[i] == 0;
+          static std::set<u64> seen_zero;
+          const u64 key = (u64)texture_info.GetRawAddress() << 8 |
+                          (u64)texture_info.GetTextureFormat();
+          if (seen_zero.insert(key).second)
+          {
+            std::printf("[tex] decoded to zero: %ux%u fmt=%u tlut=%u addr=%#010x src=%zu bytes, "
+                        "source itself %s\n",
+                        width, height, (unsigned)texture_info.GetTextureFormat(),
+                        (unsigned)texture_info.GetTlutFormat(), texture_info.GetRawAddress(),
+                        src_size, src_zero ? "is zero too" : "is NOT zero");
+            std::fflush(stdout);
+          }
+        }
+      }
+
       entry->texture->Load(0, width, height, expanded_width, dst_buffer, decoded_texture_size);
 
       arbitrary_mip_detector.AddLevel(width, height, expanded_width, dst_buffer);

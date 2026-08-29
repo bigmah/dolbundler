@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <vector>
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
@@ -134,6 +135,12 @@ bool UsePersistentStagingBuffers()
 static bool LogTextures()
 {
   static const bool enabled = std::getenv("DOLWEB_LOG_TEXTURE") != nullptr;
+  return enabled;
+}
+
+static bool PaintZeroTextures()
+{
+  static const bool enabled = std::getenv("DOLWEB_PAINT_ZERO_TEXTURES") != nullptr;
   return enabled;
 }
 
@@ -330,6 +337,32 @@ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8
                   expected_height, width, height);
   }
 
+  // DOLWEB_PAINT_ZERO_TEXTURES=1 uploads magenta wherever the decoded bytes are
+  // entirely zero. A surface can render black for two unrelated reasons -- the
+  // texture it samples is black, or the shading made it black -- and no amount
+  // of looking at the black tells you which. This makes the first one visible:
+  // whatever turns magenta was sampling an empty texture.
+  std::vector<u8> painted;
+  if (buffer != nullptr && buffer_size >= 4 && PaintZeroTextures() &&
+      m_config.format == AbstractTextureFormat::RGBA8)
+  {
+    bool all_zero = true;
+    for (size_t i = 0; all_zero && i < buffer_size; ++i)
+      all_zero = buffer[i] == 0;
+    if (all_zero)
+    {
+      painted.resize(buffer_size);
+      for (size_t i = 0; i + 3 < buffer_size; i += 4)
+      {
+        painted[i] = 0xff;
+        painted[i + 1] = 0x00;
+        painted[i + 2] = 0xff;
+        painted[i + 3] = 0xff;
+      }
+      buffer = painted.data();
+    }
+  }
+
   const GLenum target = GetGLTarget();
   glActiveTexture(GL_MUTABLE_TEXTURE_INDEX);
   glBindTexture(target, m_texId);
@@ -444,6 +477,27 @@ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8
                   (unsigned)error, level, m_config.width, m_config.height, m_config.levels,
                   m_config.layers, (unsigned)m_config.format);
       std::fflush(stdout);
+    }
+
+    // Whether the bytes handed to GL were already black. A surface whose
+    // texture input samples zero is either a texture GL refused (the check
+    // above) or a texture that arrived empty -- and those two have nothing in
+    // common: the first is the backend, the second is VideoCommon's decode and
+    // would be just as wrong on the desktop.
+    bool all_zero = buffer != nullptr && buffer_size > 0;
+    for (size_t i = 0; all_zero && i < buffer_size; ++i)
+      all_zero = buffer[i] == 0;
+    if (all_zero)
+    {
+      const u64 key = (u64)1 << 63 | (u64)m_config.width << 40 | (u64)m_config.height << 24 |
+                      (u64)level << 16 | (u64)m_config.format;
+      if (FirstTimeSeeing(key))
+      {
+        std::printf("[tex] all zero: level %u of %ux%u levels=%u fmt=%u (%zu bytes)\n", level,
+                    m_config.width, m_config.height, m_config.levels, (unsigned)m_config.format,
+                    buffer_size);
+        std::fflush(stdout);
+      }
     }
   }
 }

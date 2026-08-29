@@ -1868,6 +1868,19 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
       out.Write("\tocol0 = float4(float3(frag_output.dbg_konst.rgb) / 255.0, 1.0);\n");
     else if (mode == "rawtex")
       out.Write("\tocol0 = float4(float3(frag_output.last_texture.rgb) / 255.0, 1.0);\n");
+    else if (mode == "uid")
+    {
+      // The shape of the shader itself, as a colour: red is texgens, green is
+      // TEV stages, blue is indirect stages. It answers a question the input
+      // modes cannot -- `textemp` is int4(0,0,0,0) by construction when a draw
+      // has *no texgens at all* (Dolphin's own note: "the result is always black
+      // when no tex coords are enabled"), so a black `=tex` reading can mean
+      // "the texture sampled zero" or "there was never a texture", and those
+      // have nothing in common.
+      out.Write("\tocol0 = float4({}.0 / 8.0, {}.0 / 16.0, {}.0 / 4.0, 1.0);\n",
+                uid_data->genMode_numtexgens, uid_data->genMode_numtevstages + 1,
+                uid_data->genMode_numindstages);
+    }
     else if (mode == "uv")
       // The last stage's texture coordinate, in 1/128ths of a texel, wrapped
       // into a ramp. A surface whose texture samples black because its
