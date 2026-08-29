@@ -103,13 +103,25 @@ which is `texTlut` at its reset value, on a unit that never received a select.
 And it is not a one-off at boot: over 4 000 decodes come out all-zero in a
 three-minute run.
 
-So the last question is why that unit's `BPMEM_TX_SETTLUT` never arrives, and it
-is a question about the *command stream* rather than about graphics at all. The
-test that settles it is one run with
-`STATICRECOMP_FALLBACK_RANGES=80000000-90000000`, which forces the interpreter in
-the same binary: if the floor renders under it, the recompiled code is dropping
-a write to the write-gather pipe. Budget about an hour of wall clock -- the
-interpreter runs at ~5% and the level is 160 guest seconds in.
+**It is not the recompiled code.**
+`STATICRECOMP_FALLBACK_RANGES=80000000-90000000` forces the interpreter in the
+same binary, and at 6% of realtime it produces the identical line -- same
+texture, same empty palette at TMEM 0, same single select to unit 0. So the
+guest is executing correctly and Dolphin's own hardware model is what disagrees
+with it; the defect should reproduce on the desktop build too.
+
+That test cost three minutes rather than the hour a full-level interpreter run
+would have: **the first empty decode happens at guest 1.2 s, during boot**, long
+before any menu. Any hypothesis about this defect can be tested against the boot
+alone, which is the single most useful thing to know while chasing it.
+
+What is left is a question inside VideoCommon: the decode runs between the TLUT
+load and the TLUT select, so the texture is decoded while `bpmem.tex[].texTlut`
+is still at its reset value. Either a draw really is issued before the select
+(and the entry it caches is what persists), or the cache is handing that entry
+back after the select arrives. `DOLWEB_LOG_TEXTURE=1` prints the whole sequence
+in order, and the running "decodes to zero so far" total -- over 4 000 in a
+three-minute run -- says it is not a one-off at boot.
 
 Worth knowing while chasing it: **this target is the only one that takes
 Dolphin's CPU palette path at all.** `bSupportsPaletteConversion` needs texture
