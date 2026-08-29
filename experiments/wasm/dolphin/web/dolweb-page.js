@@ -16,6 +16,28 @@ const ENV = params.getAll('env');
 const AUTO = params.get('auto') === '1';
 const REPORT = params.get('report') === '1';
 
+// --- ?acts= ------------------------------------------------------------------
+//
+// A timeline of button presses, anchored to the *guest's* clock:
+//
+//     ?acts=g25:5,g40:5,g60:8:400,g110:15:9000
+//
+// "g25:5" taps control 5 at guest second 25; a third field is how long to hold
+// it in milliseconds. drive-dolphin.mjs has had this for a while and it is what
+// reaches a named level rather than whatever the attract loop was showing. But
+// it drives the page from outside over CDP, and Safari -- on a phone, and in
+// the simulator -- cannot be driven from outside at all. Owning the timeline
+// here is what makes the same scene reachable in the browser that matters.
+//
+// Guest seconds and not wall: an interpreter build reaches the same menu, it
+// just takes twenty minutes, and wall-clock cues would all fire during the
+// logos.
+const ACTS = (params.get('acts') || '').split(',').filter(Boolean).map((spec) => {
+  const [at, control, hold] = spec.split(':');
+  return { at: +String(at).replace(/^g/, ''), control: +control,
+           hold: +(hold || 140), done: false };
+}).sort((a, b) => a.at - b.at);
+
 // --- ?ab=N -------------------------------------------------------------------
 //
 // Null against OpenGL on the same scene is the one comparison that says whether
@@ -69,6 +91,7 @@ function log(text) {
   logEl.textContent = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
   console.log(text);
+  if (ACTS.length) actsWatch(text);
   if (AB) abWatch(text);
 }
 
@@ -122,6 +145,30 @@ document.getElementById('logtoggle').onclick = () => logEl.classList.toggle('hid
 let abState = 0;  // 0 before the window, 2 inside it, 3 done
 let abTps = 0, abStartTicks = 0, abStartWall = 0;
 const abSamples = [];
+
+// The guest's own clock, read off the lines the emulator prints. `abWatch`
+// parses the same two lines for its window; this one is separate because the
+// acts timeline has to work when ?ab is not in play.
+let guestHz = 0;
+let guestSeconds = 0;
+
+function actsWatch(text) {
+  const clk = /guest clock (\d+) Hz/.exec(text);
+  if (clk) { guestHz = +clk[1]; return; }
+  const m = /^\[perf\].*cpu=0 ticks=(\d+)/.exec(text);
+  if (!m || !guestHz) return;
+  guestSeconds = +m[1] / guestHz;
+  for (const a of ACTS) {
+    if (a.done || guestSeconds < a.at) continue;
+    a.done = true;
+    // Deferred: this runs from inside log(), and logging from there re-enters it.
+    const note = `[page] act: control ${a.control} at guest ${guestSeconds.toFixed(0)} s`;
+    setTimeout(() => log(note), 0);
+    if (!setControl) continue;
+    setControl(a.control, 1);
+    setTimeout(() => setControl(a.control, 0), a.hold);
+  }
+}
 
 function abWatch(text) {
   if (abState === 3) return;
