@@ -166,9 +166,22 @@ function actsWatch(text) {
     setTimeout(() => log(note), 0);
     if (!setControl) continue;
     setControl(a.control, 1);
-    setTimeout(() => setControl(a.control, 0), a.hold);
+    // Release on the guest clock, not the wall clock. A setTimeout hold lasts
+    // the same number of milliseconds whatever speed the emulator is running
+    // at, so a build at 60% holds the stick for 60% as many guest frames as one
+    // at 100% -- and two builds given the same timeline end up with the skater
+    // somewhere different. That is why cross-build screenshots of the "same"
+    // guest second were still different scenes.
+    a.release = guestSeconds + a.hold / 1000;
+    holding.push(a);
+  }
+  for (let i = holding.length - 1; i >= 0; i--) {
+    if (guestSeconds < holding[i].release) continue;
+    setControl(holding[i].control, 0);
+    holding.splice(i, 1);
   }
 }
+const holding = [];
 
 function abWatch(text) {
   if (abState === 3) return;

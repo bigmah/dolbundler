@@ -615,7 +615,14 @@ int RunMain(int argc, char **argv) {
                   << std::flush;
         ciface::Touch::SetControlState(
             kPad, static_cast<ciface::Touch::ControlID>(act.control), act.state);
-        std::this_thread::sleep_for(std::chrono::milliseconds(act.hold_ms));
+        // Hold for guest milliseconds, not wall milliseconds. A wall-clock hold
+        // lasts a different number of guest frames in a build running at 60%
+        // than in one at 100%, so two builds given the same timeline diverge --
+        // which is why screenshots taken at the same guest second still showed
+        // the skater in different places.
+        const double release = elapsed() + act.hold_ms / 1000.0;
+        while (!stop.stop_requested() && elapsed() < release)
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
         ciface::Touch::SetControlState(
             kPad, static_cast<ciface::Touch::ControlID>(act.control), 0.0);
       }

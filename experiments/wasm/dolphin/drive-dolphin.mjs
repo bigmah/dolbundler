@@ -109,7 +109,16 @@ function note(text) {
   // before the drop turned out to be on this line. Match ANY bracketed tag.
   if (/^\[[a-z][a-z0-9_-]*\]|exception|error|Failed|audio/i.test(text))
     console.log(text);
+  else if (inBlock)
+    console.log(text);
+  if (/^\[[a-z]+\] ==== /.test(text)) inBlock = !/ end ====/.test(text);
 }
+// An instrument that prints a *block* -- a shader source, a disassembly -- emits
+// body lines with no [tag] on them, and the filter above drops exactly those:
+// the first attempt at dumping a fragment shader produced one line per shader
+// and a diff of 249 lines against 1. Echo everything between a "[tag] ==== ..."
+// opening line and its "==== end ====", so a block instrument survives the trip.
+let inBlock = false;
 
 cdp.on((m) => {
   if (m.method === 'Runtime.consoleAPICalled')

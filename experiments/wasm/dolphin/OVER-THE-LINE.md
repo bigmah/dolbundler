@@ -344,6 +344,39 @@ and cannot be compared across them at all. Every `base_hash` in the texture
 census differs between the two builds for exactly this reason, and it means
 nothing.
 
+### What is left, and what it is not
+
+At the same guest moment, in both builds:
+
+| | |
+|---|---|
+| textures bound | same set (77 of native's 84 in Chrome; **none** bound only in Chrome) |
+| stages they are bound on | same, in the same proportions |
+| source bytes | identical (non-zero counts match on all 77) |
+| decoded bytes | identical (portable FNV checksum, 364 shared textures, 0 differ) |
+| decoded bytes, level window only | identical (content-keyed, 0 disjoint) |
+| the stage-7 mask bound in nearly every draw, `0x002d6a40` | identical |
+| every step from lookup to lighting | works -- the painted run exercises all of it |
+
+So the defect is not in the data, not in the binding, and not in the pipeline.
+**What has not been compared is the generated shader**, and that is now the
+whole of the remaining space. `MODERNGEKKO_DUMP_SHADER="<texgens>,<tevstages>,
+<indstages>"` prints the fragment shader for one UID so the two builds' code can
+be diffed; WebGL2 is GLSL ES 3.00 and the desktop is GLSL 3.30, and Dolphin's
+generator branches on that.
+
+The floor's UID natively at guest 150 is **texgens 2, tevstages 3, indstages 0**.
+
+**Every cross-build picture before this point was of a different scene**, and
+each mismatch was caught only by looking at the image rather than the numbers --
+a native flat-shade frame indoors read against a browser frame in the back
+garden, a UID frame of Andy's House against one of the garden. `drive-dolphin.mjs`
+takes `--shotAt g130,g140,g150` now, matching `MODERNGEKKO_SHOT_AT`, so the same
+three numbers give the same three scenes in both builds. That is the third
+instrument here to need the guest clock instead of the wall clock, and the rule
+is worth stating once: **anything compared across builds must be anchored to the
+game, not to the machine.**
+
 ### So where it actually stands
 
 Ruled out, each by measurement: the renderer, mipmaps, texture coordinates, GL
