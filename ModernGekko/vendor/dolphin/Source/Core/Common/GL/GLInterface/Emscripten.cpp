@@ -352,7 +352,11 @@ void GLContextEmscripten::Swap()
   // ask what it costs before blaming the renderer for a frame time. Off unless
   // asked for; the report is one line per hundred frames.
   static const bool time_swaps = std::getenv("DOLWEB_TIME_SWAP") != nullptr;
-  if (!time_swaps)
+  // Swap is where the frame ends, so it is also where both reports are due --
+  // but they are separate questions and either can be asked alone.
+  // DOLWEB_TIME_GL used to accumulate its per-call totals and never print them,
+  // because the only thing that called ReportGLProfile was the swap timer.
+  if (!time_swaps && !GLProfilingEnabled())
   {
     emscripten_webgl_commit_frame();
     return;
@@ -366,9 +370,12 @@ void GLContextEmscripten::Swap()
   if (++frames % 100 == 0)
   {
     const double now = emscripten_get_now();
-    std::printf("[swap] %.2f ms average over %llu frames\n", total_ms / 100.0,
-                (unsigned long long)frames);
-    std::fflush(stdout);
+    if (time_swaps)
+    {
+      std::printf("[swap] %.2f ms average over %llu frames\n", total_ms / 100.0,
+                  (unsigned long long)frames);
+      std::fflush(stdout);
+    }
     if (GLProfilingEnabled())
       ReportGLProfile((now - last_report) / 100.0);
     last_report = now;
