@@ -418,6 +418,28 @@ def main(argv):
     class Server(socketserver.ThreadingTCPServer):
         daemon_threads = True
         allow_reuse_address = True
+        # The TLS handshake happens here, in the worker thread, and not by
+        # wrapping the listening socket. Wrapping the listener makes accept()
+        # perform the handshake on the accept thread, so a single client that
+        # connects and does not finish -- a phone sitting on the self-signed
+        # certificate warning, which is every first visit -- wedges the whole
+        # server for everyone, including itself when the user finally taps
+        # through. It looks exactly like the machine being unreachable.
+        ssl_context = None
+
+        def process_request_thread(self, request, client_address):
+            if self.ssl_context is not None:
+                try:
+                    # A handshake that never completes must not hold a thread
+                    # for ever either.
+                    request.settimeout(30)
+                    request = self.ssl_context.wrap_socket(
+                        request, server_side=True)
+                    request.settimeout(None)
+                except OSError:
+                    self.shutdown_request(request)
+                    return
+            super().process_request_thread(request, client_address)
     with Server((host, PORT), make_handler(root, iso_path)) as httpd:
         shown = lan_ip() if lan else "127.0.0.1"
         scheme = "https" if https else "http"
@@ -425,7 +447,7 @@ def main(argv):
             cert, key = dev_certificate(list(all_addresses().values()))
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(cert, key)
-            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+            httpd.ssl_context = context
         print(f"serving {which} at  {scheme}://{shown}:{PORT}/")
         if iso_path:
             print(f"disc mounted at /disc.iso  ({iso_path})")
