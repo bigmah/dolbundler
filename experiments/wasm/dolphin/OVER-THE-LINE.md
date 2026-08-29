@@ -49,10 +49,14 @@ instead of running this is a way to lose a day.
 Run it on the Mac too, for a baseline: the interesting entries are the ones the
 phone weights very differently.
 
-**First device reading, from a menu scene** (not a level -- get one from a
-level before leaning on it): `[gl] 33.4 ms/frame ... glBufferData 0.0ms/6`.
-Essentially no time inside the wrapped calls, against 17.8 ms/frame and 0.3 ms
-on the Mac. If that holds in a level it rules the wrapped calls out, and the
+**The device reading, in a level:**
+
+    [gl] 58.5 ms/frame  glBufferData 3.1ms/1350  glDrawElements 0.3ms/493
+    [gl] 54.1 ms/frame  glBufferData 2.4ms/1128  glDrawElements 0.3ms/409
+
+**About 3 ms of a 55 ms frame -- five percent.** The round-trip GL calls are
+*not* the cost on the device, which rules out the thing this section was
+written to chase. (Mac, same instrument: 17 ms/frame, 0.4 ms.) So the
 157% -> 40% gap is one of two other things, which need different fixes:
 
 - **the unwrapped per-draw calls** -- state, uniforms, bindings. In WebGL every
@@ -62,11 +66,13 @@ on the Mac. If that holds in a level it rules the wrapped calls out, and the
   shader generation. The Null backend skips much of this too, so it is inside
   the Null-versus-OpenGL difference and is not GL at all.
 
-Telling those apart: count draw calls and state changes per frame (Dolphin
-already keeps `g_stats.this_frame`), and check the wrapped call *counts* against
-it -- the Mac level reading was 385 glBufferData and 141 glDrawElements per
-hundred frames, which is low enough to be worth confirming the shim sees
-everything it should.
+**The instrument now covers the state calls too** -- glUseProgram,
+glBindTexture, glBindFramebuffer, glBindBufferRange, glBindSampler,
+glUniform4fv -- so the next device run separates them directly. On the Mac they
+are 0.1 ms of 17; if they are tens of milliseconds on the phone it is chattiness
+and the fix is batching and redundant-state elimination. If they are not, what
+is left is Dolphin's own CPU-side renderer work, and the fix is somewhere in
+VideoCommon rather than in the backend at all.
 
 Where it will otherwise probably point, in order of prior:
 

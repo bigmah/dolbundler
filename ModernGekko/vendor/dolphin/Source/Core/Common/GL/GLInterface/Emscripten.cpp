@@ -172,6 +172,16 @@ enum GLProfileIndex
   GLP_BlitFramebuffer,
   GLP_DrawArrays,
   GLP_DrawElements,
+  // The state calls. Individually trivial on a desktop; in WebGL every one
+  // crosses into JS and is validated, and there are far more of them per frame
+  // than there are draws. Counting them is how you tell "the renderer is
+  // expensive" from "the renderer is chatty".
+  GLP_UseProgram,
+  GLP_BindTexture,
+  GLP_BindFramebuffer,
+  GLP_BindBufferRange,
+  GLP_BindSampler,
+  GLP_Uniform4fv,
   GLP_COUNT,
 };
 
@@ -181,7 +191,9 @@ GLProfileEntry g_gl_profile[GLP_COUNT] = {
     {"glCompileShader"},   {"glTexSubImage2D"},  {"glTexImage2D"},
     {"glBufferData"},      {"glBufferSubData"},  {"glMapBufferRange"},
     {"glUnmapBuffer"},     {"glBlitFramebuffer"},{"glDrawArrays"},
-    {"glDrawElements"},
+    {"glDrawElements"},   {"glUseProgram"},     {"glBindTexture"},
+    {"glBindFramebuffer"},{"glBindBufferRange"},{"glBindSampler"},
+    {"glUniform4fv"},
 };
 
 struct GLProfileScope
@@ -286,6 +298,38 @@ void ProfiledDrawElements(GLenum mode, GLsizei count, GLenum type, const void* i
   glDrawElements(mode, count, type, indices);
 }
 
+void ProfiledUseProgram(GLuint program)
+{
+  DOLWEB_GL_SHIM(GLP_UseProgram);
+  glUseProgram(program);
+}
+void ProfiledBindTexture(GLenum target, GLuint texture)
+{
+  DOLWEB_GL_SHIM(GLP_BindTexture);
+  glBindTexture(target, texture);
+}
+void ProfiledBindFramebuffer(GLenum target, GLuint framebuffer)
+{
+  DOLWEB_GL_SHIM(GLP_BindFramebuffer);
+  glBindFramebuffer(target, framebuffer);
+}
+void ProfiledBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset,
+                             GLsizeiptr size)
+{
+  DOLWEB_GL_SHIM(GLP_BindBufferRange);
+  glBindBufferRange(target, index, buffer, offset, size);
+}
+void ProfiledBindSampler(GLuint unit, GLuint sampler)
+{
+  DOLWEB_GL_SHIM(GLP_BindSampler);
+  glBindSampler(unit, sampler);
+}
+void ProfiledUniform4fv(GLint location, GLsizei count, const GLfloat* value)
+{
+  DOLWEB_GL_SHIM(GLP_Uniform4fv);
+  glUniform4fv(location, count, value);
+}
+
 const struct
 {
   const char* name;
@@ -307,6 +351,12 @@ const struct
     {"glBlitFramebuffer", (void*)&ProfiledBlitFramebuffer},
     {"glDrawArrays", (void*)&ProfiledDrawArrays},
     {"glDrawElements", (void*)&ProfiledDrawElements},
+    {"glUseProgram", (void*)&ProfiledUseProgram},
+    {"glBindTexture", (void*)&ProfiledBindTexture},
+    {"glBindFramebuffer", (void*)&ProfiledBindFramebuffer},
+    {"glBindBufferRange", (void*)&ProfiledBindBufferRange},
+    {"glBindSampler", (void*)&ProfiledBindSampler},
+    {"glUniform4fv", (void*)&ProfiledUniform4fv},
 };
 
 bool GLProfilingEnabled()
