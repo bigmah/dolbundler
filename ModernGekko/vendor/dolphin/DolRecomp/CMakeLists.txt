@@ -169,10 +169,15 @@ if(DOLRECOMP_ENABLE_LLVM)
             target_link_libraries(dr_llvm PRIVATE ${DOLRECOMP_LLVM_LIBS})
         endif()
     else()
+        # WebAssembly alongside the others: wasm is a target this backend has to
+        # reach for the browser and iOS-web builds, and its codegen libraries
+        # have to be linked in for LLVMInitializeWebAssemblyTarget to resolve.
         llvm_map_components_to_libnames(DOLRECOMP_LLVM_LIBS
             Core Support Analysis Passes Target MC
             AArch64CodeGen AArch64Desc AArch64Info AArch64Utils
-            X86CodeGen X86Desc X86Info)
+            X86CodeGen X86Desc X86Info
+            WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo
+            WebAssemblyAsmParser)
         target_link_libraries(dr_llvm PRIVATE ${DOLRECOMP_LLVM_LIBS})
     endif()
 endif()

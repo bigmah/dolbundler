@@ -52,6 +52,13 @@ static std::string resolveTriple(const char *requested) {
 }
 
 static bool supportedTarget(const llvm::Triple &triple) {
+  // wasm32 is a 32-bit target, so it does not share the host's CPUState layout
+  // the way every other target here does. Nothing below assumes it does any
+  // more -- see targetStateLayout() -- and module-template's static asserts
+  // check the result when they are compiled for wasm32, so a mistake in the
+  // layout is a build failure rather than a silently wrong module.
+  if (triple.getArch() == llvm::Triple::wasm32)
+    return true;
   if (triple.getArch() == llvm::Triple::x86_64)
     return triple.isOSLinux() || triple.isOSWindows();
   if (triple.getArch() != llvm::Triple::aarch64 ||
@@ -380,6 +387,10 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
     LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC();
     LLVMInitializeX86AsmPrinter();
+    LLVMInitializeWebAssemblyTargetInfo();
+    LLVMInitializeWebAssemblyTarget();
+    LLVMInitializeWebAssemblyTargetMC();
+    LLVMInitializeWebAssemblyAsmPrinter();
     return true;
   }();
   (void)initialized;
@@ -391,7 +402,8 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   if (!supportedTarget(triple)) {
     fprintf(diagnostics,
             "dolllvm: supported targets are x86-64 Linux/Windows, arm64 "
-            "macOS, and arm64 iOS device/simulator triples with an explicit minimum OS\n");
+            "macOS, arm64 iOS device/simulator triples with an explicit minimum "
+            "OS, and wasm32\n");
     return false;
   }
 

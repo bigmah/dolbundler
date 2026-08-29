@@ -136,9 +136,27 @@ the two open defects, and the habit that found today's.
 - **Dual core (`DOLWEB_CPU_THREAD=1`) fails to initialise the video backend.**
   Worth having: it is what moves the FIFO and texture work off the CPU thread.
 - **The module is 91.6 MB**, which is 95% of the binary. `-Os` is 6% smaller and
-  no faster. The LLVM backend would likely be smaller and faster, but its
-  CPUState offsets are computed with the host's `offsetof` and wasm32 is a
-  32-bit target, so the layouts do not match — that is the work it would need.
+  no faster. The LLVM backend would likely be smaller and faster, and it is
+  **closer than the note here used to say**: with the WebAssembly components
+  linked into `dolrecomp` and `wasm32` accepted by `supportedTarget`, it
+  recompiles the whole disc for `wasm32-unknown-emscripten` — 7417 objects, no
+  errors. The codegen was never the problem.
+
+  What is left is exactly the CPUState layout, and it is now precisely bounded.
+  Compiling `core/native_state_layout.h` against the generated header with
+  `emcc` names every field that disagrees, and it is only the pointer-bearing
+  tail: `external_read`, `external_write`, `ram`, `ram_size`, `downcount`,
+  `exram`, `exram_size` and the SPR/cache-control pointers. Everything before
+  them is u32/f64/u8, so **the prefix is byte-identical on wasm32 and arm64** --
+  which means the fix is a walk over the tail with a 4-byte pointer size rather
+  than a model of the whole struct.
+
+  Two things have to move together: `pipeline.c` emits the offsets into the
+  header with the host's `offsetof`, and the LLVM backend bakes the same host
+  offsets into the code it generates. Doing only the first would produce a
+  module that *passes* the layout check with wrong offsets inside it, which is
+  worse than one that fails. Until both are done the static asserts refuse a
+  wasm32 module at compile time, which is the right failure.
 - **Savestates are not portable to wasm32** for the same reason. A state taken
   on arm64 fails to load with a save-marker mismatch, which costs the
   same-scene measurement discipline `ios/PERFORMANCE.md` recommends.
