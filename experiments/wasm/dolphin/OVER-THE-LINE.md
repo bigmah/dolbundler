@@ -61,16 +61,34 @@ anything else about memory.
 phone, on the same Mac GPU as the Chrome numbers above, so the only variable is
 the engine. In the level, throttled:
 
+Measured on an idle machine, `?ab=30&abfrom=125` with the `acts=` timeline, so
+the window is **inside Andy's House** rather than in the attract loop:
+
 | | |
 |---|---|
-| Chrome, in the level | 92-100% (keeping up) |
-| Safari, in the level | slower, by an amount not yet honestly measured |
+| simulator Safari, **Null**, in the level | **85%** (median 87, 64-103) |
+| simulator Safari, OpenGL, in the level | not yet measured -- see below |
+| simulator Safari, Null / OpenGL, menus | 166% / 156% |
+| Chrome, Null / OpenGL, menus | 199% / 215% |
 
-**The first Safari level readings -- 43-51% throttled, 18-23% unthrottled -- were
-taken while a `dolrecomp` compile was running eight jobs on the same machine, so
-they measure the contention as much as the engine.** They are recorded here only
-so nobody quotes them. A measurement of an emulator is worth exactly as much as
-the machine was idle.
+**Read the first row twice.** With the renderer switched off entirely, WebKit
+runs the recompiled code at **85% of realtime in gameplay**. The CPU is already
+short before the renderer is asked for anything, on an M4 -- and the phone's core
+is slower than an M4, not faster. Whatever the renderer costs on top, **the CPU
+half is not done after all**, and that is the opposite of what the menu-window
+numbers have been saying all along.
+
+That is the argument for the LLVM backend, and it is now an argument from a
+measurement rather than from a prior. See `README.md`: the backend already
+recompiles the whole disc for wasm32.
+
+The OpenGL half of that A/B needs `--seconds 700` or so: phase two restarts from
+boot and has to reach guest 125 s again at 85% speed, which does not fit in 420.
+
+**And a measurement is worth exactly what the machine's idleness was.** The first
+Safari level readings here -- 43-51% throttled, 18-23% unthrottled -- were taken
+while a `dolrecomp` compile was running eight jobs on the same Mac. They measured
+the contention. Check `uptime` before believing an emulator number.
 
 **But the `?ab=45` window does not see it.** Anchored at guest second 45, it
 lands in the attract loop and the title, not in gameplay -- Andy's House starts
