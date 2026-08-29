@@ -240,6 +240,15 @@ else()
       "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas,#dolweb-probe")
   endif()
 
+  # A race-free replacement for emscripten's WASMFS fetch backend. The stock one
+  # creates a file's range table after an awaited HEAD, so two reads that arrive
+  # before either HEAD resolves both create it and the second discards the first
+  # one's chunks; the first then throws out of its async read, which reaches C++
+  # as a read that moved no bytes. Dolphin reads the disc from more than one
+  # thread. See dolweb-fetch.js.
+  target_link_options(dolweb PRIVATE
+    "SHELL:--js-library ${CMAKE_CURRENT_SOURCE_DIR}/dolweb-fetch.js")
+
   target_link_options(dolweb PRIVATE
     # WASMFS rather than the JS filesystem: its state lives in linear memory, so
     # every thread sees the same tree. The JS one does not -- it is per-worker

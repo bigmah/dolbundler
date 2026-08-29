@@ -102,12 +102,36 @@ they fall into two classes that have nothing to do with each other:
    64x64 C4, two 640x480 RGBA8) whose data in guest RAM is all zeros, which for
    a texture the game has not loaded yet is not a defect at all.
 
-`DOLWEB_PAINT_ZERO_TEXTURES=palette` and `=source` paint one class at a time and
-are how to settle it. A first `=source` run came back not-black in the frames
-the base run had black, which would put the floor in class 2 -- but the floor in
-those frames is a plain red carpet with no magenta in it, so the run is more
-likely to have been a different moment of the level than a painted floor. **Run
-both halves and compare against the same guest ticks before believing either.**
+**It is class 2.** Painting the two classes in *different colours* in one run --
+magenta for the empty palette, green for the empty source -- settles it without
+comparing two runs at two different moments of a level, which is what made the
+first attempt at this useless. The floor comes back **green**: its texture data
+in guest RAM is all zeros. The empty palette is real but is a different, and so
+far harmless, defect.
+
+So the question is why a texture the game is drawing with has no data behind it.
+Two things are already known about it: **the interpreter shows the same**, so the
+guest is not failing to write it, and **`DOLWEB_FETCH_CHUNK=8192` does not fix
+it**, so simply downloading files whole is not enough.
+
+The open suspect is the transport again, but the *other* half of it.
+emscripten's WASMFS fetch backend creates a file's range table after an awaited
+HEAD:
+
+    if (!(file in wasmFS$JSMemoryRanges)) {
+      var fileInfo = await fetch(url, {method:'HEAD', ...});   // <-- await
+      wasmFS$JSMemoryRanges[file] = { size, chunks: [], chunkSize };
+    }
+
+Two reads of one file that arrive before either HEAD resolves both pass the `in`
+test, and the second **replaces the object**, discarding the chunks the first had
+stored. The first then continues past its own await, finds `chunks[i]`
+undefined, and throws a TypeError out of the async read -- which reaches C++ as a
+read that moved no bytes, leaving a freshly zeroed buffer exactly as it was.
+Dolphin reads the disc from more than one thread. `dolweb-fetch.js` is a
+replacement backend that does each piece of work once (one in-flight promise per
+file, one per chunk) and returns `EIO` rather than throwing when a chunk is
+missing, so the next occurrence says so instead of going quiet.
 
 **The palette is loaded correctly. One register names the wrong slot.** Over a
 run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of
