@@ -780,6 +780,34 @@ bool PopulateConfig(GLContext* m_main_gl_context)
     clear("TextureSubImage", g_ogl_config.bSupportsTextureSubImage);
   }
 
+  // MODERNGEKKO_GL_ENABLE is the other direction, and it exists because some of
+  // these flags test for a *desktop* extension name that GLES cannot report even
+  // when GLES core has the feature. bSupportsTextureStorage asks for
+  // GL_ARB_texture_storage; GLES 3.0 has glTexStorage2D/3D in core and the
+  // function table above already says so ("|VERSION_GLES_3"), so on this target
+  // the flag is always false and every texture takes the mutable path. Turning
+  // one on here is how that is measured before it is believed.
+  if (const char* enable = std::getenv("MODERNGEKKO_GL_ENABLE"))
+  {
+    const std::string list = std::string(",") + enable + ",";
+    const auto on = [&list](const char* name) {
+      return list.find(std::string(",") + name + ",") != std::string::npos;
+    };
+    const auto set = [&](const char* name, bool& flag) {
+      if (on(name) && !flag)
+      {
+        flag = true;
+        INFO_LOG_FMT(VIDEO, "MODERNGEKKO_GL_ENABLE: {} on", name);
+      }
+    };
+    set("TextureStorage", g_ogl_config.bSupportsTextureStorage);
+    set("BaseVertex", g_ogl_config.bSupportsGLBaseVertex);
+    set("PrimitiveRestart", g_backend_info.bSupportsPrimitiveRestart);
+    set("ClipControl", g_backend_info.bSupportsClipControl);
+    set("DepthClamp", g_backend_info.bSupportsDepthClamp);
+    set("ReversedDepthRange", g_backend_info.bSupportsReversedDepthRange);
+  }
+
   OSD::AddMessage(fmt::format("Video Info: {}, {}, {}", g_ogl_config.gl_vendor,
                               g_ogl_config.gl_renderer, g_ogl_config.gl_version),
                   5000);

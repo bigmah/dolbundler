@@ -745,6 +745,31 @@ static void WriteBlend(ShaderCode& out, const pixel_shader_uid_data* uid_data);
 
 static void WriteEmulatedFragmentBodyHeader(APIType api_type, const ShaderHostConfig& host_config,
                                             const pixel_shader_uid_data* uid_data, ShaderCode& out);
+
+// MODERNGEKKO_FLAT_SHADE replaces the fragment colour with one of the TEV's own
+// inputs, which is how "is this surface being rasterised at all" and "are its
+// inputs right" get answered on a target with no wireframe and no debugger.
+//
+// The inputs live in dolphin_process_emulated_fragment and main() cannot see
+// them, so the modes that need them travel out through DolphinFragmentOutput.
+// Writing `textemp.rgb` straight into main() is what the first version did, and
+// it does not compile -- 114 shaders failed in a run, the screen went flat grey,
+// and every reading taken with it said whatever the fallback said rather than
+// what the TEV had.
+static const char* FlatShadeMode()
+{
+  static const char* mode = std::getenv("MODERNGEKKO_FLAT_SHADE");
+  return mode;
+}
+
+static bool FlatShadeWantsTevInputs()
+{
+  const char* mode = FlatShadeMode();
+  if (!mode)
+    return false;
+  const std::string_view m(mode);
+  return m == "tex" || m == "ras" || m == "konst";
+}
 static void WriteFragmentDefinitions(APIType api_type, const ShaderHostConfig& host_config,
                                      const pixel_shader_uid_data* uid_data, ShaderCode& out);
 
@@ -1806,25 +1831,6 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
   else
     out.Write("\tocol0.rgb = float3(prev.rgb) / 255.0;\n");
 
-  // MODERNGEKKO_FLAT_SHADE paints every fragment magenta. Wireframe would be
-  // the natural way to ask "is this geometry reaching the framebuffer at all",
-  // and it needs glPolygonMode, which GLES and WebGL do not have. This asks the
-  // same question: a surface that renders black stays black if it is not being
-  // rasterised, and turns magenta if it is and the shading is what is wrong.
-  static const char* flat_shade = std::getenv("MODERNGEKKO_FLAT_SHADE");
-  if (flat_shade)
-  {
-    const std::string mode(flat_shade);
-    if (mode == "tex")
-      out.Write("\tocol0.rgb = float3(textemp.rgb) / 255.0;\n");
-    else if (mode == "ras")
-      out.Write("\tocol0.rgb = float3(rastemp.rgb) / 255.0;\n");
-    else if (mode == "konst")
-      out.Write("\tocol0.rgb = float3(konsttemp.rgb) / 255.0;\n");
-    else
-      out.Write("\tocol0.rgb = float3(1.0, 0.0, 1.0);\n");
-  }
-
   // Colors will be blended against the 8-bit alpha from ocol1 and
   // the 6-bit alpha from ocol0 will be written to the framebuffer
   if (uid_data->useDstAlpha)
@@ -1841,6 +1847,31 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
     out.Write("\tocol0.a = float(prev.a >> 2) / 63.0;\n");
     if (use_dual_source)
       out.Write("\tocol1 = float4(0.0, 0.0, 0.0, float(prev.a) / 255.0);\n");
+  }
+
+  // MODERNGEKKO_FLAT_SHADE replaces the result, and does it last so nothing
+  // downstream puts the real alpha back. Wireframe would be the natural way to
+  // ask "is this geometry reaching the framebuffer at all", and it needs
+  // glPolygonMode, which GLES and WebGL do not have. This asks the same
+  // question: a surface that renders black stays black if it is not being
+  // rasterised, and turns magenta if it is and the shading is what is wrong.
+  // The alpha goes to 1 with it: a debug colour that is blended away says
+  // nothing about the input it was meant to show.
+  if (const char* flat_shade = FlatShadeMode())
+  {
+    const std::string mode(flat_shade);
+    if (mode == "tex")
+      out.Write("\tocol0 = float4(float3(frag_output.dbg_tex.rgb) / 255.0, 1.0);\n");
+    else if (mode == "ras")
+      out.Write("\tocol0 = float4(float3(frag_output.dbg_ras.rgb) / 255.0, 1.0);\n");
+    else if (mode == "konst")
+      out.Write("\tocol0 = float4(float3(frag_output.dbg_konst.rgb) / 255.0, 1.0);\n");
+    else if (mode == "rawtex")
+      out.Write("\tocol0 = float4(float3(frag_output.last_texture.rgb) / 255.0, 1.0);\n");
+    else
+      out.Write("\tocol0 = float4(1.0, 0.0, 1.0, 1.0);\n");
+    if (use_dual_source)
+      out.Write("\tocol1 = float4(0.0, 0.0, 0.0, 1.0);\n");
   }
 }
 
@@ -2041,6 +2072,12 @@ void WriteFragmentBody(APIType api_type, const ShaderHostConfig& host_config,
   }
 
   out.Write("\tfrag_output.last_texture = rawtextemp;\n");
+  if (FlatShadeWantsTevInputs())
+  {
+    out.Write("\tfrag_output.dbg_tex = textemp;\n");
+    out.Write("\tfrag_output.dbg_ras = rastemp;\n");
+    out.Write("\tfrag_output.dbg_konst = konsttemp;\n");
+  }
   out.Write("\tfrag_output.main = prev;\n");
 }
 
@@ -2087,6 +2124,12 @@ static void WriteFragmentDefinitions(APIType api_type, const ShaderHostConfig& h
   out.Write("{{\n");
   out.Write("\tivec4 main;\n");
   out.Write("\tivec4 last_texture;\n");
+  if (FlatShadeWantsTevInputs())
+  {
+    out.Write("\tivec4 dbg_tex;\n");
+    out.Write("\tivec4 dbg_ras;\n");
+    out.Write("\tivec4 dbg_konst;\n");
+  }
   out.Write("}};\n\n");
 
   // CUSTOM_SHADER_LIGHTING_ATTENUATION_TYPE "enum" values

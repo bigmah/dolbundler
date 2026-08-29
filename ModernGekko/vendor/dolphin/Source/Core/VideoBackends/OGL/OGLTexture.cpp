@@ -3,6 +3,10 @@
 
 #include "VideoBackends/OGL/OGLTexture.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/GL/GLUtil.h"
@@ -121,9 +125,42 @@ bool UsePersistentStagingBuffers()
 }
 }  // Anonymous namespace
 
+// DOLWEB_LOG_TEXTURE=1 says what shape each distinct texture is and which
+// allocation path it took, and reports a GL error raised by its upload. WebGL
+// drops a call it rejects and says nothing, so a texture that fails to upload
+// is a surface that renders black with no other trace -- and the paths here
+// fork on bSupportsTextureStorage, which is a *desktop* extension name and is
+// therefore always false on this target.
+static bool LogTextures()
+{
+  static const bool enabled = std::getenv("DOLWEB_LOG_TEXTURE") != nullptr;
+  return enabled;
+}
+
+static bool FirstTimeSeeing(u64 key)
+{
+  static std::set<u64> seen;
+  return seen.insert(key).second;
+}
+
 OGLTexture::OGLTexture(const TextureConfig& tex_config, std::string_view name)
     : AbstractTexture(tex_config), m_name(name)
 {
+  if (LogTextures())
+  {
+    const u64 key = (u64)tex_config.width << 40 | (u64)tex_config.height << 24 |
+                    (u64)tex_config.levels << 16 | (u64)tex_config.layers << 8 |
+                    (u64)tex_config.format;
+    if (FirstTimeSeeing(key))
+    {
+      std::printf("[tex] %ux%u levels=%u layers=%u fmt=%u type=%u storage=%d rt=%d\n",
+                  tex_config.width, tex_config.height, tex_config.levels, tex_config.layers,
+                  (unsigned)tex_config.format, (unsigned)tex_config.type,
+                  g_ogl_config.bSupportsTextureStorage ? 1 : 0,
+                  tex_config.IsRenderTarget() ? 1 : 0);
+      std::fflush(stdout);
+    }
+  }
   DEBUG_ASSERT_MSG(VIDEO, !tex_config.IsMultisampled() || tex_config.levels == 1,
                    "OpenGL does not support multisampled textures with mip levels");
 
@@ -397,6 +434,18 @@ void OGLTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8
 
   if (row_length != width)
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+  if (LogTextures())
+  {
+    const GLenum error = glGetError();
+    if (error != GL_NO_ERROR)
+    {
+      std::printf("[tex] upload failed 0x%04x: level %u of %ux%u levels=%u layers=%u fmt=%u\n",
+                  (unsigned)error, level, m_config.width, m_config.height, m_config.levels,
+                  m_config.layers, (unsigned)m_config.format);
+      std::fflush(stdout);
+    }
+  }
 }
 
 GLenum OGLTexture::GetGLFormatForImageTexture() const

@@ -450,8 +450,58 @@ void* GLContextEmscripten::GetFuncAddress(const std::string& name)
   return emscripten_webgl_get_proc_address(name.c_str());
 }
 
+// DOLWEB_GL_ERRORS=1 drains glGetError once a frame and says what it found.
+// WebGL reports nothing to the console for a call the emulator makes wrongly --
+// it drops the call and carries on -- so an upload that fails is invisible, and
+// the surface it was for just renders black. One line the first time each code
+// appears, then a count, because a broken call is usually broken every frame.
+static void ReportGLErrors()
+{
+  static const bool enabled = std::getenv("DOLWEB_GL_ERRORS") != nullptr;
+  if (!enabled)
+    return;
+  static u64 counts[8] = {};
+  static bool announced[8] = {};
+  static u64 frames = 0;
+  ++frames;
+  for (int drained = 0; drained < 16; ++drained)
+  {
+    const GLenum error = glGetError();
+    if (error == GL_NO_ERROR)
+      break;
+    const unsigned slot = error & 7u;
+    ++counts[slot];
+    if (!announced[slot])
+    {
+      announced[slot] = true;
+      std::printf("[glerr] 0x%04x first seen at frame %llu\n", (unsigned)error,
+                  (unsigned long long)frames);
+      std::fflush(stdout);
+    }
+  }
+  if (frames % 600 == 0)
+  {
+    bool any = false;
+    for (unsigned slot = 0; slot < 8; ++slot)
+    {
+      if (!counts[slot])
+        continue;
+      if (!any)
+        std::printf("[glerr] over %llu frames:", (unsigned long long)frames);
+      any = true;
+      std::printf(" 0x%04x x%llu", 0x0500u | slot, (unsigned long long)counts[slot]);
+    }
+    if (any)
+    {
+      std::printf("\n");
+      std::fflush(stdout);
+    }
+  }
+}
+
 void GLContextEmscripten::Swap()
 {
+  ReportGLErrors();
   // Presenting is the one GL call in a frame that can block on the browser's
   // compositor, and it is proxied on top of that, so it is worth being able to
   // ask what it costs before blaming the renderer for a frame time. Off unless
