@@ -203,6 +203,24 @@ the two open defects, and the habit that found today's.
   far. The C backend has one because it had to; this backend never needed one on
   a host with a real stack, and on wasm it does.
 
+  **To pick this up**, the pieces are on disk and the browser build is
+  configured against them:
+
+      build-wasm/gexe52-llvm-wasm32   the module (259 MB of wasm objects)
+      build-wasm/web-llvm             the browser build that links it (555 MB)
+
+  Regenerate the module with:
+
+      DOLRECOMP_LLVM_TARGET=wasm32-unknown-emscripten \
+        build-dolrecomp-llvm20/dolrecomp --gamecube --backend llvm -j10 \
+        build-wasm/gexe52/sys/main.dol <outdir>
+      cp build-wasm/gexe52/sys/main.dol <outdir>/generated/
+
+  and swap `experiments/wasm/dolphin/web/dolweb.{js,wasm,data}` between
+  `build-wasm/web` and `build-wasm/web-llvm` to compare the two backends in the
+  same page. Delete both directories if you are not working on this -- neither
+  is needed by the C build, which is what `web/` points at.
+
   **And it is 213.8 MB against the C backend's 86.5 MB** -- 2.5x *larger*, not
   smaller, which is the opposite of what this file used to predict. Whether -Os
   or the pass pipeline closes that is unmeasured. On a phone whose heap already
