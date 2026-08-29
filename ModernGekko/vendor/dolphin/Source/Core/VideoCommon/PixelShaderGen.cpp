@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <string>
 
+#include <set>
+#include <cstdio>
 #include "VideoCommon/PixelShaderGen.h"
 
 #include "Common/Assert.h"
@@ -1148,6 +1150,33 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
     out.Write("\tUpdateBoundingBox(rawpos.xy);\n");
 
   out.Write("}}\n");
+
+
+  // MODERNGEKKO_DUMP_SHADER="<texgens>,<tevstages>,<indstages>" prints the
+  // generated fragment shader for pixel shaders matching that UID, once each.
+  // The two builds generate shaders for the same UID through different
+  // language paths -- WebGL2 is GLSL ES 3.00, the desktop is GLSL 3.30 -- so
+  // once the bound textures and their decoded bytes are known to be identical,
+  // the generated code is the only place a difference can still live, and it
+  // has to be read rather than guessed at.
+  if (const char* want = std::getenv("MODERNGEKKO_DUMP_SHADER"))
+  {
+    unsigned tg = 0, tev = 0, ind = 0;
+    if (std::sscanf(want, "%u,%u,%u", &tg, &tev, &ind) == 3 &&
+        uid_data->genMode_numtexgens == tg && uid_data->genMode_numtevstages + 1 == tev &&
+        uid_data->genMode_numindstages == ind)
+    {
+      static std::set<std::string> dumped;
+      const std::string src = out.GetBuffer();
+      if (dumped.insert(src).second)
+      {
+        std::printf("[shader] ==== texgens=%u tevstages=%u indstages=%u (%zu bytes) ====\n%s"
+                    "[shader] ==== end ====\n",
+                    tg, tev, ind, src.size(), src.c_str());
+        std::fflush(stdout);
+      }
+    }
+  }
 
   return out;
 }

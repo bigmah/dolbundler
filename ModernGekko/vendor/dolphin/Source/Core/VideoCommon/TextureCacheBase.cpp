@@ -1972,9 +1972,18 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
         // matter here sit within a few KB of each other, so the low bits are
         // what distinguishes them and a plain byte-slice would make every
         // surface the same shade.
+        // Kept dim on purpose. Surfaces here are lit by more than 1.0 in
+        // places, so a full-range identity colour clips at 255 and stops being
+        // an identity at all -- the first version of this painted the floor
+        // (255,140,255) in every level frame and could not be matched back to
+        // any texture. Capping at 120 leaves headroom for the brightest
+        // lighting in the level while keeping the colours far enough apart to
+        // tell neighbouring textures apart.
         const u32 a = texture_info.GetRawAddress();
         const u32 h = a * 2654435761u;
-        const u8 r = (u8)(h >> 24), g = (u8)(h >> 16), b = (u8)(h >> 8);
+        const u8 r = (u8)(((h >> 24) & 0xff) * 120 / 255);
+        const u8 g = (u8)(((h >> 16) & 0xff) * 120 / 255);
+        const u8 b = (u8)(((h >> 8) & 0xff) * 120 / 255);
         for (size_t i = 0; i + 3 < decoded_texture_size; i += 4)
         {
           dst_buffer[i] = r;

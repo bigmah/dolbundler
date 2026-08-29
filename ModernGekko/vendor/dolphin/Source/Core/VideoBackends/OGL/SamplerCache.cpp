@@ -3,6 +3,8 @@
 
 #include <cstdlib>
 
+#include <cstdio>
+
 #include "VideoBackends/OGL/SamplerCache.h"
 
 #include <memory>
@@ -89,7 +91,15 @@ void SamplerCache::SetParameters(GLuint sampler_id, const SamplerState& params)
   // for a texture that is not mipmap complete, where a desktop driver samples
   // level 0 anyway, so this separates "the texture is black" from "the shading
   // made it black" for a surface that renders flat.
-  static const bool no_mipmap = std::getenv("MODERNGEKKO_NO_MIPMAP") != nullptr;
+  static const bool no_mipmap = []() {
+    const bool on = std::getenv("MODERNGEKKO_NO_MIPMAP") != nullptr;
+    // Say so. This knob was read as a silent getenv, so a run with it set and
+    // a run without it looked identical in the log, and "it did not fix the
+    // floor" could equally have meant "it never took effect". Two other
+    // instruments in this investigation turned out to be the latter.
+    if (on) { std::printf("[gfx] MODERNGEKKO_NO_MIPMAP: mipmapped filtering disabled\n"); std::fflush(stdout); }
+    return on;
+  }();
   if (no_mipmap)
     min_filter = (params.tm0.min_filter == FilterMode::Near) ? GL_NEAREST : GL_LINEAR;
 
