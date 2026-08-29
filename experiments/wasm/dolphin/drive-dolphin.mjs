@@ -103,8 +103,11 @@ function note(text) {
   // Every instrument prints under a [tag], so match the shape rather than a
   // list that has to be edited each time one is added -- [tex] and [glerr] were
   // both collected and never shown, which reads exactly like an instrument that
-  // found nothing.
-  if (/^\[(perf|gl|glerr|swap|tex|act|shot|dolweb|page|browser)\]|exception|error|Failed|audio/i.test(text))
+  // found nothing. The list was still a list, and it happened again: [census]
+  // ran correctly for a whole afternoon of runs and printed nothing here,
+  // which cost a rebuild and three browser runs to chase into the binary
+  // before the drop turned out to be on this line. Match ANY bracketed tag.
+  if (/^\[[a-z][a-z0-9_-]*\]|exception|error|Failed|audio/i.test(text))
     console.log(text);
 }
 

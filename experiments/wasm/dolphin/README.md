@@ -207,7 +207,12 @@ the two open defects, and the habit that found today's.
   configured against them:
 
       build-wasm/gexe52-llvm-wasm32   the module (259 MB of wasm objects)
-      build-wasm/web-llvm             the browser build that links it (555 MB)
+      build-wasm/web-llvm             the browser build that links it -- DELETED
+                                      2026-08-29 to reclaim 552 MB. It is a
+                                      CMake build over the module below, so it
+                                      costs a configure and a link to recreate;
+                                      the module is the expensive artifact and
+                                      is still here.
 
   Regenerate the module with:
 

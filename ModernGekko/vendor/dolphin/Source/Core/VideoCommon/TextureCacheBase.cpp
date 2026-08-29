@@ -1402,8 +1402,26 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
     {
       auto& system = Core::System::GetInstance();
       const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+      // The guest clock is the right anchor -- it is what makes two builds
+      // comparable -- but if it reads zero here the census simply never fires
+      // and says nothing about why. That happened once already: the instrument
+      // was in the binary, the environment variable had arrived, the run went
+      // well past the mark, and there was no output and no clue. Fall back to
+      // wall clock so it always produces something, and announce which clock
+      // is in use so the log is self-describing.
+      static const auto census_start = std::chrono::steady_clock::now();
       const double now =
-          hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
+          hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz
+             : std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                             census_start).count();
+      static bool announced = false;
+      if (!announced)
+      {
+        announced = true;
+        std::printf("[census] armed for %.1f s on the %s clock (guest hz=%u, now=%.2f)\n",
+                    census_at, hz ? "guest" : "WALL", hz, now);
+        std::fflush(stdout);
+      }
       if (now >= census_at)
       {
         static double census_until = 0.0;
