@@ -28,18 +28,32 @@ until it is retaken.
 
 ## 1. The renderer on the device -- the speed, unmeasured again
 
-Where it stood before the header was found, on an iPhone 15 Pro Max in Safari,
-warm, matched guest window 45-90 s, throttle off (`?ab=45&auto=1&report=1`):
+This Mac, on the fixed build, matched guest window 45-90 s, throttle off
+(`?ab=45&auto=1&report=1`), measured 2026-08-29:
 
 | | |
 |---|---|
-| CPU only (Null backend) | 157% |
-| with rendering (OpenGL) | 40% |
-| this Mac, same window | Null 192% / OpenGL 212% |
+| Null (CPU only) | **199%** (median 201, 194-208) |
+| OpenGL | **215%** (median 217, 207-224) |
+| heap at steady state | **614 MB**, on top of an 86.5 MB module |
+
+So the renderer is free on the Mac, and that half of the old reading survives
+the transport fix. The device half does not:
+
+| | |
+|---|---|
+| iPhone 15 Pro Max, Null | 157% |
+| iPhone 15 Pro Max, OpenGL | 40% |
 
 **Read those as suspect, not as facts.** Both were taken while the phone was
 pulling 1.2 GB of disc over Wi-Fi, and a WASMFS fetch blocks the emulation
-thread. The Mac reads 92-100% with OpenGL on the fixed build.
+thread.
+
+**And the heap is a device number nobody has taken.** 614 MB resident plus the
+module is close to what a WebContent process gets before iOS kills it, and a
+process that crosses its jetsam limit just disappears -- which looks exactly
+like a crash in the emulator. Measure it on the phone before optimising
+anything else about memory.
 
 Retake them before doing anything else with the renderer. What the earlier work
 did establish, and what survives:
@@ -79,12 +93,23 @@ entirely zero, so `TexDecoder_Decode` maps every index to black and is right to.
 all zero, and over the window where the base build has seven black frames out of
 seven, the painted build has **none**.
 
-`BPMEM_LOADTLUT1` copies the palette from guest memory at
-`bpmem.tmem_config.tlut_src << 5` into `s_tex_mem`. So the remaining question is
-whether the guest bytes at that address are zero -- the game, or the recompiled
-code running it, never wrote the palette -- or the copy lands somewhere else.
-`DOLWEB_LOG_TEXTURE=1` now reports every TLUT load that arrives empty, with the
-TMEM offset and the source address, which is where to pick this up.
+**The palette is loaded correctly. One register names the wrong slot.** Over a
+run, every TLUT load goes to TMEM 0x40000, 512 bytes, with data -- 15 692 of
+them, not one empty. Every TLUT *select* the game issues names that same slot:
+`0x000a00`, TMEM 0x40000, format RGB5A3, on units 0, 5 and 6.
+
+The black texture reads its palette from **TMEM offset 0** with format **IA8** --
+which is `texTlut` at its reset value, on a unit that never received a select.
+And it is not a one-off at boot: over 4 000 decodes come out all-zero in a
+three-minute run.
+
+So the last question is why that unit's `BPMEM_TX_SETTLUT` never arrives, and it
+is a question about the *command stream* rather than about graphics at all. The
+test that settles it is one run with
+`STATICRECOMP_FALLBACK_RANGES=80000000-90000000`, which forces the interpreter in
+the same binary: if the floor renders under it, the recompiled code is dropping
+a write to the write-gather pipe. Budget about an hour of wall clock -- the
+interpreter runs at ~5% and the level is 160 guest seconds in.
 
 Worth knowing while chasing it: **this target is the only one that takes
 Dolphin's CPU palette path at all.** `bSupportsPaletteConversion` needs texture

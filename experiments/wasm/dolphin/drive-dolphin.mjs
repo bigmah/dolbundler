@@ -104,7 +104,7 @@ function note(text) {
   // list that has to be edited each time one is added -- [tex] and [glerr] were
   // both collected and never shown, which reads exactly like an instrument that
   // found nothing.
-  if (/^\[(perf|gl|glerr|swap|tex|act|shot|dolweb)\]|exception|error|Failed|audio/i.test(text))
+  if (/^\[(perf|gl|glerr|swap|tex|act|shot|dolweb|page|browser)\]|exception|error|Failed|audio/i.test(text))
     console.log(text);
 }
 
