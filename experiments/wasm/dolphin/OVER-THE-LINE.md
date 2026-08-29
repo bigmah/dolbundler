@@ -102,6 +102,22 @@ Chrome's 199% / 215%, a 20% gap rather than a 2x one. **Every figure in this
 file taken with `abfrom=45`, including the device ones, is a menu figure.** Use
 `?ab=30&abfrom=125` together with the `acts=` timeline that reaches the level.
 
+**To retake them takes one tap**, and nothing on this machine substitutes for
+it:
+
+    python3 experiments/wasm/serve.py dolphin --lan
+
+then on the phone, in Safari (it warns once about the self-signed certificate --
+Show Details, visit this website):
+
+    https://<printed LAN address>:8712/index.html?auto=1&report=1\
+      &ab=30&abfrom=125\
+      &acts=g25:5,g40:5,g52:5,g70:0,g76:0,g82:0,g110:15:9000,g135:15:9000,g160:15:9000
+
+The page drives itself into Andy's House and posts Null then OpenGL back to
+`reports.jsonl` with no further input. **Use `abfrom=125`, not the `abfrom=45`
+every earlier device figure used** -- that window is the attract loop.
+
 Retake them before doing anything else with the renderer. What the earlier work
 did establish, and what survives:
 
