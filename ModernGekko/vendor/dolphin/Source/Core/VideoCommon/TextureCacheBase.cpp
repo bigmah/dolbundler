@@ -1770,12 +1770,17 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
             bool tlut_zero = tlut != nullptr && tlut_size > 0;
             for (size_t i = 0; tlut_zero && i < tlut_size; ++i)
               tlut_zero = tlut[i] == 0;
+            // Which TMEM offset the palette is read from, so it can be
+            // matched against the destinations the TLUT loads actually used.
+            const u8* tmem_base = TexDecoder_GetTmemSpan(0).data();
+            const long tlut_offset = tlut && tmem_base ? (long)(tlut - tmem_base) : -1;
             std::printf("[tex] decoded to zero: %ux%u fmt=%u tlut=%u addr=%#010x src=%zu bytes, "
-                        "source itself %s, tlut %zu bytes %s\n",
+                        "source itself %s, tlut %zu bytes at tmem %#06lx %s\n",
                         width, height, (unsigned)texture_info.GetTextureFormat(),
                         (unsigned)texture_info.GetTlutFormat(), texture_info.GetRawAddress(),
                         src_size, src_zero ? "is zero too" : "is NOT zero", tlut_size,
-                        tlut == nullptr ? "absent" : (tlut_zero ? "is ZERO" : "is not zero"));
+                        tlut_offset, tlut == nullptr ? "absent" :
+                                     (tlut_zero ? "is ZERO" : "is not zero"));
             std::fflush(stdout);
           }
         }

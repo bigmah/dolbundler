@@ -96,6 +96,28 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
 
   FlushPipeline();
 
+  // DOLWEB_LOG_TEXTURE=1: every distinct TLUT-select write, because a paletted
+  // texture whose palette reads as zero is either a load that went to the wrong
+  // place or a *select* that names the wrong place, and only this says which.
+  // The register is 0x98+unit for units 0-3 and 0xb8+unit for 4-7.
+  {
+    static const bool log_settlut = std::getenv("DOLWEB_LOG_TEXTURE") != nullptr;
+    if (log_settlut &&
+        ((bp.address >= BPMEM_TX_SETTLUT && bp.address < BPMEM_TX_SETTLUT + 4) ||
+         (bp.address >= BPMEM_TX_SETTLUT_4 && bp.address < BPMEM_TX_SETTLUT_4 + 4)))
+    {
+      static std::set<u32> seen;
+      const u32 unit = bp.address < BPMEM_TX_SETTLUT_4 ? bp.address - BPMEM_TX_SETTLUT :
+                                                          bp.address - BPMEM_TX_SETTLUT_4 + 4;
+      if (seen.insert(bp.address << 24 | (bp.newvalue & 0xffffff)).second)
+      {
+        std::printf("[tex] TLUT select: unit %u <- %#08x (tmem %#06x, format %u)\n", unit,
+                    bp.newvalue, (bp.newvalue & 0x3ff) << 9, (bp.newvalue >> 10) & 3);
+        std::fflush(stdout);
+      }
+    }
+  }
+
   ((u32*)&bpmem)[bp.address] = bp.newvalue;
 
   switch (bp.address)
@@ -438,16 +460,19 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         static u32 zero_loads = 0;
         ++loads;
         if (zero)
-        {
           ++zero_loads;
-          const u64 key = (u64)tmem_addr << 32 | addr;
-          if (seen.insert(key).second)
-          {
-            std::printf("[tex] TLUT load is zero: tmem %#06x <- %#010x, %u bytes "
-                        "(%u of %u loads so far)\n",
-                        tmem_addr, addr, tmem_transfer_count, zero_loads, loads);
-            std::fflush(stdout);
-          }
+        // Every distinct destination, not only the empty ones: a texture whose
+        // palette is zero while no load ever arrives empty is reading a TMEM
+        // offset nothing was loaded to, and only the list of destinations shows
+        // that.
+        const u64 key = (u64)tmem_addr << 32 | addr;
+        if (seen.insert(key).second)
+        {
+          std::printf("[tex] TLUT load: tmem %#06x <- %#010x, %u bytes, %s "
+                      "(%u empty of %u loads)\n",
+                      tmem_addr, addr, tmem_transfer_count, zero ? "EMPTY" : "has data",
+                      zero_loads, loads);
+          std::fflush(stdout);
         }
       }
     }
