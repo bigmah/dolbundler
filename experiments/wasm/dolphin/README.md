@@ -178,6 +178,29 @@ the two open defects, and the habit that found today's.
   instead of compiling 1855 C files, so the browser build is **1258 ninja
   targets against the C backend's 3113**.
 
+  **Where it actually got to.** The module links, loads, and the chassis accepts
+  it -- the layout hash the chassis computes for wasm32 matches the one
+  `dolrecomp` published, which is the thing that was blocked:
+
+      [staticrecomp] module identity: backend=llvm
+                     target=wasm32-unknown-emscripten layout=4ea3df172a3fc06c
+      [staticrecomp] module loaded: entry=0x80003100 code_ranges=3 smc_ranges=129
+
+  Then it dies in the boot with `RangeError: Maximum call stack size exceeded`.
+  That is the LLVM backend's whole shape showing up: it emits per-function entry
+  points and *real calls* where the C backend returns through the dispatcher, so
+  guest recursion becomes host-stack recursion and runs out of the 8 MB
+  `-sSTACK_SIZE`. Two things to try, in order: raise `STACK_SIZE`, and cap
+  recursion depth the way the C backend's `DOLRECOMP_C_MAX_CALL_DEPTH` does --
+  the same knob, for the same reason, on a backend that never needed it on a
+  host with a real stack.
+
+  **And it is 213.8 MB against the C backend's 86.5 MB** -- 2.5x *larger*, not
+  smaller, which is the opposite of what this file used to predict. Whether -Os
+  or the pass pipeline closes that is unmeasured. On a phone whose heap already
+  reaches 614 MB, a 213 MB module is not shippable as it stands, so size is now
+  part of this route's cost rather than part of its promise.
+
   Historical note, kept because it bounded the work: what was left was exactly
   the CPUState layout, and it was precisely bounded.
   Compiling `core/native_state_layout.h` against the generated header with
