@@ -768,7 +768,7 @@ static bool FlatShadeWantsTevInputs()
   if (!mode)
     return false;
   const std::string_view m(mode);
-  return m == "tex" || m == "ras" || m == "konst";
+  return m == "tex" || m == "ras" || m == "konst" || m == "uv";
 }
 static void WriteFragmentDefinitions(APIType api_type, const ShaderHostConfig& host_config,
                                      const pixel_shader_uid_data* uid_data, ShaderCode& out);
@@ -1868,6 +1868,12 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
       out.Write("\tocol0 = float4(float3(frag_output.dbg_konst.rgb) / 255.0, 1.0);\n");
     else if (mode == "rawtex")
       out.Write("\tocol0 = float4(float3(frag_output.last_texture.rgb) / 255.0, 1.0);\n");
+    else if (mode == "uv")
+      // The last stage's texture coordinate, in 1/128ths of a texel, wrapped
+      // into a ramp. A surface whose texture samples black because its
+      // coordinates are wrong looks nothing like one whose texture is black.
+      out.Write("\tocol0 = float4(fract(float2(frag_output.dbg_uv.xy) / 128.0 / 64.0), "
+                "0.0, 1.0);\n");
     else
       out.Write("\tocol0 = float4(1.0, 0.0, 1.0, 1.0);\n");
     if (use_dual_source)
@@ -2077,6 +2083,7 @@ void WriteFragmentBody(APIType api_type, const ShaderHostConfig& host_config,
     out.Write("\tfrag_output.dbg_tex = textemp;\n");
     out.Write("\tfrag_output.dbg_ras = rastemp;\n");
     out.Write("\tfrag_output.dbg_konst = konsttemp;\n");
+    out.Write("\tfrag_output.dbg_uv = tevcoord;\n");
   }
   out.Write("\tfrag_output.main = prev;\n");
 }
@@ -2129,6 +2136,7 @@ static void WriteFragmentDefinitions(APIType api_type, const ShaderHostConfig& h
     out.Write("\tivec4 dbg_tex;\n");
     out.Write("\tivec4 dbg_ras;\n");
     out.Write("\tivec4 dbg_konst;\n");
+    out.Write("\tivec3 dbg_uv;\n");
   }
   out.Write("}};\n\n");
 

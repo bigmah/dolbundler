@@ -1282,7 +1282,30 @@ TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
   auto entry = GetTexture(g_ActiveConfig.iSafeTextureCache_ColorSamples, texture_info);
 
   if (!entry)
+  {
+    // DOLWEB_LOG_TEXTURE=1: nothing gets bound for this stage, so the draw
+    // samples whatever the unit held before -- which is how a surface renders
+    // black with every GL call succeeding. One line per distinct shape; a
+    // stream of them is the interesting case.
+    static const bool log = std::getenv("DOLWEB_LOG_TEXTURE") != nullptr;
+    if (log)
+    {
+      static std::set<u64> seen;
+      const u64 key = (u64)texture_info.GetRawWidth() << 40 |
+                      (u64)texture_info.GetRawHeight() << 24 |
+                      (u64)texture_info.GetLevelCount() << 16 |
+                      (u64)texture_info.GetTextureFormat() << 8 | (u64)stage;
+      if (seen.insert(key).second)
+      {
+        std::printf("[tex] no entry for stage %u: %ux%u levels=%u format=%u valid=%d\n", stage,
+                    texture_info.GetRawWidth(), texture_info.GetRawHeight(),
+                    texture_info.GetLevelCount(), (unsigned)texture_info.GetTextureFormat(),
+                    texture_info.IsDataValid() ? 1 : 0);
+        std::fflush(stdout);
+      }
+    }
     return nullptr;
+  }
 
   entry->frameCount = FRAMECOUNT_INVALID;
   if (entry->texture_info_name.empty() && g_ActiveConfig.bGraphicMods)
