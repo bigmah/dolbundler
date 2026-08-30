@@ -410,6 +410,29 @@ mean of 63.75 is zero RGB behind opaque alpha -- then every census agrees, and
 painting every texture bright makes the floor render because it makes even that
 one bright.
 
+**The binds are the same, and the mask is not it.** Over a run to guest 160,
+**no stage is sampled with nothing bound in either build** -- a shader reading
+an unbound unit gets (0,0,0,1) and nothing reports it, so that condition is now
+counted always rather than behind `DOLWEB_LOG_TEXTURE`, and it is zero on both
+sides. That also disposes of the one difference the bind census did show (native
+binding a base texture together with the stage-7 mask where Chrome bound the
+base texture alone): with no unbound sampling anywhere, that is `used_textures`
+differing, which means different draws, which means the two runs were in
+slightly different places. Scene divergence, not a defect.
+
+And `DOLWEB_PAINT_ONLY=0x002d6a40` paints that mask and nothing else: the floor
+stays black, 0.69-0.98. **The floor is showing its base texture on unit 0**, and
+that texture's decoded bytes are identical to the desktop's.
+
+**Cross-build savestates would settle the scene problem and do not work.**
+`DOLWEB_STATE` exists in the browser build and the state can be reached by
+dropping it in the served game tree, but loading the desktop's state wedges the
+emulator: 0 fps, ticks frozen at 2390069, pc parked at the entry point, and the
+module line comes back with an empty path. The recompiled module identity
+differs between a host dylib and a wasm module. So the two builds can be brought
+to the same guest *second* but not to the same guest *state*, and every picture
+comparison has to allow for that.
+
 **Every cross-build picture before this point was of a different scene**, and
 each mismatch was caught only by looking at the image rather than the numbers --
 a native flat-shade frame indoors read against a browser frame in the back
