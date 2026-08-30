@@ -444,8 +444,28 @@ anchoring fixes that.
 
 Cross-build savestates would have fixed it and do not work (below). So the only
 remaining way to compare a picture from each build is to anchor to an **event in
-the game** rather than to a time -- a level-load marker in the log, say -- or to
-sweep a range of guest seconds in both and pick a matching pair by eye.
+the game** rather than to a time.
+
+**`DOLWEB_MARK_TEX=all` does that, and the two builds turn out to be offset by a
+constant.** It records the guest time at which every texture is first bound. Run
+in both builds over the same timeline:
+
+| | |
+|---|---|
+| addresses bound, desktop | 367 |
+| addresses bound, Chrome | 367 |
+| shared | **367 -- every one** |
+| offset (Chrome minus desktop), textures first bound after guest 100 | **+8.16 s**, min +8.15, max +8.16 over 29 textures |
+
+The browser is a **fixed 8.16 seconds behind** in the level, with essentially no
+spread. So a desktop shot at guest T and a browser shot at T+8.16 are the same
+moment of the game, and `MODERNGEKKO_SHOT_AT` / `--shotAt` can finally produce a
+matched pair. (Over the whole run the median is the same 8.16 s but the spread is
+wide -- the menus drift about -- so take the offset from the level, which is
+where the defect is.)
+
+That both builds bind exactly the same 367 addresses is itself worth recording:
+it is the strongest evidence yet that the guest is doing identical work in both.
 
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.
