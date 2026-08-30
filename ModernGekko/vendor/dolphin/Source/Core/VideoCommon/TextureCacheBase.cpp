@@ -1687,7 +1687,33 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
         // TODO: We should check width/height/levels for EFB copies. I'm not sure what effect
         // checking width/height/levels would have.
         if (!texture_info.GetPaletteSize() || !g_backend_info.bSupportsPaletteConversion)
+        {
+          // A paletted EFB copy on a backend that cannot convert palettes is
+          // returned RAW, so its indices get sampled as colour. That looked
+          // like the whole defect -- Disney skate's floor is a C4 whose indices
+          // are all zero, which would come out black -- but it is NOT: this
+          // fires zero times over a full run with the CPU palette path forced,
+          // and the floor's texture 0x009a9e60 never reaches it. The floor is
+          // decoded from RAM, as the texture census said all along. Kept as a
+          // tripwire, since the path is real and silent when it does fire.
+          if (texture_info.GetPaletteSize() && !g_backend_info.bSupportsPaletteConversion)
+          {
+            static std::set<u32> unconverted_seen;
+            static u64 unconverted_total = 0;
+            ++unconverted_total;
+            if (unconverted_seen.insert(texture_info.GetRawAddress()).second)
+            {
+              std::printf("[palcopy] EFB copy %#010x %ux%u fmt=%u returned UNCONVERTED "
+                          "(no GPU palette conversion) -- %llu draws so far\n",
+                          texture_info.GetRawAddress(), texture_info.GetRawWidth(),
+                          texture_info.GetRawHeight(),
+                          (unsigned)texture_info.GetTextureFormat(),
+                          (unsigned long long)unconverted_total);
+              std::fflush(stdout);
+            }
+          }
           return entry;
+        }
 
         // Note that we found an unconverted EFB copy, then continue.  We'll
         // perform the conversion later.  Currently, we only convert EFB copies to

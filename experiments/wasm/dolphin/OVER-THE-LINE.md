@@ -583,10 +583,27 @@ inside a palette that is not all zeros. So the CPU decode may be doing exactly
 the right thing with the palette it is given, and the difference is that the GPU
 path applies a *different* palette at draw time.
 
+**Not the unconverted EFB copy either.** `GetTexture`'s EFB-copy branch returns
+a paletted copy *raw* when the backend cannot convert palettes --
+`if (!GetPaletteSize() || !bSupportsPaletteConversion) return entry;` -- which
+would sample C4 indices as colour and come out black. It fires **zero times**
+over a full run with the CPU path forced, and `0x009a9e60` never reaches it. The
+floor is decoded from RAM, exactly as the census said. A tripwire is left there.
+
 **Where to pick this up.** The defect is now reproducible on the desktop with one
 environment variable, `MODERNGEKKO_NO_PALETTE_CONVERSION=1` **from boot**, which
 makes it debuggable natively at desktop speed instead of through a 4.5-minute
-browser run. The next question is concrete: for this draw, which TLUT does the
+browser run.
+
+The narrowest open question: the floor is a RAM C4 with all-zero indices and a
+*populated* 32-byte palette at TMEM 0x40000, and the CPU decode turns it black
+while the desktop turns it into wood. Both read the palette through
+`texture_info.GetTlutAddress()`. So either entry 0 of that palette differs
+between the two, or the desktop is not using the CPU decode at all --
+`bSupportsGPUTextureDecoding` requires palette conversion, so the desktop very
+likely decodes this texture **on the GPU**, sampling the TLUT from a texel
+buffer, while the browser decodes it on the CPU. Comparing the 32 palette bytes
+each path actually reads, for this texture, is the next measurement. The next question is concrete: for this draw, which TLUT does the
 GPU path apply at draw time, and how does it differ from the one the CPU path
 baked in? `ApplyPaletteToEntry` and `texTlut` at the moment of the draw are where
 to look.
