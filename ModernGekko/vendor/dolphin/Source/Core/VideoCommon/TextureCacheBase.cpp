@@ -1106,7 +1106,14 @@ void TextureCacheBase::BindTextures(BitSet32 used_textures,
         {
           if (!used_textures[i] || !m_bound_textures[i])
             continue;
-          key += fmt::format("{}:{:#010x} ", i, m_bound_textures[i]->addr);
+          // native_width/height and not just the address: these are what reach
+          // the shader as texdims, and the shader divides the texture
+          // coordinate by them. If they differ between builds the UV scale
+          // differs, which is exactly the "floor tiles on one build and is a
+          // single stretched gradient on the other" that FLAT_SHADE=uv shows.
+          key += fmt::format("{}:{:#010x}({}x{}) ", i, m_bound_textures[i]->addr,
+                             m_bound_textures[i]->native_width,
+                             m_bound_textures[i]->native_height);
         }
         static std::set<std::string> seen_binds;
         if (!key.empty() && seen_binds.insert(key).second)

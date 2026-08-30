@@ -424,6 +424,37 @@ And `DOLWEB_PAINT_ONLY=0x002d6a40` paints that mask and nothing else: the floor
 stays black, 0.69-0.98. **The floor is showing its base texture on unit 0**, and
 that texture's decoded bytes are identical to the desktop's.
 
+### The floor's texture coordinates do not tile in the browser
+
+`MODERNGEKKO_FLAT_SHADE=uv` in both builds, in the level:
+
+- **Desktop**: the floor is covered in *tiled* ramps -- the coordinate wrapping
+  many times across the surface, bands receding to the horizon.
+- **Browser**: the floor is **one smooth gradient**, no repetition anywhere.
+
+The floor is drawn, its coordinates vary across it (the frame is not black:
+0.014-0.141 against 0.84-0.98 unpainted), and they simply do not wrap. One copy
+of the texture is stretched over the whole surface instead of tiling.
+
+**This is the first hypothesis that fits every observation at once.** If the
+coordinate range collapses, every pixel of the floor samples nearly the same
+texel; if that texel is dark, the floor is black. The source bytes are
+identical, the decoded bytes are identical, the bindings are identical and the
+shader is identical -- because none of those is wrong. And painting a texture
+flat makes the floor render for the same reason it hid the answer for so long:
+**a uniform colour is invariant to the texture coordinate**, so it looks like a
+fix whatever the coordinates do.
+
+Note this also retires the older "texture coordinates -- `=uv` shows a clean
+tiled ramp on the black floor" elimination in this file. It shows a clean ramp;
+it does not show a *tiled* one, and the tiling is the whole point.
+
+The shader normalises by texture size --
+`float size_s = float(texdim[texmap].x * 128)` -- and `texdims` is set from
+`entry->native_width/height` in `BindTextures`. If that differs between the
+builds, the coordinate scale differs and the tiling collapses exactly as seen,
+so the bind census now carries the native dimensions alongside the address.
+
 ### A separate defect found on the way: GPU readback traps the wasm build
 
 `OGLStagingTexture::CopyFromTexture` prefers `glGetTextureSubImage` when
