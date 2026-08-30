@@ -179,6 +179,56 @@ did establish, and what survives:
   without the LAN certificate. It is a correctness proxy, not a speed one: the
   GPU underneath is the Mac's.
 
+### The CPU half, profiled at last
+
+**The emulator runs on a worker**, so `Profiler.start` on the page session
+samples an idle main thread -- the first profile came back 99.9% `(idle)`, a
+perfectly accurate measurement of nothing. The driver attaches to worker targets
+now (`--profile g130:25`), and the build keeps its wasm name section with
+`DOLWEB_PROFILING_FUNCS=ON`; without it every frame reads `wasm-function[19893]`.
+
+Ranking targets by time *not* spent in futex/condvar waits finds the emulator
+thread. In gameplay, Null backend, throttle off:
+
+| | |
+|---|---|
+| `fma` | **8.4%** -- the hottest single function |
+| recompiled guest chunks (`func_*`) | ~30%+ spread over many |
+| `PowerPC::RunLoop` + `chassis_dispatch` | 8.1% |
+| `ppc_ps_madds0/1`, `ppc_fmuls`, `dolrecomp_f32_from_bits` | ~4.8% |
+| `TexDecoder_DecodeXFB` | 2.4% |
+| `VertexLoader::RunVertices` | 1.9% |
+
+**`fma` being top is a wasm-specific cost.** PowerPC's `fmadd`/`ps_madd` round
+once, so `cpu_interpreter_float.c` emulates them with C's `fma()` -- and
+WebAssembly has no FMA instruction, so that is musl's software implementation on
+every call. Roughly 13% of the thread is floating-point emulation once the
+`ppc_*` helpers are counted.
+
+**And it corrects a long-standing line in this file.** "About 92% of a Chrome
+frame is in VideoCommon" was an OpenGL-path statement inferred from timing GL
+calls. With the renderer off, VideoCommon is about **4%** of the CPU thread
+(`TexDecoder_DecodeXFB` plus `VertexLoader::RunVertices`). The CPU half is guest
+code and float emulation, not the video backend.
+
+### Measuring speed at all requires turning the throttle off
+
+`MODERNGEKKO_EMULATION_SPEED=0` is pushed by the page **only in `?ab=` mode**.
+Any `drive-dolphin.mjs` run without it is throttled to 100%, every number
+compresses toward it, and -- as the comment at that line already warns -- "a
+throttled build with headroom is indistinguishable from one with none". Pass it
+explicitly with `--env`.
+
+Current numbers, Chrome, gameplay window (guest 125-175 s), throttle off:
+
+| | |
+|---|---|
+| Null (CPU only) | **99%** |
+| OpenGL | **75%** |
+
+So the CPU is the wall and the renderer costs a further ~24 points. Both halves
+still need work, but the CPU is the one that caps the result.
+
 ## 2. The black ground -- FIXED
 
 **A paletted EFB copy was unusable without GPU palette conversion, and WebGL2

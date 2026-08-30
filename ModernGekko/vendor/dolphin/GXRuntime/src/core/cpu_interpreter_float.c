@@ -283,6 +283,18 @@ f64 force_25_bit(f64 value) {
     return f64_value(bits);
 }
 
+/* DOLRECOMP_MEASURE_FAST_FMA replaces the fused multiply-add with a plain
+   multiply and add. It is NOT correct -- PowerPC's fmadd rounds once and this
+   rounds twice -- and exists only to put a number on what the fused path costs.
+   WebAssembly has no FMA instruction, so every fma() here is musl's software
+   implementation, and a profile of the emulator thread in gameplay puts it at
+   8.4%: the single hottest function in the build.
+   If the measurement justifies it, the fix is a fast *exact* fma (Dekker
+   two-product with a slow-path fallback), not this. */
+#ifdef DOLRECOMP_MEASURE_FAST_FMA
+#define fma(a, b, c) ((a) * (b) + (c))
+#endif
+
 bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
              bool subtract, bool negative, f64* output) {
     f64 addend = subtract ? -b : b;
