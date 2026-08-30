@@ -2120,9 +2120,47 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
         // tell neighbouring textures apart.
         const u32 a = texture_info.GetRawAddress();
         const u32 h = a * 2654435761u;
-        const u8 r = (u8)(((h >> 24) & 0xff) * 120 / 255);
-        const u8 g = (u8)(((h >> 16) & 0xff) * 120 / 255);
-        const u8 b = (u8)(((h >> 8) & 0xff) * 120 / 255);
+        u8 r, g, b;
+        // DOLWEB_PAINT_HUE=<seed> paints fully saturated hues instead of an
+        // arbitrary RGB triple. Lighting multiplies the three channels by
+        // roughly the same scalar, which destroys brightness but *preserves
+        // hue*, so the identity survives a lit surface -- which an arbitrary
+        // triple does not, and that is why matching a painted floor back to a
+        // texture kept failing. 60 hues, 6 degrees apart, so two runs with
+        // different seeds identify a texture uniquely out of a few hundred.
+        static const char* const hue_env = std::getenv("DOLWEB_PAINT_HUE");
+        if (hue_env)
+        {
+          const u32 seed = (u32)std::strtoul(hue_env, nullptr, 0);
+          const u32 slot = ((a * 2654435761u) ^ (seed * 2246822519u)) % 60u;
+          const double deg = slot * 6.0;
+          const double s = 1.0, v = 110.0;
+          const double c = v * s, x = c * (1.0 - std::fabs(std::fmod(deg / 60.0, 2.0) - 1.0));
+          double rr = 0, gg = 0, bb = 0;
+          switch ((int)(deg / 60.0)) {
+            case 0: rr = c; gg = x; break;
+            case 1: rr = x; gg = c; break;
+            case 2: gg = c; bb = x; break;
+            case 3: gg = x; bb = c; break;
+            case 4: rr = x; bb = c; break;
+            default: rr = c; bb = x; break;
+          }
+          r = (u8)rr; g = (u8)gg; b = (u8)bb;
+          static std::set<u32> hue_seen;
+          if (hue_seen.insert(a).second)
+          {
+            std::printf("[hue] addr=%#010x slot=%u deg=%.0f rgb(%u,%u,%u) %ux%u fmt=%u\n",
+                        a, slot, deg, r, g, b, width, height,
+                        (unsigned)texture_info.GetTextureFormat());
+            std::fflush(stdout);
+          }
+        }
+        else
+        {
+          r = (u8)(((h >> 24) & 0xff) * 120 / 255);
+          g = (u8)(((h >> 16) & 0xff) * 120 / 255);
+          b = (u8)(((h >> 8) & 0xff) * 120 / 255);
+        }
         for (size_t i = 0; i + 3 < decoded_texture_size; i += 4)
         {
           dst_buffer[i] = r;
