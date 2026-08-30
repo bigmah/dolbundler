@@ -484,10 +484,19 @@ the desktop value is brighter than any colour the paint can emit (the cap is
 cameras are looking at different patches of floor. The nearest candidates are
 4000 and 107 squared-distance away respectively. **Suggestive, not evidence.**
 
-To settle it, paint needs to be readable independently of lighting -- a
-per-texture *pattern* rather than a flat colour, or `DOLWEB_PAINT_ONLY` walked
-over the handful of large CMPR candidates until the floor changes. The latter is
-about six runs and needs no new code.
+**Saturated hues were the obvious fix and they do not work either.** A *scalar*
+multiply preserves hue, so `DOLWEB_PAINT_HUE=<seed>` paints 60 fully saturated
+hues six degrees apart at fixed value, and the identity should survive being
+lit. It does not: the browser's floor comes back at 108 degrees, a slot no
+texture was painted with. **The lighting here is per-channel** -- coloured
+vertex lighting and TEV konst -- so it shifts hue as well as brightness. No
+colour-based identification can work through it.
+
+**`DOLWEB_PAINT_RANGE=lo:hi` is the method that does**, because it asks a
+different question. Paint only the textures in an address window and measure
+whether the floor *stopped being black* -- a yes/no the near-black fraction
+already answers, with no colour matching anywhere. Bisecting the 98 addresses
+bound in the level takes about seven runs.
 
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.

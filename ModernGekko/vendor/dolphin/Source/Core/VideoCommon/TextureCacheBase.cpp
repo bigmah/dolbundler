@@ -2089,10 +2089,47 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
       // painting one says whether *that* texture is what a surface is showing.
       // DOLWEB_PAINT_EXCEPT is the complement, for the same question asked the
       // other way round.
+      // DOLWEB_PAINT_RANGE=lo:hi paints only textures whose guest address falls
+      // in [lo,hi). Bisecting with it is the one identification method here
+      // that is immune to lighting: the question is not "what colour is the
+      // floor" but "did the floor stop being black", which is a yes/no the
+      // black-fraction metric already answers.
+      //
+      // Both colour-based attempts failed, for different reasons worth keeping.
+      // A flat identity colour cannot be matched back because the lighting
+      // multiplier is unknown and above 1. Saturated hues were meant to fix
+      // that, since a *scalar* multiply preserves hue -- but the lighting here
+      // is per-channel (coloured vertex lighting and TEV konst), so it shifts
+      // hue too: the floor came back at 108 degrees, a slot no texture was
+      // painted with.
+      static const char* const paint_range = std::getenv("DOLWEB_PAINT_RANGE");
       static const char* const paint_only = std::getenv("DOLWEB_PAINT_ONLY");
       static const char* const paint_except = std::getenv("DOLWEB_PAINT_EXCEPT");
       static const bool paint_addr = std::getenv("DOLWEB_PAINT_BY_ADDRESS") != nullptr ||
-                                     paint_only != nullptr || paint_except != nullptr;
+                                     paint_only != nullptr || paint_except != nullptr ||
+                                     paint_range != nullptr;
+      bool range_excluded = false;
+      if (paint_range)
+      {
+        static u32 range_lo = 0, range_hi = 0;
+        static bool range_parsed = false;
+        if (!range_parsed)
+        {
+          range_parsed = true;
+          const char* colon = std::strchr(paint_range, ':');
+          range_lo = (u32)std::strtoul(paint_range, nullptr, 0);
+          range_hi = colon ? (u32)std::strtoul(colon + 1, nullptr, 0) : 0xffffffffu;
+          std::printf("[paint] range %#010x .. %#010x\n", range_lo, range_hi);
+          std::fflush(stdout);
+        }
+        const u32 a = texture_info.GetRawAddress();
+        range_excluded = !(a >= range_lo && a < range_hi);
+      }
+      if (range_excluded)
+      {
+        // outside the bisection window; leave it real
+      }
+      else
       if (paint_addr && paint_only &&
           texture_info.GetRawAddress() !=
               (u32)std::strtoul(paint_only, nullptr, 0))
