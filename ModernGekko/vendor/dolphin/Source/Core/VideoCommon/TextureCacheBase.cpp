@@ -1391,13 +1391,15 @@ TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
   // decode survives for the whole level: the floor is black in the browser and
   // correct everywhere else. Take the slow path for paletted textures when the
   // palette is ours to apply.
-  const bool cpu_palette_path = !g_backend_info.bSupportsPaletteConversion;
-  bool paletted = false;
-  if (cpu_palette_path && !force_reload && m_bound_textures[stage])
-    paletted = TextureInfo::FromStage(stage).GetPaletteSize().has_value();
-
+  // Taking the slow path for paletted textures here was tried and does NOT fix
+  // it: forcing a re-decode on every bind leaves the floor black (0.966 against
+  // 0.967 natively with the CPU path forced, and 0.65-0.86 against 0.89-0.96 in
+  // the browser, which is scene variation rather than a fix). So the entry is
+  // not stale -- re-decoding produces the same black. The palette the decode
+  // reads is the wrong one, not an old one, and that is a different bug.
+  //
   // if this stage was not invalidated by changes to texture registers, keep the current texture
-  if (!force_reload && !paletted && TMEM::IsValid(stage) && m_bound_textures[stage])
+  if (!force_reload && TMEM::IsValid(stage) && m_bound_textures[stage])
   {
     TCacheEntry* entry = m_bound_textures[stage].get();
     // If the TMEM configuration is such that this texture is more or less guaranteed to still

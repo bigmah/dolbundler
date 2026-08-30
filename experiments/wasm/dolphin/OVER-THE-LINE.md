@@ -565,8 +565,31 @@ texture was already cached with a correct palette -- the ordering that causes
 the bug had happened long before the state was saved. Forcing a capability off
 does not reproduce a defect that depends on when something was first decoded.
 
-**The fix** is to take the slow path for paletted textures when the palette is
-ours to apply -- `!g_backend_info.bSupportsPaletteConversion`.
+**The obvious fix does not work, and that is informative.** Taking the slow path
+for paletted textures when `!g_backend_info.bSupportsPaletteConversion` -- so
+every bind re-decodes rather than reusing a cached entry -- leaves the floor
+black: **0.966** natively with the CPU path forced against 0.967 without it, and
+0.65-0.86 in the browser against 0.89-0.96, which is scene variation rather than
+a fix. Reverted.
+
+So the cached entry is not stale. Re-decoding produces the same black, which
+means **the palette the decode reads is the wrong one, not an old one.**
+
+And the browser's log already says the palette it read is *not empty*:
+`tlut 32 bytes at tmem 0x40000 is not zero`. A 32-byte C4 palette with data,
+read from the slot the game actually loaded. With every index zero, the texel is
+palette **entry 0** -- and that entry can perfectly well be transparent black
+inside a palette that is not all zeros. So the CPU decode may be doing exactly
+the right thing with the palette it is given, and the difference is that the GPU
+path applies a *different* palette at draw time.
+
+**Where to pick this up.** The defect is now reproducible on the desktop with one
+environment variable, `MODERNGEKKO_NO_PALETTE_CONVERSION=1` **from boot**, which
+makes it debuggable natively at desktop speed instead of through a 4.5-minute
+browser run. The next question is concrete: for this draw, which TLUT does the
+GPU path apply at draw time, and how does it differ from the one the CPU path
+baked in? `ApplyPaletteToEntry` and `texTlut` at the moment of the draw are where
+to look.
 
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.
