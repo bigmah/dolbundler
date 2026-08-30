@@ -1130,6 +1130,39 @@ void TextureCacheBase::BindTextures(BitSet32 used_textures,
       }
     }
   }
+  // DOLWEB_MARK_TEX=0x00a8a5c0 prints the guest time at which that texture is
+  // first bound, in both builds.
+  //
+  // It exists because the two builds cannot be aligned by guest time: the game
+  // streams from the disc and waits on it in guest time, the browser reads over
+  // HTTP and the desktop off local disk, so at the same guest second they are in
+  // different parts of the game. Anchoring the inputs does not help. What does
+  // is anchoring to an event *inside* the game, and the first bind of a
+  // level-specific texture is one both builds reach -- the census established
+  // that they bind the same addresses. Take the difference of the two marks and
+  // it is the offset to apply to every screenshot time.
+  if (const char* mark = std::getenv("DOLWEB_MARK_TEX"))
+  {
+    static const u32 want = (u32)std::strtoul(mark, nullptr, 0);
+    static bool marked = false;
+    if (!marked)
+    {
+      for (u32 i = 0; i < m_bound_textures.size(); i++)
+      {
+        if (!used_textures[i] || !m_bound_textures[i] ||
+            m_bound_textures[i]->addr != want)
+          continue;
+        marked = true;
+        const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+        const double now =
+            hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
+        std::printf("[mark] %#010x first bound at guest %.2f s\n", want, now);
+        std::fflush(stdout);
+        break;
+      }
+    }
+  }
+
   // A stage the shader samples but which has no texture bound reads (0,0,0,1)
   // -- black -- and nothing anywhere reports it. The pixel shader is generated
   // from the same BP state that produces used_textures, so it *will* sample
