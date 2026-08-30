@@ -194,6 +194,13 @@ target_link_options(dolweb PRIVATE
   # exist in the GL library when WebGL2 is on.
   -sMIN_WEBGL_VERSION=2
   -sMAX_WEBGL_VERSION=2
+  # Emscripten's GL bindings record an error code on every call so glGetError
+  # can answer later. Nothing here reads it: ReportGLErrors() is gated behind
+  # DOLWEB_GL_ERRORS and off by default. Every GL call in this build is also
+  # proxied to the browser's main thread, so per-call bookkeeping is paid twice
+  # over. Turn it off; a build that wants the instrument can set
+  # DOLWEB_GL_TRACK_ERRORS=1 and get glGetError back.
+  "$<$<NOT:$<BOOL:${DOLWEB_GL_TRACK_ERRORS}>>:-sGL_TRACK_ERRORS=0>"
   -sFULL_ES3=1
   -sGL_ENABLE_GET_PROC_ADDRESS=1
 )

@@ -361,10 +361,27 @@ int main(int argc, char** argv)
 #else
   config.audio.backend = "No Audio Output";
 #endif
-  // One thread does the CPU and the GPU unless asked otherwise. Android and iOS
-  // both turn the extra thread on because it pays there; in a browser it is
-  // worth measuring rather than assuming.
-  if (std::getenv("DOLWEB_CPU_THREAD"))
+  // The GPU gets its own thread, and in this build that is the single largest
+  // performance decision. Measured 2026-08-30 in gameplay, throttle off:
+  //
+  //   Chrome            82.9% single core  ->  115.3% dual core
+  //   simulator Safari                         96% median, 101% peak
+  //
+  // Why it is worth so much here and not on a desktop: every GL call is proxied
+  // to the browser's main thread, so on one thread the emulated CPU blocks on a
+  // cross-thread round trip per call -- a profile shows it waiting 38% of the
+  // time while the main thread sits 93% idle. A second thread absorbs that
+  // latency and the CPU runs ahead. It is the renderer's cost recovered, and it
+  // is why the earlier "dual core is an 11% loss" reading did not survive: that
+  // was measured in the menus, where the renderer is nearly free and the extra
+  // thread only costs synchronisation.
+  //
+  // DOLWEB_CPU_THREAD=0 turns it off. Dolphin's dual core changes when the CPU
+  // and GPU see each other's writes, so a title that misbehaves is worth trying
+  // single-threaded before assuming the defect is elsewhere.
+  if (const char* cpu_thread = std::getenv("DOLWEB_CPU_THREAD"))
+    config.cpu_thread = (cpu_thread[0] != '0' && cpu_thread[0] != '\0');
+  else
     config.cpu_thread = true;
   // Two builds only line up if they are measured in the same scene, and a boot
   // is twelve seconds of logos followed by whatever the attract loop is doing
