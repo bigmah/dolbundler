@@ -93,10 +93,142 @@ function log(text) {
   console.log(text);
   if (ACTS.length) actsWatch(text);
   if (AB) abWatch(text);
+  bootWatch(text);
+}
+
+// Narrates the boot on the overlay and clears it on the first frame the game
+// actually draws.
+//
+// "The first frame" is fps > 0 in the [perf] line, not the emulator starting:
+// the console boots, loads and plays its logos for a long time before anything
+// reaches the canvas, and hiding the overlay when the runtime comes up would
+// hand the user back the black screen this exists to explain.
+let bootHz = 0;
+let bootDone = false;
+function bootWatch(text) {
+  if (bootDone) return;
+  const clk = /guest clock (\d+) Hz/.exec(text);
+  if (clk) { bootHz = +clk[1]; return; }
+  if (text.includes('mounted /game from')) {
+    const n = /\((\d+) files\)/.exec(text);
+    loading('Booting the game', n ? `disc mounted, ${n[1]} files` : 'disc mounted');
+    return;
+  }
+  if (text.includes('embedded module attached')) {
+    loading('Booting the game', 'recompiled code attached');
+    return;
+  }
+  if (text.includes('runtime created; running')) {
+    loading('Booting the game', 'starting the console');
+    return;
+  }
+  const m = /^\[perf\]\s+([\d.]+) fps.*?ticks=(\d+)/.exec(text);
+  if (!m) return;
+  const fps = parseFloat(m[1]);
+  if (fps > 0) {
+    bootDone = true;
+    loading(null);
+    return;
+  }
+  const secs = bootHz ? (+m[2] / bootHz) : 0;
+  // The Null backend never draws, so "wait for a frame" would leave the overlay
+  // up for the whole run. Give up after a while and say so rather than sit
+  // there: by then the emulator is plainly working and the picture is the one
+  // thing that is not coming.
+  if (secs > 25) {
+    bootDone = true;
+    loading(null);
+    return;
+  }
+  loading('Booting the game',
+          secs >= 1 ? `${secs.toFixed(0)}s in, no picture yet`
+                    : 'starting the console');
 }
 
 function status(text) {
   statusEl.textContent = text;
+}
+
+// --- the loading overlay -------------------------------------------------
+// 92 MB of WebAssembly, then a disc streamed over the network, then a boot
+// sequence that is legitimately black for a while. On a phone that is a long
+// time staring at nothing with no way to tell a slow download from a hang.
+const loadingEl = document.getElementById('loading');
+const loadingTitle = document.getElementById('loading-title');
+const loadingFill = document.getElementById('loading-fill');
+const loadingDetail = document.getElementById('loading-detail');
+
+// frac === undefined means "no measurable total": sweep rather than invent a
+// percentage.
+function loading(title, detail = '', frac) {
+  if (!loadingEl) return;
+  if (title === null) { loadingEl.classList.remove('on'); return; }
+  loadingEl.classList.add('on');
+  loadingTitle.textContent = title;
+  loadingDetail.textContent = detail;
+  if (frac === undefined) {
+    loadingFill.classList.add('sweep');
+  } else {
+    loadingFill.classList.remove('sweep');
+    loadingFill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
+  }
+}
+
+const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+
+// Instantiate the module from a counted stream.
+//
+// Streaming rather than fetching to a buffer first: the binary is 92 MB and the
+// heap already reaches ~614 MB in a level, which is close enough to what iOS
+// will reclaim a tab for that holding a second copy is a bad trade for a
+// progress bar. A TransformStream counts the bytes on their way through, so the
+// download reports real progress and is still handed straight to
+// WebAssembly.instantiateStreaming.
+function instantiateCounted(imports, receive) {
+  (async () => {
+    const url = 'dolweb.wasm';
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const total = +res.headers.get('content-length') || 0;
+      let got = 0;
+      let painted = 0;
+      const counted = new Response(
+        res.body.pipeThrough(new TransformStream({
+          transform(chunk, controller) {
+            got += chunk.byteLength;
+            const now = performance.now();
+            if (now - painted > 80) {
+              painted = now;
+              loading('Downloading emulator',
+                      total ? `${mb(got)} of ${mb(total)}` : mb(got),
+                      total ? got / total : undefined);
+            }
+            controller.enqueue(chunk);
+          },
+        })),
+        { headers: { 'Content-Type': 'application/wasm' } });
+      loading('Downloading emulator', total ? `${mb(total)}` : '', total ? 1 : undefined);
+      const { instance, module } = await WebAssembly.instantiateStreaming(counted, imports);
+      loading('Linking module', 'this takes a moment on a phone');
+      receive(instance, module);
+    } catch (err) {
+      // Any failure here falls back to letting emscripten load it the ordinary
+      // way. A progress bar must never be the reason the emulator will not run.
+      log(`[page] streaming instantiate failed (${err}); falling back`);
+      loading('Downloading emulator', 'progress unavailable');
+      try {
+        const res = await fetch(url);
+        const bytes = await res.arrayBuffer();
+        const { instance, module } = await WebAssembly.instantiate(bytes, imports);
+        receive(instance, module);
+      } catch (err2) {
+        log(`[page] module load failed: ${err2}`);
+        loading('Failed to load', String(err2));
+      }
+    }
+  })();
+  return {};  // async: receive() is called above
 }
 
 function report(payload) {
@@ -495,11 +627,13 @@ async function boot() {
     log('[page] no WebGL2: the OpenGL backend cannot start. Try ?backend=Null.');
   startBtn.disabled = true;
   status('loading module');
+  loading('Downloading emulator', 'connecting');
 
   if (!crossOriginIsolated) {
     log('[page] crossOriginIsolated is false: SharedArrayBuffer is unavailable ' +
         'and the emulator cannot start its threads. Serve with COOP/COEP.');
     status('not cross-origin isolated');
+    loading('Cannot start', 'not cross-origin isolated: SharedArrayBuffer is unavailable');
     report({ phase: 'not-isolated' });
     return;
   }
@@ -516,6 +650,7 @@ async function boot() {
     print: log,
     printErr: log,
     onTitle: (t) => { document.title = t; status(t); },
+    instantiateWasm: instantiateCounted,
   });
   heapBytes = () => module.HEAPU8.length;
   report({ phase: 'module-created', heapMB: +(module.HEAPU8.length / 1048576).toFixed(1) });
@@ -529,6 +664,10 @@ async function boot() {
   window.cat = module.cwrap('dolweb_cat', null, ['string']);
   window.cwrapSetControl = setControl;
   status('running');
+  // Not hidden yet: the emulator is up but the game has not drawn anything, and
+  // the boot sequence is black for a good while. bootWatch() takes it from here
+  // and clears the overlay on the first frame the game actually renders.
+  loading('Booting the game', 'mounting the disc');
 }
 
 startBtn.onclick = boot;

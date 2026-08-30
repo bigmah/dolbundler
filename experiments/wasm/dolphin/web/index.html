@@ -38,6 +38,37 @@
   }
   #log.hidden { display: none; }
 
+  /* The emulator is 92 MB of WebAssembly and the game streams off the disc
+     after that, so there is a long stretch where a phone shows nothing at all.
+     Without this the only honest reading of a black screen is "no idea whether
+     it is working". */
+  #loading {
+    position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px;
+    background: #000; text-align: center; padding: 0 24px;
+  }
+  #loading.on { display: flex; }
+  #loading-title { font-size: 14px; letter-spacing: .02em; }
+  #loading-track {
+    width: min(72vw, 340px); height: 6px; background: #1d232b;
+    border-radius: 3px; overflow: hidden;
+  }
+  #loading-fill {
+    height: 100%; width: 0; background: #4a90d9; border-radius: 3px;
+    transition: width .12s linear;
+  }
+  /* Some phases have no measurable total -- linking the module, waiting for the
+     game to reach a frame -- so the bar sweeps instead of lying about a
+     percentage. */
+  #loading-fill.sweep {
+    width: 32%; transition: none;
+    animation: loading-sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes loading-sweep {
+    0% { margin-left: -32%; } 100% { margin-left: 100%; }
+  }
+  #loading-detail { opacity: .55; font-size: 11px; min-height: 1.4em; }
+
   /* --- the on-screen pad -------------------------------------------------
      Three clusters, each a box that owns its own area: shoulders, the left
      hand (stick over d-pad) and the face buttons. Everything inside a cluster
@@ -144,7 +175,13 @@
   }
 </style>
 
-<div id="stage"><canvas id="canvas" width="640" height="528"></canvas></div>
+<div id="stage"><canvas id="canvas" width="640" height="528"></canvas>
+  <div id="loading">
+    <div id="loading-title">Starting</div>
+    <div id="loading-track"><div id="loading-fill"></div></div>
+    <div id="loading-detail"></div>
+  </div>
+</div>
 <!-- A canvas for the backend's capability probe, and nothing else. A browser
      refuses to transfer a canvas that has ever had a rendering context, and the
      emulation thread has to be handed the real one. -->
