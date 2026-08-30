@@ -289,6 +289,51 @@ So the ~14% is real and unclaimable until someone makes WebKit present a
 transferred canvas. The 24 points remain the biggest single lever, and the route
 to them is not this.
 
+### The largest win measured, and why it is not the default
+
+**Giving the GPU its own thread.** Gameplay, throttle off, frames actually
+rendered:
+
+| | fps median | range |
+|---|---|---|
+| single core | **45.8** | 36-65 |
+| dual core | **67.3** | 59-72 |
+
+That is ~47% more frames. It is the renderer's 24 points recovered: every GL call
+is proxied to the browser's main thread, so on one thread the emulated CPU
+blocks on a round trip per call -- the profile has it waiting 38% while the main
+thread sits 93% idle. A second thread absorbs the latency.
+
+It also retires "dual core is an 11% loss": that was measured in the **menus**,
+where the renderer is nearly free and the extra thread only costs
+synchronisation. In gameplay the renderer is the thing being waited on.
+
+**And it is opt-in, because in WebKit it intermittently renders nothing.** Same
+build, two consecutive simulator runs:
+
+| run | shots showing a picture |
+|---|---|
+| first | **0 of 10** -- 200 s of black, guest clock at 100%, 0.0 fps |
+| second | 10 of 10 |
+
+Chrome never showed it. That is a coin flip on the target device and no frame
+rate is worth it. `DOLWEB_CPU_THREAD=1` turns it on for measurement.
+
+It is the same shape as the OffscreenCanvas failure -- WebKit, threads and a
+canvas -- and understanding that one probably explains both. **This is the
+highest-value open thread in the file.**
+
+**Use frames rendered, not guest time, to judge dual core.** Guest seconds per
+wall second reads 82.9% -> 100-115%, but with a second thread the CPU runs ahead
+of the GPU, so that metric flatters it. The fps figures above are the honest
+ones.
+
+**And change one thing at a time.** `-sGL_TRACK_ERRORS=0` (emscripten records a
+GL error code per call; nothing here reads it) was committed together with the
+dual-core default, and the combined build came back with the guest clock racing
+at 3700%, 2.2 fps and a black screen. Reverting it and rebuilding with dual core
+alone was fine -- so the GL flag was the fault -- but attributing it cost a run.
+
 ### Measuring speed at all requires turning the throttle off
 
 `MODERNGEKKO_EMULATION_SPEED=0` is pushed by the page **only in `?ab=` mode**.

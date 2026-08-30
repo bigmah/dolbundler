@@ -361,11 +361,16 @@ int main(int argc, char** argv)
 #else
   config.audio.backend = "No Audio Output";
 #endif
-  // The GPU gets its own thread, and in this build that is the single largest
-  // performance decision. Measured 2026-08-30 in gameplay, throttle off:
+  // The GPU can have its own thread, and it is the single largest performance
+  // win measured in this build -- and it is NOT the default. Gameplay,
+  // throttle off, frames actually rendered:
   //
-  //   Chrome            82.9% single core  ->  115.3% dual core
-  //   simulator Safari                         96% median, 101% peak
+  //   single core   45.8 fps median      dual core   67.3 fps median
+  //
+  //
+  // (Guest-seconds-per-wall-second reads 82.9% -> 100-115%, but with dual core
+  // the CPU thread runs ahead of the GPU, so that metric flatters it. Frames
+  // rendered is the honest one.)
   //
   // Why it is worth so much here and not on a desktop: every GL call is proxied
   // to the browser's main thread, so on one thread the emulated CPU blocks on a
@@ -376,13 +381,19 @@ int main(int argc, char** argv)
   // was measured in the menus, where the renderer is nearly free and the extra
   // thread only costs synchronisation.
   //
-  // DOLWEB_CPU_THREAD=0 turns it off. Dolphin's dual core changes when the CPU
-  // and GPU see each other's writes, so a title that misbehaves is worth trying
-  // single-threaded before assuming the defect is elsewhere.
+  // **It is opt-in anyway, because in WebKit it intermittently renders nothing
+  // at all.** Same build, two consecutive simulator runs: one drew a picture in
+  // 0 of 10 screenshots across 200 seconds -- guest clock advancing at 100%,
+  // 0.0 fps, a black screen for the entire run -- and the next drew one in 10
+  // of 10. Chrome never showed it. That is a coin flip on the target device,
+  // and no frame rate is worth it.
+  //
+  // The same shape as the OffscreenCanvas failure: WebKit, threads and a
+  // canvas. Worth chasing, because 45.8 -> 67.3 fps is the largest win
+  // measured here; until it is understood, DOLWEB_CPU_THREAD=1 turns it on for
+  // anyone measuring.
   if (const char* cpu_thread = std::getenv("DOLWEB_CPU_THREAD"))
     config.cpu_thread = (cpu_thread[0] != '0' && cpu_thread[0] != '\0');
-  else
-    config.cpu_thread = true;
   // Two builds only line up if they are measured in the same scene, and a boot
   // is twelve seconds of logos followed by whatever the attract loop is doing
   // when the window opens. A savestate puts both in the same place; see
