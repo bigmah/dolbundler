@@ -72,7 +72,12 @@ struct VideoConfig
   bool bSupportsImageLoadStore;
   bool bSupportsAniso;
   bool bSupportsBitfield;
-  bool bSupportsTextureSubImage;
+  // glGetTextureSubImage is GL4.5 only and does not exist in GLES or WebGL, where
+  // the loader leaves the entry point null -- taking that branch traps the wasm
+  // build with "null function" rather than failing gracefully. The GLES path in
+  // PopulateConfig never assigns this (the assignment sits inside an
+  // if (!IsGLES()) block), so give it a definite value here.
+  bool bSupportsTextureSubImage = false;
   EsFbFetchType SupportedFramebufferFetch;
   bool bSupportsKHRShaderSubgroup;  // basic + arithmetic + ballot
   bool bSupportsExplicitLayoutInShader;

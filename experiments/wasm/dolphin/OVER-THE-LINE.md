@@ -424,6 +424,23 @@ And `DOLWEB_PAINT_ONLY=0x002d6a40` paints that mask and nothing else: the floor
 stays black, 0.69-0.98. **The floor is showing its base texture on unit 0**, and
 that texture's decoded bytes are identical to the desktop's.
 
+### A separate defect found on the way: GPU readback traps the wasm build
+
+`OGLStagingTexture::CopyFromTexture` prefers `glGetTextureSubImage` when
+`g_ogl_config.bSupportsTextureSubImage` is set. That function is GL 4.5 only and
+does not exist in GLES or WebGL, where the loader leaves the entry point null,
+so taking the branch traps the whole build with `Uncaught RuntimeError: null
+function` -- the emulator never advances past 0 fps.
+
+Two things were wrong. `bSupportsTextureSubImage` is assigned inside an
+`if (!m_main_gl_context->IsGLES())` block, so the GLES path never sets it at
+all, and the field had no initializer in `OGLConfig.h`. It now defaults to
+false, and the call site is compiled out entirely under `__EMSCRIPTEN__`.
+
+**This is not the black ground**, but it means every path that reads a texture
+back -- texture dumping, depth readback -- would have killed the browser build,
+and nothing would have said why.
+
 **Cross-build savestates would settle the scene problem and do not work.**
 `DOLWEB_STATE` exists in the browser build and the state can be reached by
 dropping it in the served game tree, but loading the desktop's state wedges the

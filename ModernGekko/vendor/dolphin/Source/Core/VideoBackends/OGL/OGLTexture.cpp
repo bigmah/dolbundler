@@ -608,8 +608,14 @@ void OGLStagingTexture::CopyFromTexture(const AbstractTexture* src,
   const OGLTexture* gltex = static_cast<const OGLTexture*>(src);
   const size_t dst_offset = dst_rect.top * m_config.GetStride() + dst_rect.left * m_texel_size;
 
-  // Prefer glGetTextureSubImage(), when available.
+  // Prefer glGetTextureSubImage(), when available. Never on GLES or WebGL: the
+  // function is GL4.5 only and the loader leaves it null there, so calling it
+  // traps the wasm build outright instead of failing.
+#ifdef __EMSCRIPTEN__
+  if (false)
+#else
   if (g_ogl_config.bSupportsTextureSubImage)
+#endif
   {
     glGetTextureSubImage(
         gltex->GetGLTextureId(), src_level, src_rect.left, src_rect.top, src_layer,
