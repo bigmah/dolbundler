@@ -264,11 +264,30 @@ decided one branch earlier:
 `canvas` is null on the worker, so the context is proxied regardless. The
 experiment was **inert, not a disproof.**
 
-`OFFSCREENCANVASES_TO_PTHREAD` transfers the canvas to the pthread running
-`main()`, and an OffscreenCanvas can only live on one thread -- so if Dolphin
-creates its GL context on a different thread, that thread sees no canvas and
-proxies. **Getting the canvas onto the thread that creates the context is the
-open work**, and it is worth up to most of the 24 points.
+**And handing the canvas over is faster and renders nothing.** The build had
+`DOLWEB_OFFSCREEN_CANVAS` pinned `OFF` in a stale CMake cache, so the flag never
+reached the linker and no transfer code was emitted -- which is why the earlier
+patch was inert. Built with it genuinely ON:
+
+| | speed | picture |
+|---|---|---|
+| proxied GL (canvas on main thread) | 82.9% | **renders** |
+| canvas on the render thread | **89.4%** | **pure black** |
+
+Frames are produced (54-68 fps) and committed -- `GLContextEmscripten::Swap()`
+does call `emscripten_webgl_commit_frame()` -- and never reach the screen.
+Confirmed in **simulator Safari**, the same WebKit as the phone: the DOM
+controls draw, the canvas stays black for the whole run. With it off, the same
+build plays the intro movie normally.
+
+**The default is now OFF**, and the trap is worth stating: Chrome's
+`Page.captureScreenshot` cannot see a transferred canvas either, so a headless
+run looks identical whether it works or not. That is how `ON` survived as a
+default. **Check this one in the simulator, never in Chrome.**
+
+So the ~14% is real and unclaimable until someone makes WebKit present a
+transferred canvas. The 24 points remain the biggest single lever, and the route
+to them is not this.
 
 ### Measuring speed at all requires turning the throttle off
 

@@ -249,8 +249,21 @@ endif()
   # the CPU sits in PowerDown with no error anywhere. Core::Init waits to see the
   # thread claim its work and starts a plain one if it does not, which falls back
   # to a proxied context: slower, and it starts every time.
+  # DEFAULT OFF, and the default is the whole point. Measured 2026-08-30 in
+  # simulator Safari -- the same WebKit as the phone -- with it ON: the page
+  # renders **nothing**. The DOM controls draw, the canvas stays pure black for
+  # the whole run, while fps reads 54-68 and the emulator runs *faster*
+  # (89.4% against 82.9% proxied, throttle off, like-for-like on Chrome).
+  # Frames are produced and committed with emscripten_webgl_commit_frame() and
+  # never reach the screen.
+  #
+  # It is worth the ~14% only if a human can see the game, so this must stay OFF
+  # until someone shows a picture in WebKit with it on. Chrome's own
+  # Page.captureScreenshot cannot see a transferred canvas either, so a headless
+  # run looks identical whether it works or not -- which is how ON survived as a
+  # default. Check it in the simulator, not in Chrome.
   option(DOLWEB_OFFSCREEN_CANVAS
-         "Hand the canvas to the rendering thread (faster where it lands)" ON)
+         "Hand the canvas to the rendering thread (faster, but WebKit shows nothing)" OFF)
   if(DOLWEB_OFFSCREEN_CANVAS)
     target_link_options(dolweb PRIVATE
       -sOFFSCREENCANVAS_SUPPORT=1
