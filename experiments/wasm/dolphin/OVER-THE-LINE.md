@@ -367,6 +367,49 @@ generator branches on that.
 
 The floor's UID natively at guest 150 is **texgens 2, tevstages 3, indstages 0**.
 
+### The pixel shader is not it either
+
+Dumped for that UID in both builds and diffed. The two are 93.5% identical and
+the entire behavioural difference is **two lines**:
+
+    -  return iround(255.0 * texture(tex, coords));
+    +  float lod_bias = float(bitfieldExtract(int(texmode0), 8, 16)) / 256.0f;
+    +  return iround(255.0 * texture(tex, coords, lod_bias));
+
+    -  int zCoord = int(rawpos.z * 16777216.0);
+    +  int zCoord = int((1.0 - rawpos.z) * 16777216.0);
+
+Everything else is the expected GLSL ES 3.00 shape: a `bitfieldExtract`
+polyfill, separate varyings instead of an interface block, and no `ocol1`
+because there is no dual-source blending.
+
+Neither line survives scrutiny as the cause:
+
+- **The LOD bias** is not a difference in behaviour, only in where it is applied
+  -- `bSupportsLodBiasInSampler` is false on GLES so the shader does it, and the
+  desktop does the same thing through `glSamplerParameterf`. And it is already
+  eliminated by experiment: `MODERNGEKKO_NO_MIPMAP=1` forces a non-mipmapped
+  filter, which makes a LOD bias inert, and the floor stayed black.
+- **The depth flip** is the symmetric handling of `backend_reversed_depth_range`
+  and feeds only ztex and fog. Fog is applied *after* the texture, so a fogged
+  floor would stay black no matter how bright its texture was -- and painting
+  the textures makes the floor render. That rules fog out on the paint result
+  alone.
+
+**So the data, the decode, the bindings-as-looked-up and the pixel shader are
+all identical, and the floor is still black in one build.** The one question not
+yet asked is which texture object ends up on which *sampler unit* at draw time:
+the census logs lookups, not binds, and those are different questions.
+`DOLWEB_BIND_CENSUS=<guest s>` records the unit-to-address mapping for a short
+window in both builds.
+
+That is also the only story still consistent with the paint result. If the
+browser's floor draw samples a texture that is legitimately black in *both*
+builds -- and there is a good candidate, the stage-7 mask `0x002d6a40`, whose
+mean of 63.75 is zero RGB behind opaque alpha -- then every census agrees, and
+painting every texture bright makes the floor render because it makes even that
+one bright.
+
 **Every cross-build picture before this point was of a different scene**, and
 each mismatch was caught only by looking at the image rather than the numbers --
 a native flat-shade frame indoors read against a browser frame in the back

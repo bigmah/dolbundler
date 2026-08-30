@@ -1075,6 +1075,54 @@ void TextureCacheBase::BindTextures(BitSet32 used_textures,
 {
   auto& system = Core::System::GetInstance();
   auto& pixel_shader_manager = system.GetPixelShaderManager();
+  // DOLWEB_BIND_CENSUS=<guest seconds> records which texture ends up on which
+  // sampler unit, for a short window, as a set of unit->address combinations.
+  //
+  // The texture census logs *lookups*; this logs *binds*, and they are not the
+  // same question. Every earlier comparison established that the two builds
+  // find the same textures and decode them to the same bytes -- so if a surface
+  // still draws black, the remaining possibility is that the draw samples a
+  // different one of those textures, and only the bind says which unit got
+  // what.
+  static const char* const bind_env = std::getenv("DOLWEB_BIND_CENSUS");
+  static bool bind_done = false;
+  if (bind_env && !bind_done)
+  {
+    static const double bind_from = std::strtod(bind_env, nullptr);
+    const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+    const double now = hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
+    if (now >= bind_from)
+    {
+      static double bind_until = 0.0;
+      if (bind_until == 0.0)
+        bind_until = now + 0.5;
+      if (now <= bind_until)
+      {
+        // One line per distinct combination, not per draw: a frame issues
+        // thousands of draws and almost all of them repeat a handful of
+        // bindings.
+        std::string key;
+        for (u32 i = 0; i < m_bound_textures.size(); i++)
+        {
+          if (!used_textures[i] || !m_bound_textures[i])
+            continue;
+          key += fmt::format("{}:{:#010x} ", i, m_bound_textures[i]->addr);
+        }
+        static std::set<std::string> seen_binds;
+        if (!key.empty() && seen_binds.insert(key).second)
+        {
+          std::printf("[bind] %s\n", key.c_str());
+          std::fflush(stdout);
+        }
+      }
+      else
+      {
+        bind_done = true;
+        std::printf("[bind] end\n");
+        std::fflush(stdout);
+      }
+    }
+  }
   for (u32 i = 0; i < m_bound_textures.size(); i++)
   {
     const RcTcacheEntry& tentry = m_bound_textures[i];
