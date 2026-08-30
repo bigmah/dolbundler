@@ -512,6 +512,10 @@ The six survivors are `0x008e4ba0`, `0x008e5640`, `0x008e6100`, `0x008e63a0`,
 to be a floor. The last two are the **all-zero C4s**, and `0x009a9e60` is
 256x256.
 
+**Step 5 confirms it: painting `0x009a9e60` alone takes the floor from
+0.89-0.96 black to 0.027-0.285.** One texture, and the floor comes back. That is
+the floor's texture, definitively.
+
 Which is the texture this file named as the floor's at the very beginning, and
 which was dismissed on the grounds that the desktop binds it too while rendering
 the floor correctly. That dismissal may have been right about the evidence and
@@ -520,6 +524,49 @@ still differ, because a C4 is an index into a palette.** All-zero indices mean
 every texel is palette entry 0, so the floor's colour is *entirely* determined
 by the TLUT -- and this is the only target that takes Dolphin's CPU palette
 path, because WebGL2 has no texture buffer objects.
+
+## The mechanism
+
+The browser's own log names every piece of it:
+
+    [tex] decoded to zero: stage 0, from RAM, 256x256 fmt=8 tlut=2
+          addr=0x009a9e60 src=32768 bytes, source itself is zero too,
+          tlut 32 bytes at tmem 0x40000 is not zero
+
+The palette **has data**. The indices are all zero. The decode still comes out
+zero -- so palette entry 0 was black *at the moment the palette was baked in*.
+
+`TextureCacheBase::LoadImpl` has two shortcuts before the real lookup, and
+**neither looks at the palette**:
+
+    if (!force_reload && TMEM::IsValid(stage) && m_bound_textures[stage]) {
+      if (TMEM::IsCached(stage)) return entry;              // no check at all
+      if (!entry->invalidated && entry->base_hash == entry->CalculateHash())
+        return entry;                                       // source bytes only
+    }
+
+`CalculateHash()` hashes `GetPointerForRange(addr, size_in_bytes)` -- the
+texture's own bytes, nothing else. (`GetTexture`'s real path *does* fold the
+TLUT into `full_hash`; the fast path bypasses it.)
+
+With GPU palette conversion that is correct: the palette is applied at draw time
+from the live TLUT, so a cached entry cannot go stale. **Without it, Dolphin
+bakes the palette into the decoded texture**, and a cached entry carries the
+palette that was current when it was *first* decoded.
+
+For this texture the source bytes are all zero and never change, so the hash
+matches for ever, the entry is never re-decoded, and the empty palette baked in
+at the first decode survives the whole level. The floor is black in the browser
+and correct on every backend that has texture buffer objects.
+
+**And it is why the earlier palette test came back clean.**
+`MODERNGEKKO_NO_PALETTE_CONVERSION=1` was run *from a savestate*, where the
+texture was already cached with a correct palette -- the ordering that causes
+the bug had happened long before the state was saved. Forcing a capability off
+does not reproduce a defect that depends on when something was first decoded.
+
+**The fix** is to take the slow path for paletted textures when the palette is
+ours to apply -- `!g_backend_info.bSupportsPaletteConversion`.
 
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.

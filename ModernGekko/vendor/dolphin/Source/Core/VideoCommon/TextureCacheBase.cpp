@@ -1374,8 +1374,30 @@ TCacheEntry* TextureCacheBase::Load(u32 stage)
 
 TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
 {
+  // Neither shortcut below looks at the palette. TMEM::IsCached returns the
+  // bound entry outright, and CalculateHash covers only the texture's own
+  // bytes -- see the FIXME there; it hashes GetPointerForRange(addr, size).
+  //
+  // On a backend that converts palettes on the GPU that is correct, because the
+  // palette is applied at draw time from whatever TLUT is current. On a backend
+  // without texture buffer objects -- WebGL2, and nothing else this project
+  // targets -- Dolphin bakes the palette into the decoded texture instead, so a
+  // cached entry carries the palette that was live when it was *first* decoded.
+  //
+  // Disney skate draws its floors with a 256x256 C4 whose indices are entirely
+  // zero, so every texel is palette entry 0 and the surface's colour comes
+  // wholly from the TLUT. Its bytes never change, so the hash always matches,
+  // the entry is never re-decoded, and the empty palette baked in at the first
+  // decode survives for the whole level: the floor is black in the browser and
+  // correct everywhere else. Take the slow path for paletted textures when the
+  // palette is ours to apply.
+  const bool cpu_palette_path = !g_backend_info.bSupportsPaletteConversion;
+  bool paletted = false;
+  if (cpu_palette_path && !force_reload && m_bound_textures[stage])
+    paletted = TextureInfo::FromStage(stage).GetPaletteSize().has_value();
+
   // if this stage was not invalidated by changes to texture registers, keep the current texture
-  if (!force_reload && TMEM::IsValid(stage) && m_bound_textures[stage])
+  if (!force_reload && !paletted && TMEM::IsValid(stage) && m_bound_textures[stage])
   {
     TCacheEntry* entry = m_bound_textures[stage].get();
     // If the TMEM configuration is such that this texture is more or less guaranteed to still
