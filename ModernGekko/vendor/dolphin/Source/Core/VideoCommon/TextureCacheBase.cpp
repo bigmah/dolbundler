@@ -1143,23 +1143,31 @@ void TextureCacheBase::BindTextures(BitSet32 used_textures,
   // it is the offset to apply to every screenshot time.
   if (const char* mark = std::getenv("DOLWEB_MARK_TEX"))
   {
-    static const u32 want = (u32)std::strtoul(mark, nullptr, 0);
-    static bool marked = false;
-    if (!marked)
+    // "all" records the first-bind time of *every* texture, which is far more
+    // useful than one marker: a single address turns out to be bound in the
+    // menus as well as the level, so it dates the wrong event. With the whole
+    // table from both builds, the offset between them is the median difference
+    // over every address they share -- robust, and it needs no guess about
+    // which texture is level-specific.
+    static const bool mark_all = std::string_view(mark) == "all";
+    static const u32 want = mark_all ? 0u : (u32)std::strtoul(mark, nullptr, 0);
+    static std::set<u32> marked;
+    for (u32 i = 0; i < m_bound_textures.size(); i++)
     {
-      for (u32 i = 0; i < m_bound_textures.size(); i++)
-      {
-        if (!used_textures[i] || !m_bound_textures[i] ||
-            m_bound_textures[i]->addr != want)
-          continue;
-        marked = true;
-        const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
-        const double now =
-            hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
-        std::printf("[mark] %#010x first bound at guest %.2f s\n", want, now);
-        std::fflush(stdout);
+      if (!used_textures[i] || !m_bound_textures[i])
+        continue;
+      const u32 addr = m_bound_textures[i]->addr;
+      if (!mark_all && addr != want)
+        continue;
+      if (!marked.insert(addr).second)
+        continue;
+      const u32 hz = system.GetSystemTimers().GetTicksPerSecond();
+      const double now =
+          hz ? static_cast<double>(system.GetCoreTiming().GetTicks()) / hz : 0.0;
+      std::printf("[mark] %#010x first bound at guest %.2f s\n", addr, now);
+      std::fflush(stdout);
+      if (!mark_all)
         break;
-      }
     }
   }
 
