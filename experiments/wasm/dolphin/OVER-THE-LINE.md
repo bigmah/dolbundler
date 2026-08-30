@@ -643,12 +643,40 @@ CPU-decodes this texture because it never needs to.
 by-address loop -- which is why it fired zero times and briefly looked like an
 acquittal.)
 
-**Two ways out.** The proper one is palette conversion without texel buffers:
-Dolphin's conversion shader reads the TLUT from an SSBO or a `usamplerBuffer`,
-and WebGL2 has neither, but a 32-byte palette uploaded as a small 2D texture and
-read with `texelFetch` would do. The cheap one is to stop keeping paletted
-copies only in VRAM -- `EFBToTextureEnable = False` sends copies to RAM as well,
-where the CPU palette path has real indices to work with. The next question is concrete: for this draw, which TLUT does the
+### The cheap fix works on the desktop and cannot be used here
+
+`EFBToTextureEnable = False` sends copies to RAM as well as VRAM, so the CPU
+palette path has real indices to decode. On the desktop with
+`MODERNGEKKO_NO_PALETTE_CONVERSION=1` -- the configuration that reproduces the
+defect exactly -- it is a **complete fix**:
+
+| | guest 130 | 140 | 150 |
+|---|---|---|---|
+| CPU palette path, copies in VRAM (the bug) | 0.967 | 0.809 | 0.051 |
+| CPU palette path, copies to RAM (the fix) | **0.002** | **0.121** | **0.032** |
+| unmodified desktop build, for reference | 0.002 | 0.127 | 0.032 |
+
+Identical to the untouched build.
+
+**And it cannot be used in the browser.** An EFB copy to RAM has to read the
+framebuffer back, and readback is impossible in this build -- `OGLStagingTexture`
+maps a pixel-pack buffer and WebGL2 has no buffer mapping. Turning it on traps
+the page with `Uncaught RuntimeError: null function` and the guest stops dead at
+guest 53 s. Reverted, with the reason recorded at the call site.
+
+### So the fix that can work
+
+Make `bSupportsPaletteConversion` **true** for WebGL2. Dolphin's palette
+conversion shader reads the TLUT from an SSBO or a `usamplerBuffer`
+(`TextureConversionShader.cpp`, `FETCH_PALETTE`), and WebGL2 has neither -- but
+the palette is at most 512 bytes and could be uploaded as a small 2D texture and
+read with `texelFetch` on a `sampler2D`. Three pieces: a third `FETCH_PALETTE`
+variant, a 2D texture to hold the TLUT, and flipping the capability once it
+exists.
+
+With that, the paletted EFB copy is usable directly, the floor renders, and
+nothing needs reading back -- which is the constraint that rules out every other
+route. The next question is concrete: for this draw, which TLUT does the
 GPU path apply at draw time, and how does it differ from the one the CPU path
 baked in? `ApplyPaletteToEntry` and `texTlut` at the moment of the draw are where
 to look.

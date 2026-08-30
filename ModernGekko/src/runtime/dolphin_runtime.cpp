@@ -359,6 +359,38 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
                     *impl->config.graphics.gpu_texture_decoding);
   Config::SetBase(Config::GFX_SHADER_CACHE, true);
 #ifdef __EMSCRIPTEN__
+  // Keep EFB copies in RAM as well as VRAM. WebGL2 has no texture buffer
+  // objects, so bSupportsPaletteConversion is false, and GetTexture then
+  // refuses to use a *paletted* EFB copy at all:
+  //
+  //   if ((base_hash == entry->hash &&
+  //        (!texture_info.GetPaletteSize() || g_backend_info.bSupportsPaletteConversion)) || ...
+  //
+  // The copy is made -- both builds emit the identical three, including
+  // dst=0x009a9e60 -- but the lookup fails that second clause, prunes it, and
+  // decodes the texture out of guest RAM instead. A copy kept only in VRAM was
+  // never written back, so that RAM is all zeros, and Disney skate's floors
+  // (a 256x256 C4 whose every index is therefore 0) render black.
+  //
+  // Sending the copy to RAM too would give the CPU palette path real indices to
+  // decode, and on the desktop with the same capability forced off it is a
+  // complete fix: 0.967 near-black becomes 0.002, matching the unmodified build
+  // exactly.
+  //
+  // It CANNOT BE USED HERE. An EFB copy to RAM has to read the framebuffer
+  // back, and readback is impossible in this build: OGLStagingTexture maps a
+  // pixel-pack buffer and WebGL2 has no buffer mapping at all. Turning it on
+  // traps the page with "Uncaught RuntimeError: null function" and the guest
+  // stops dead at ~53 s. Left here as a signpost:
+  //
+  //   Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, false);
+  //
+  // The fix that can work is to make bSupportsPaletteConversion true for WebGL2
+  // -- Dolphin's palette conversion shader reads the TLUT from an SSBO or a
+  // usamplerBuffer, and WebGL2 has neither, but a 512-byte palette uploaded as
+  // a small 2D texture and read with texelFetch would do. Then the paletted EFB
+  // copy is usable directly and nothing needs reading back.
+
   // WebGL has no shared contexts, so Dolphin's async shader compiler cannot
   // start a worker and the ubershader half of the hybrid mode never gets
   // replaced: every draw keeps running the general-purpose shader, which is
