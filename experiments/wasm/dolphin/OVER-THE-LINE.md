@@ -211,6 +211,26 @@ calls. With the renderer off, VideoCommon is about **4%** of the CPU thread
 (`TexDecoder_DecodeXFB` plus `VertexLoader::RunVertices`). The CPU half is guest
 code and float emulation, not the video backend.
 
+**The fused multiply-add is worth about 7%, and it is not free to remove.**
+`DOLRECOMP_MEASURE_FAST_FMA` drops the fusion (incorrect: PowerPC rounds once,
+this rounds twice) purely to price it. Like-for-like with the profiler running in
+both: baseline **93.2%**, without fusion **100.0%**. `fma` leaves the profile
+entirely, replaced by an inlined `ps_madd_fast` at 3.0%.
+
+**A median of per-second samples cannot see a 7% change.** By that metric the
+same pair read 99% and 93% -- the *wrong way round* -- with ranges of 76-133 and
+63-141. Use guest seconds advanced per wall second over a long fixed span
+instead; the `[act] guest N (wall M)` lines give it for free and it is a single
+robust number per run.
+
+**The exact fix is not the obvious one.** Computing in double and rounding to
+single would be exact if the operands were singles, but `force_25_bit(c)` is a
+Gekko quirk (c rounded to 25 bits, not 24) and `a` can be a full 53-bit double,
+so the product is not exact in double -- which is why the code already carries a
+halfway-case correction. A fast exact fma here needs a Dekker two-product
+implementation, not a shortcut, and `GXRuntime/tests/paired_single_tests.c` is
+what would have to pass.
+
 ### Measuring speed at all requires turning the throttle off
 
 `MODERNGEKKO_EMULATION_SPEED=0` is pushed by the page **only in `?ab=` mode**.
