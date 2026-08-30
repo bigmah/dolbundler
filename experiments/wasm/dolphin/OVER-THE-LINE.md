@@ -467,6 +467,28 @@ where the defect is.)
 That both builds bind exactly the same 367 addresses is itself worth recording:
 it is the strongest evidence yet that the guest is doing identical work in both.
 
+**The first matched pair, and what it shows.** Desktop at guest 130 against
+Chrome at 138.2: the same bedroom, the same two ramps, the skater a little
+further along in the browser (the offset aligns texture *loads*, not the
+skater's exact position, so this is a matched moment and not a matched frame).
+In the browser **the blue oval rug renders correctly and the wooden floor
+around it is black**. Both surfaces are in the same draw list, both textures
+decode identically in both builds -- and one of them survives the trip and the
+other does not.
+
+**Identifying the floor's texture by its painted colour still does not work**,
+even at a matched moment. The desktop floor reads (136,62,170) and the browser
+floor (68,16,117) -- different hues, which would mean different textures -- but
+the desktop value is brighter than any colour the paint can emit (the cap is
+120), so the lighting multiplier there is above 1 and unknown, and the two
+cameras are looking at different patches of floor. The nearest candidates are
+4000 and 107 squared-distance away respectively. **Suggestive, not evidence.**
+
+To settle it, paint needs to be readable independently of lighting -- a
+per-texture *pattern* rather than a flat colour, or `DOLWEB_PAINT_ONLY` walked
+over the handful of large CMPR candidates until the floor changes. The latter is
+about six runs and needs no new code.
+
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.
 
