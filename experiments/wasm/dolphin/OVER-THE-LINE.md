@@ -231,6 +231,45 @@ halfway-case correction. A fast exact fma here needs a Dekker two-product
 implementation, not a shortcut, and `GXRuntime/tests/paired_single_tests.c` is
 what would have to pass.
 
+### The renderer's cost is cross-thread latency, not GPU or CPU work
+
+Profiling the page session *and* every worker (the page must be included -- see
+below) in gameplay with OpenGL:
+
+| thread | work | what it is doing |
+|---|---|---|
+| emulator | **62%** (38% waiting) | `fma`, guest chunks, dispatch |
+| **main thread** | **5%** (93% idle) | `bufferData`, `getParameter`, `bindTexture` |
+| audio | 1% | the mixer |
+
+**No thread is saturated.** The GL calls run on the *main thread* while the
+emulator thread waits, and `em_task_queue_send` at 2.1% on the emulator side is
+it paying to get them there. So the renderer's 24 points are largely a
+cross-thread round trip per GL call -- latency, not throughput.
+
+**`-sOFFSCREENCANVAS_SUPPORT=1` in `CMakeLists.txt` is inert.** In this
+emscripten version `_emscripten_supports_offscreencanvas` is hardcoded to
+`return 0`, with a comment proposing a future `OFFSCREENCANVAS_SUPPORT=2` build
+mode that would return 1.
+
+**Patching it to return 1 changes nothing, and not because the idea is wrong.**
+Measured like-for-like (throttle off, no profiler): baseline **82.9%**, patched
+**82.3%**. Reading the emscripten source afterwards says why -- that flag only
+decides whether a proxied context also needs an offscreen FBO. The proxying is
+decided one branch earlier:
+
+    if (proxyContextToMainThread === 2 || (!canvas && proxyContextToMainThread === 1))
+        return _emscripten_webgl_create_context_proxied(target, attributes);
+
+`canvas` is null on the worker, so the context is proxied regardless. The
+experiment was **inert, not a disproof.**
+
+`OFFSCREENCANVASES_TO_PTHREAD` transfers the canvas to the pthread running
+`main()`, and an OffscreenCanvas can only live on one thread -- so if Dolphin
+creates its GL context on a different thread, that thread sees no canvas and
+proxies. **Getting the canvas onto the thread that creates the context is the
+open work**, and it is worth up to most of the 24 points.
+
 ### Measuring speed at all requires turning the throttle off
 
 `MODERNGEKKO_EMULATION_SPEED=0` is pushed by the page **only in `?ab=` mode**.

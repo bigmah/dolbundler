@@ -242,20 +242,23 @@ while (Date.now() < deadline && !done) {
   // 92 MB -O3 module does.
   if (cpuProfile && !cpuProfile.started && guestSeconds >= cpuProfile.at) {
     cpuProfile.started = true;
-    const sessions = [...workerSessions];
-    if (!sessions.length) console.log('[profile] no worker attached; profiling the page only');
-    for (const sid of sessions.length ? sessions : [undefined]) {
+    // The page session as well as the workers, always. Emscripten proxies some
+    // work to the main thread -- em_task_queue_send shows up on the emulator
+    // thread -- and profiling only the workers finds one busy thread and
+    // nineteen idle ones while the proxied work stays invisible.
+    const sessions = [undefined, ...workerSessions];
+    for (const sid of sessions) {
       await cdp.send('Profiler.enable', {}, sid).catch(() => {});
       await cdp.send('Profiler.setSamplingInterval', { interval: 200 }, sid).catch(() => {});
       await cdp.send('Profiler.start', {}, sid).catch(() => {});
     }
     console.log(`[profile] started at guest ${guestSeconds.toFixed(0)}s ` +
-                `across ${sessions.length || 1} target(s)`);
+                `across ${sessions.length} target(s) (page + ${sessions.length - 1} workers)`);
     setTimeout(async () => {
-      for (const sid of sessions.length ? sessions : [undefined]) {
+      for (const sid of sessions) {
         try {
           const { profile: prof } = await cdp.send('Profiler.stop', {}, sid);
-          summariseProfile(prof, sid || 'page');
+          summariseProfile(prof, sid || 'PAGE-MAIN-THREAD');
         } catch (e) { console.log(`[profile] stop failed on ${sid || 'page'}: ${e}`); }
       }
     }, cpuProfile.secs * 1000);
