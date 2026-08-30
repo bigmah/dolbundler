@@ -495,8 +495,31 @@ colour-based identification can work through it.
 **`DOLWEB_PAINT_RANGE=lo:hi` is the method that does**, because it asks a
 different question. Paint only the textures in an address window and measure
 whether the floor *stopped being black* -- a yes/no the near-black fraction
-already answers, with no colour matching anywhere. Bisecting the 98 addresses
-bound in the level takes about seven runs.
+already answers, with no colour matching anywhere.
+
+Bisecting the 98 addresses bound in the level, against a black baseline of
+0.89-0.96:
+
+| step | window | result | left |
+|---|---|---|---|
+| 1 | `0 .. 0x00b035a0` | 0.015 -- **renders** | 49 |
+| 2 | `0 .. 0x009e1ee0` | 0.015 -- **renders** | 24 |
+| 3 | `0 .. 0x008b8660` | 0.93 -- still black | 12 |
+| 4 | `0x008b8660 .. 0x008e4ba0` | 0.88 -- still black | 6 |
+
+The six survivors are `0x008e4ba0`, `0x008e5640`, `0x008e6100`, `0x008e63a0`,
+`0x009a9e60`, `0x009b1e80`. The first four are 128x32 down to 32x16 -- too small
+to be a floor. The last two are the **all-zero C4s**, and `0x009a9e60` is
+256x256.
+
+Which is the texture this file named as the floor's at the very beginning, and
+which was dismissed on the grounds that the desktop binds it too while rendering
+the floor correctly. That dismissal may have been right about the evidence and
+wrong about the conclusion: **both builds can bind the same all-zero C4 and
+still differ, because a C4 is an index into a palette.** All-zero indices mean
+every texel is palette entry 0, so the floor's colour is *entirely* determined
+by the TLUT -- and this is the only target that takes Dolphin's CPU palette
+path, because WebGL2 has no texture buffer objects.
 
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.
