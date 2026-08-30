@@ -150,6 +150,13 @@ struct BackendInfo
   bool bSupportsGSInstancing = false;  // Needed by GeometryShaderGen, so must stay in VideoCommon
   bool bSupportsPostProcessing = false;
   bool bSupportsPaletteConversion = false;
+  // Whether the backend has texture buffer objects. Distinct from
+  // bSupportsPaletteConversion, which the two used to share: WebGL2 has no
+  // texel buffers but can still convert palettes, by passing the 512-byte TLUT
+  // through the utility uniform block instead. Conflating them meant a paletted
+  // EFB copy was unusable there at all -- see GetTexture, which prunes such a
+  // copy and decodes empty guest RAM in its place.
+  bool bSupportsTexelBuffer = false;
   bool bSupportsClipControl = false;  // Needed by VertexShaderGen, so must stay in VideoCommon
   bool bSupportsSSAA = false;
   bool bSupportsFragmentStoresAndAtomics = false;  // a.k.a. OpenGL SSBOs a.k.a. Direct3D UAVs

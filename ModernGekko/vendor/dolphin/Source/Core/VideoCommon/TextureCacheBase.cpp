@@ -309,22 +309,35 @@ RcTcacheEntry TextureCacheBase::ApplyPaletteToEntry(RcTcacheEntry& entry, const 
   g_gfx->BeginUtilityDrawing();
 
   const u32 palette_size = entry->format == TextureFormat::I4 ? 32 : 512;
-  u32 texel_buffer_offset;
-  if (g_vertex_manager->UploadTexelBuffer(palette, palette_size,
+
+  // Without texel buffers the palette rides in the uniform block instead. The
+  // layout matches the shader: two scalars, eight bytes of std140 padding, then
+  // 512 bytes of TLUT packed exactly as a R16_UINT texel buffer would have
+  // delivered it.
+  struct Uniforms
+  {
+    float multiplier;
+    u32 texel_buffer_offset;
+    u32 pad[2];
+    u32 palette[128];
+  };
+  static_assert(std::is_standard_layout<Uniforms>::value);
+  static_assert(sizeof(Uniforms) == 16 + 512);
+
+  u32 texel_buffer_offset = 0;
+  const bool palette_in_ubo = !g_backend_info.bSupportsTexelBuffer;
+  if (palette_in_ubo ||
+      g_vertex_manager->UploadTexelBuffer(palette, palette_size,
                                           TexelBufferFormat::TEXEL_BUFFER_FORMAT_R16_UINT,
                                           &texel_buffer_offset))
   {
-    struct Uniforms
-    {
-      float multiplier;
-      u32 texel_buffer_offset;
-      u32 pad[2];
-    };
-    static_assert(std::is_standard_layout<Uniforms>::value);
     Uniforms uniforms = {};
     uniforms.multiplier = entry->format == TextureFormat::I4 ? 15.0f : 255.0f;
     uniforms.texel_buffer_offset = texel_buffer_offset;
-    g_vertex_manager->UploadUtilityUniforms(&uniforms, sizeof(uniforms));
+    if (palette_in_ubo)
+      std::memcpy(uniforms.palette, palette, palette_size);
+    g_vertex_manager->UploadUtilityUniforms(
+        &uniforms, palette_in_ubo ? sizeof(uniforms) : offsetof(Uniforms, palette));
 
     g_gfx->SetAndDiscardFramebuffer(decoded_entry->framebuffer.get());
     g_gfx->SetViewportAndScissor(decoded_entry->texture->GetRect());

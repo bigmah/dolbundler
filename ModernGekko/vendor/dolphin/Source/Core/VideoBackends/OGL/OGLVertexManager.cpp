@@ -35,7 +35,7 @@ VertexManager::VertexManager() = default;
 
 VertexManager::~VertexManager()
 {
-  if (g_backend_info.bSupportsPaletteConversion)
+  if (g_backend_info.bSupportsTexelBuffer)
   {
     glDeleteTextures(static_cast<GLsizei>(m_texel_buffer_views.size()),
                      m_texel_buffer_views.data());
@@ -60,7 +60,7 @@ bool VertexManager::Initialize()
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_vertex_buffer->GetGLBufferId());
   }
 
-  if (g_backend_info.bSupportsPaletteConversion)
+  if (g_backend_info.bSupportsTexelBuffer)
   {
     // The minimum MAX_TEXTURE_BUFFER_SIZE that the spec mandates is 65KB, we are asking for a 1MB
     // buffer here. This buffer is also used as storage for undecoded textures when compute shader

@@ -870,7 +870,7 @@ void ProgramShaderCache::CreateHeader()
                                                     "",
       SupportedESPointSize,
       g_ogl_config.bSupportsAEP ? "#extension GL_ANDROID_extension_pack_es31a : enable" : "",
-      v < Glsl140 && g_backend_info.bSupportsPaletteConversion ?
+      v < Glsl140 && g_backend_info.bSupportsTexelBuffer ?
           "#extension GL_ARB_texture_buffer_object : enable" :
           "",
       SupportedESTextureBuffer,
@@ -897,7 +897,7 @@ void ProgramShaderCache::CreateHeader()
           "",
       is_glsles ? "precision highp float;" : "", is_glsles ? "precision highp int;" : "",
       is_glsles ? "precision highp sampler2DArray;" : "",
-      (is_glsles && g_backend_info.bSupportsPaletteConversion) ? "precision highp usamplerBuffer;" :
+      (is_glsles && g_backend_info.bSupportsTexelBuffer) ? "precision highp usamplerBuffer;" :
                                                                  "",
       use_multisample_2d_array_precision ? "precision highp sampler2DMSArray;" : "",
       v >= GlslEs310 ? "precision highp image2DArray;" : "");

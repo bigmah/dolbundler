@@ -1180,15 +1180,29 @@ float4 DecodePixel(int val)
 
   ss << "\n";
 
+  // Three ways to reach the palette. Metal takes an SSBO; a backend with texel
+  // buffers samples one; and a backend with neither -- WebGL2 -- gets the whole
+  // 512-byte TLUT in the uniform block, which is small enough to carry and is
+  // the only route that needs no capability at all.
+  const bool palette_in_ubo =
+      api_type != APIType::Metal && !g_backend_info.bSupportsTexelBuffer;
   if (api_type == APIType::Metal)
     ss << "SSBO_BINDING(0) readonly buffer Palette { uint16_t palette[]; };\n";
-  else
+  else if (!palette_in_ubo)
     ss << "TEXEL_BUFFER_BINDING(0) uniform usamplerBuffer samp0;\n";
   ss << "SAMPLER_BINDING(1) uniform sampler2DArray samp1;\n";
   ss << "UBO_BINDING(std140, 1) uniform PSBlock {\n";
 
   ss << "  float multiplier;\n";
   ss << "  int texel_buffer_offset;\n";
+  if (palette_in_ubo)
+  {
+    // std140 puts the array on a 16-byte boundary, so the two scalars above are
+    // followed by 8 bytes of padding -- matched by the pad[2] in the Uniforms
+    // struct that fills this. 256 entries of 16 bits packed two per uint.
+    ss << "  uint2 pad_;\n";
+    ss << "  uint4 palette[32];\n";
+  }
   ss << "};\n";
 
   if (g_backend_info.bSupportsGeometryShaders)
@@ -1207,6 +1221,16 @@ float4 DecodePixel(int val)
   ss << "  int src = int(round(texture(samp1, coords).r * multiplier));\n";
   if (api_type == APIType::Metal)
     ss << "  src = int(palette[uint(src)]);\n";
+  else if (palette_in_ubo)
+  {
+    // Entry i is the (i & 1) half of uint (i >> 1), which is component
+    // ((i >> 1) & 3) of uint4 (i >> 3). The bytes are packed exactly as a
+    // R16_UINT texel buffer would have delivered them, so the byte swap below
+    // is unchanged.
+    ss << "  int pidx = src >> 1;\n";
+    ss << "  uint pword = palette[pidx >> 2][pidx & 3];\n";
+    ss << "  src = int((src & 1) == 1 ? (pword >> 16) : (pword & 0xFFFFu));\n";
+  }
   else
     ss << "  src = int(texelFetch(samp0, src + texel_buffer_offset).r);\n";
 

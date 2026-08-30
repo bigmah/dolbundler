@@ -305,10 +305,16 @@ bool PopulateConfig(GLContext* m_main_gl_context)
   g_backend_info.bSupportsGeometryShaders =
       GLExtensions::Version() >= 320 &&
       !DriverDetails::HasBug(DriverDetails::BUG_BROKEN_GEOMETRY_SHADERS);
-  g_backend_info.bSupportsPaletteConversion =
+  g_backend_info.bSupportsTexelBuffer =
       GLExtensions::Supports("GL_ARB_texture_buffer_object") ||
       GLExtensions::Supports("GL_OES_texture_buffer") ||
       GLExtensions::Supports("GL_EXT_texture_buffer");
+  // Palette conversion no longer needs texel buffers: without them the TLUT
+  // rides in the utility uniform block. This matters because WebGL2 has no
+  // texel buffers, and a false here makes GetTexture discard every paletted EFB
+  // copy and decode guest RAM that was never written -- Disney skate's floors,
+  // black.
+  g_backend_info.bSupportsPaletteConversion = true;
   g_backend_info.bSupportsClipControl = GLExtensions::Supports("GL_ARB_clip_control");
   g_ogl_config.bSupportsCopySubImage =
       (GLExtensions::Supports("GL_ARB_copy_image") || GLExtensions::Supports("GL_NV_copy_image") ||
@@ -451,7 +457,7 @@ bool PopulateConfig(GLContext* m_main_gl_context)
       g_backend_info.bSupportsComputeShaders = true;
       g_backend_info.bSupportsGSInstancing =
           g_ogl_config.SupportedESPointSize != EsPointSizeType::PointSizeNone;
-      g_backend_info.bSupportsPaletteConversion = true;
+      g_backend_info.bSupportsTexelBuffer = true;
       g_backend_info.bSupportsSSAA = true;
       g_backend_info.bSupportsFragmentStoresAndAtomics = true;
       g_ogl_config.bSupportsCopySubImage = true;
@@ -706,6 +712,19 @@ bool PopulateConfig(GLContext* m_main_gl_context)
   // we can't support it"), so any material that relies on a second output for
   // destination alpha composites differently in the browser than on the
   // desktop -- and the browser is the only target that takes that path.
+  // MODERNGEKKO_NO_TEXEL_BUFFER=1 hides texture buffer objects, which is what
+  // WebGL2 looks like. Palette conversion then has to take the uniform-block
+  // route, so the path that only the browser would otherwise exercise can be
+  // validated here at desktop speed.
+  if (const char* notb = std::getenv("MODERNGEKKO_NO_TEXEL_BUFFER");
+      notb != nullptr && notb[0] != '\0' && notb[0] != '0')
+  {
+    g_backend_info.bSupportsTexelBuffer = false;
+    g_backend_info.bSupportsGPUTextureDecoding = false;
+    std::printf("[gfx] MODERNGEKKO_NO_TEXEL_BUFFER: palette conversion via uniform block\n");
+    std::fflush(stdout);
+  }
+
   if (const char* nods = std::getenv("MODERNGEKKO_NO_DUAL_SOURCE");
       nods != nullptr && nods[0] != '\0' && nods[0] != '0')
   {
@@ -728,7 +747,9 @@ bool PopulateConfig(GLContext* m_main_gl_context)
   // We require texel buffers, image load store, and compute shaders to enable GPU texture decoding.
   // If the driver doesn't expose the extensions, but supports GL4.3/GLES3.1, it will still be
   // enabled in the version check below.
-  g_backend_info.bSupportsGPUTextureDecoding = g_backend_info.bSupportsPaletteConversion &&
+  // GPU texture decoding genuinely needs texel buffers, unlike palette
+  // conversion.
+  g_backend_info.bSupportsGPUTextureDecoding = g_backend_info.bSupportsTexelBuffer &&
                                                g_backend_info.bSupportsComputeShaders &&
                                                g_ogl_config.bSupportsImageLoadStore;
 
