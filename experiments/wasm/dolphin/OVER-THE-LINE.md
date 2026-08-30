@@ -619,9 +619,36 @@ decoding guest RAM, which is all zeros, and the floor is black.
 That also explains why the `[palcopy]` tripwire never fired: reaching it requires
 *finding* an EFB copy at that address, and in the browser there is none to find.
 
-**So the question is no longer about palettes at all.** It is: why does the
-desktop have a texture cache entry at `0x009a9e60` that the browser does not?
-`DOLWEB_LOG_EFB_COPY=1` in both builds is the measurement. The next question is concrete: for this draw, which TLUT does the
+### The line
+
+Both builds make **identical** EFB copies -- three of them, including
+`dst=009a9e60 256x256 stride=1024`, the floor. So the copy exists in the browser
+too, and it is the *lookup* that throws it away. `GetTexture`:
+
+    if ((base_hash == entry->hash &&
+         (!texture_info.GetPaletteSize() || g_backend_info.bSupportsPaletteConversion)) ||
+        IsPlayingBackFifologWithBrokenEFBCopies)
+
+For a **paletted** EFB copy the second clause is `bSupportsPaletteConversion`.
+On the desktop it is true and the copy is used. On WebGL2 it is false, so the
+copy fails the test, is pruned as not useful, and Dolphin falls through to
+decoding the texture out of guest RAM -- which is all zeros, because an EFB copy
+kept in VRAM is never written back. **That is the black floor.**
+
+Everything fits: the copy is made, guest RAM is legitimately empty, both builds
+decode the same identical bytes when they decode at all, and the desktop never
+CPU-decodes this texture because it never needs to.
+
+(The `[palcopy]` tripwire sits in a different branch further down -- the
+by-address loop -- which is why it fired zero times and briefly looked like an
+acquittal.)
+
+**Two ways out.** The proper one is palette conversion without texel buffers:
+Dolphin's conversion shader reads the TLUT from an SSBO or a `usamplerBuffer`,
+and WebGL2 has neither, but a 32-byte palette uploaded as a small 2D texture and
+read with `texelFetch` would do. The cheap one is to stop keeping paletted
+copies only in VRAM -- `EFBToTextureEnable = False` sends copies to RAM as well,
+where the CPU palette path has real indices to work with. The next question is concrete: for this draw, which TLUT does the
 GPU path apply at draw time, and how does it differ from the one the CPU path
 baked in? `ApplyPaletteToEntry` and `texTlut` at the moment of the draw are where
 to look.
