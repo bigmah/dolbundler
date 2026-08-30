@@ -1123,6 +1123,29 @@ void TextureCacheBase::BindTextures(BitSet32 used_textures,
       }
     }
   }
+  // A stage the shader samples but which has no texture bound reads (0,0,0,1)
+  // -- black -- and nothing anywhere reports it. The pixel shader is generated
+  // from the same BP state that produces used_textures, so it *will* sample
+  // this unit; if the lookup returned nothing, the draw silently multiplies by
+  // black. Always on: it is a handful of compares per draw and it is the exact
+  // condition that cannot be seen from any other instrument here.
+  {
+    static u64 unbound_draws = 0;
+    static std::set<u32> unbound_stages;
+    for (u32 i = 0; i < m_bound_textures.size(); i++)
+    {
+      if (!used_textures[i] || m_bound_textures[i])
+        continue;
+      ++unbound_draws;
+      if (unbound_stages.insert(i).second || unbound_draws % 5000 == 0)
+      {
+        std::printf("[unbound] stage %u sampled with no texture bound "
+                    "(%llu draws so far)\n",
+                    i, (unsigned long long)unbound_draws);
+        std::fflush(stdout);
+      }
+    }
+  }
   for (u32 i = 0; i < m_bound_textures.size(); i++)
   {
     const RcTcacheEntry& tentry = m_bound_textures[i];
@@ -2013,8 +2036,28 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
       // means the same texture is bound and the difference is in the upload or
       // the sampling; different colours mean the two builds are drawing the
       // floor with different textures, which is a different defect entirely.
-      static const bool paint_addr = std::getenv("DOLWEB_PAINT_BY_ADDRESS") != nullptr;
-      if (paint_addr)
+      // DOLWEB_PAINT_ONLY=0x002d6a40 paints exactly one texture and leaves
+      // every other one real. Painting everything says "the pipeline works";
+      // painting one says whether *that* texture is what a surface is showing.
+      // DOLWEB_PAINT_EXCEPT is the complement, for the same question asked the
+      // other way round.
+      static const char* const paint_only = std::getenv("DOLWEB_PAINT_ONLY");
+      static const char* const paint_except = std::getenv("DOLWEB_PAINT_EXCEPT");
+      static const bool paint_addr = std::getenv("DOLWEB_PAINT_BY_ADDRESS") != nullptr ||
+                                     paint_only != nullptr || paint_except != nullptr;
+      if (paint_addr && paint_only &&
+          texture_info.GetRawAddress() !=
+              (u32)std::strtoul(paint_only, nullptr, 0))
+      {
+        // not the one asked for; leave it alone
+      }
+      else if (paint_addr && paint_except &&
+               texture_info.GetRawAddress() ==
+                   (u32)std::strtoul(paint_except, nullptr, 0))
+      {
+        // the one to leave alone
+      }
+      else if (paint_addr)
       {
         // Spread neighbouring addresses far apart in colour: textures that
         // matter here sit within a few KB of each other, so the low bits are
