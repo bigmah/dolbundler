@@ -700,6 +700,20 @@ bool PopulateConfig(GLContext* m_main_gl_context)
   // that takes the CPU path, so a defect confined to it cannot be reproduced
   // here without this switch -- and with it, a savestate turns a two-minute
   // browser run into a few seconds.
+  // MODERNGEKKO_NO_DUAL_SOURCE=1 makes this backend claim it cannot do
+  // dual-source blending, which WebGL2 genuinely cannot. Dolphin's response is
+  // simply to turn the feature off (PipelineUtils.cpp, "force dual src off if
+  // we can't support it"), so any material that relies on a second output for
+  // destination alpha composites differently in the browser than on the
+  // desktop -- and the browser is the only target that takes that path.
+  if (const char* nods = std::getenv("MODERNGEKKO_NO_DUAL_SOURCE");
+      nods != nullptr && nods[0] != '\0' && nods[0] != '0')
+  {
+    g_backend_info.bSupportsDualSourceBlend = false;
+    std::printf("[gfx] MODERNGEKKO_NO_DUAL_SOURCE: dual-source blending disabled\n");
+    std::fflush(stdout);
+  }
+
   if (const char* off = std::getenv("MODERNGEKKO_NO_PALETTE_CONVERSION");
       off != nullptr && off[0] != '\0' && off[0] != '0')
   {

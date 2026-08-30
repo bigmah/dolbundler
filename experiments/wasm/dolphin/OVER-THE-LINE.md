@@ -450,7 +450,31 @@ sweep a range of guest seconds in both and pick a matching pair by eye.
 **Every visual cross-build comparison in this file predates that understanding
 and should be read with it in mind**, including the tiling observation below.
 
-### The floor's texture coordinates do not tile in the browser
+### The tiling observation was wrong -- withdrawn
+
+*Kept as a heading because the reasoning below is worth reading and because it
+is the fifth lead in this file to dissolve under a proper control.*
+
+`MODERNGEKKO_FLAT_SHADE=uv` appeared to show the floor's coordinates tiling on
+the desktop and stretched into a single gradient in the browser, which would
+have explained everything at once. **It does not survive measurement.** Sweeping
+guest 115-200 every five seconds in both builds and counting sawtooth
+discontinuities per scanline in the lower half -- high means the coordinate
+wraps -- gives native 2.1-11.0 and Chrome 2.4-10.7. No systematic difference.
+The original observation compared a desktop frame indoors against a browser
+frame in the back yard.
+
+**Also eliminated: dual-source blending.** WebGL2 has none, and Dolphin's
+response is simply to switch the feature off ("force dual src off if we can't
+support it"), so any material relying on a second output for destination alpha
+composites differently in the browser and only in the browser -- a real
+capability gap, and the browser is the only target that takes that path.
+`MODERNGEKKO_NO_DUAL_SOURCE=1` forces the same path on the desktop: the floor
+stays clean at 0.032 against a 0.031 baseline.
+
+What the original section said, and what is still true of the *reasoning*:
+
+### If the coordinates were wrong it would explain everything
 
 `MODERNGEKKO_FLAT_SHADE=uv` in both builds, in the level:
 
