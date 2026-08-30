@@ -39,9 +39,15 @@ class CDP {
       }
     };
   }
-  send(method, params = {}) {
+  // sessionId addresses an attached target. The emulator runs on a worker
+  // (PROXY_TO_PTHREAD), so Profiler on the page session samples an idle main
+  // thread -- 99.9% "(idle)" -- and every interesting frame is somewhere this
+  // cannot see.
+  send(method, params = {}, sessionId) {
     const id = ++this.id;
-    this.ws.send(JSON.stringify({ id, method, params }));
+    const msg = { id, method, params };
+    if (sessionId) msg.sessionId = sessionId;
+    this.ws.send(JSON.stringify(msg));
     return new Promise((res, rej) => this.pending.set(id, { resolve: res, reject: rej }));
   }
   on(fn) { this.handlers.push(fn); }
@@ -121,6 +127,16 @@ function note(text) {
 let inBlock = false;
 
 cdp.on((m) => {
+  // Attaching to workers is what makes the emulator profileable at all: the
+  // core runs on one, and the page's own session sees an idle main thread.
+  if (m.method === 'Target.attachedToTarget') {
+    const t = m.params.targetInfo || {};
+    if (t.type === 'worker' || t.type === 'shared_worker') {
+      workerSessions.add(m.params.sessionId);
+      if (opt.profile) console.log(`[profile] attached to ${t.type} ${t.url || ''}`.trim());
+    }
+  }
+  if (m.method === 'Target.detachedFromTarget') workerSessions.delete(m.params.sessionId);
   if (m.method === 'Runtime.consoleAPICalled')
     note(m.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
   if (m.method === 'Log.entryAdded')
@@ -141,6 +157,10 @@ await cdp.send('Emulation.setDeviceMetricsOverride',
   { width: +opt.width, height: +opt.height, deviceScaleFactor: 1, mobile: !!opt.pad });
 if (opt.pad)
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+// flatten:true so worker sessions arrive on this one socket, addressed by
+// sessionId, rather than needing a second connection each.
+await cdp.send('Target.setAutoAttach',
+  { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => {});
 await cdp.send('Page.navigate', { url });
 await sleep(1500);
 // The page waits for a click so that audio and the module load are user-driven.
@@ -164,6 +184,37 @@ const acts = (opt.acts ? String(opt.acts).split(',') : []).map((spec) => {
 // different scenes, and every cross-build comparison in this project that used
 // them had to be thrown away. MODERNGEKKO_SHOT_AT is the desktop's equivalent
 // and takes the same guest seconds.
+// --profile "g130:20": start at guest 130, sample for 20 wall seconds.
+const cpuProfile = opt.profile ? (() => {
+  const [at, secs] = String(opt.profile).split(':');
+  return { at: +String(at).replace(/^g/i, ''), secs: +(secs || 20), started: false };
+})() : null;
+
+// Self time per function, which is what "where does the frame go" means. The
+// profiler reports a tree; the samples are what actually ran.
+const workerSessions = new Set();
+
+function summariseProfile(prof, label = '') {
+  const byId = new Map(prof.nodes.map((n) => [n.id, n]));
+  const self = new Map();
+  const total = prof.samples ? prof.samples.length : 0;
+  for (const id of prof.samples || []) {
+    const n = byId.get(id);
+    if (!n) continue;
+    const f = n.callFrame || {};
+    const name = f.functionName || '(anonymous)';
+    const url = (f.url || '').split('/').pop();
+    const key = url ? `${name}  [${url}]` : name;
+    self.set(key, (self.get(key) || 0) + 1);
+  }
+  const rows = [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30);
+  const idle = self.get('(idle)') || 0;
+  console.log(`[profile] ${label}: ${total} samples ` +
+              `(${(100 * idle / Math.max(total, 1)).toFixed(0)}% idle), top self time:`);
+  for (const [name, n] of rows)
+    console.log(`[profile] ${(100 * n / total).toFixed(1).padStart(5)}%  ${name}`);
+}
+
 const shotAt = (opt.shotAt ? String(opt.shotAt).split(',') : [])
   .map((v) => ({ at: +String(v).replace(/^g/i, ''), done: false }))
   .sort((a, b) => a.at - b.at);
@@ -183,6 +234,31 @@ while (Date.now() < deadline && !done) {
     const name = opt.shot.replace(/\.png$/, `-${String(++shotIndex).padStart(2, '0')}.png`);
     writeFileSync(name, Buffer.from(png.data, 'base64'));
     console.log(`[shot] ${name}`);
+  }
+  // --profile gN:SECS samples the CPU from guest second N for SECS seconds and
+  // prints the hottest functions. "92% of a frame is in VideoCommon" is as far
+  // as the GL shim can see; this names the functions inside it. Wasm frames
+  // carry their names as long as the build keeps its name section, which a
+  // 92 MB -O3 module does.
+  if (cpuProfile && !cpuProfile.started && guestSeconds >= cpuProfile.at) {
+    cpuProfile.started = true;
+    const sessions = [...workerSessions];
+    if (!sessions.length) console.log('[profile] no worker attached; profiling the page only');
+    for (const sid of sessions.length ? sessions : [undefined]) {
+      await cdp.send('Profiler.enable', {}, sid).catch(() => {});
+      await cdp.send('Profiler.setSamplingInterval', { interval: 200 }, sid).catch(() => {});
+      await cdp.send('Profiler.start', {}, sid).catch(() => {});
+    }
+    console.log(`[profile] started at guest ${guestSeconds.toFixed(0)}s ` +
+                `across ${sessions.length || 1} target(s)`);
+    setTimeout(async () => {
+      for (const sid of sessions.length ? sessions : [undefined]) {
+        try {
+          const { profile: prof } = await cdp.send('Profiler.stop', {}, sid);
+          summariseProfile(prof, sid || 'page');
+        } catch (e) { console.log(`[profile] stop failed on ${sid || 'page'}: ${e}`); }
+      }
+    }, cpuProfile.secs * 1000);
   }
   for (const sa of shotAt) {
     if (sa.done || guestSeconds < sa.at) continue;

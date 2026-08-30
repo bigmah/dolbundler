@@ -212,6 +212,17 @@ else()
   # thing that goes wrong there is an indirect call through a freed table entry:
   # "function signature mismatch", after the run, saying nothing about the run.
   target_link_options(dolweb PRIVATE -sEXIT_RUNTIME=0)
+
+# --profiling-funcs keeps the wasm name section, so a CPU profile names
+# functions instead of reporting "wasm-function[19893]". Without it a profile of
+# the emulator thread is 100% of one anonymous index and says nothing.
+#
+# Off by default: the names add several MB to a binary a phone downloads over
+# Wi-Fi, and they are only wanted while measuring.
+option(DOLWEB_PROFILING_FUNCS "Keep wasm function names so profiles are readable" OFF)
+if(DOLWEB_PROFILING_FUNCS)
+  target_link_options(dolweb PRIVATE --profiling-funcs)
+endif()
   # Dolphin's Sys tree, preloaded rather than fetched. It is small once the Wii
   # title databases and the seven megabytes of per-title INIs for games this
   # build will never see are left out (stage-sys.sh), and it is read early and
