@@ -424,6 +424,32 @@ And `DOLWEB_PAINT_ONLY=0x002d6a40` paints that mask and nothing else: the floor
 stays black, 0.69-0.98. **The floor is showing its base texture on unit 0**, and
 that texture's decoded bytes are identical to the desktop's.
 
+### The two builds cannot be aligned by guest time at all
+
+This matters more than any single result here, because it is the reason so many
+comparisons in this file had to be withdrawn.
+
+Anchoring the act timeline to the guest clock was necessary but is not
+sufficient, and neither is anchoring the *holds*. Run both builds from boot with
+identical guest-anchored inputs and screenshot both at guest 130, and they are
+in **different parts of the game**: the desktop is indoors in Andy's House with
+a wooden floor, the browser is outdoors in the back yard. Same timeline, same
+guest second, different place.
+
+The cause is not input timing. **The game streams from the disc and waits on it
+in guest time**, and the browser's reads go over HTTP while the desktop's come
+off local disk. The two builds therefore spend different amounts of *guest* time
+loading, and everything after the first load is offset. No amount of input
+anchoring fixes that.
+
+Cross-build savestates would have fixed it and do not work (below). So the only
+remaining way to compare a picture from each build is to anchor to an **event in
+the game** rather than to a time -- a level-load marker in the log, say -- or to
+sweep a range of guest seconds in both and pick a matching pair by eye.
+
+**Every visual cross-build comparison in this file predates that understanding
+and should be read with it in mind**, including the tiling observation below.
+
 ### The floor's texture coordinates do not tile in the browser
 
 `MODERNGEKKO_FLAT_SHADE=uv` in both builds, in the level:
