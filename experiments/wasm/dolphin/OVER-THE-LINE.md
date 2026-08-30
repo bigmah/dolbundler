@@ -595,15 +595,33 @@ environment variable, `MODERNGEKKO_NO_PALETTE_CONVERSION=1` **from boot**, which
 makes it debuggable natively at desktop speed instead of through a 4.5-minute
 browser run.
 
-The narrowest open question: the floor is a RAM C4 with all-zero indices and a
-*populated* 32-byte palette at TMEM 0x40000, and the CPU decode turns it black
-while the desktop turns it into wood. Both read the palette through
-`texture_info.GetTlutAddress()`. So either entry 0 of that palette differs
-between the two, or the desktop is not using the CPU decode at all --
-`bSupportsGPUTextureDecoding` requires palette conversion, so the desktop very
-likely decodes this texture **on the GPU**, sampling the TLUT from a texel
-buffer, while the browser decodes it on the CPU. Comparing the 32 palette bytes
-each path actually reads, for this texture, is the next measurement. The next question is concrete: for this draw, which TLUT does the
+### The asymmetry, finally located: the desktop never decodes this texture
+
+`GFX_ENABLE_GPU_TEXTURE_DECODING` defaults to **false**, so both builds use the
+same CPU `TexDecoder_Decode` with the same `GetTlutAddress()`. Same code, same
+pointer -- and yet:
+
+| | `0x009a9e60` in the decode census |
+|---|---|
+| Chrome | present, twice, in two separate runs (`srcnz=0 dstnz=0`) |
+| desktop | **absent -- it is never CPU-decoded at all** |
+
+Confirmed twice: the ungated decode census over a whole run lists 365 textures
+natively and `0x009a9e60` is not among them, and a run instrumented to print the
+palette bytes for exactly that address printed nothing.
+
+So the desktop's floor texture never enters `CreateTextureEntry`'s decode path.
+It is being served from somewhere that path does not reach -- an EFB copy held in
+VRAM is the obvious candidate, since those are registered without ever being
+decoded. In the browser there is no such entry, so Dolphin falls back to
+decoding guest RAM, which is all zeros, and the floor is black.
+
+That also explains why the `[palcopy]` tripwire never fired: reaching it requires
+*finding* an EFB copy at that address, and in the browser there is none to find.
+
+**So the question is no longer about palettes at all.** It is: why does the
+desktop have a texture cache entry at `0x009a9e60` that the browser does not?
+`DOLWEB_LOG_EFB_COPY=1` in both builds is the measurement. The next question is concrete: for this draw, which TLUT does the
 GPU path apply at draw time, and how does it differ from the one the CPU path
 baked in? `ApplyPaletteToEntry` and `texTlut` at the moment of the draw are where
 to look.

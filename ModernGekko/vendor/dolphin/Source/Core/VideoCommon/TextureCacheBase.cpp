@@ -2047,6 +2047,25 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
             fnv = (fnv ^ v) * 1099511628211ull;
           }
           const double mean = decoded_texture_size ? (double)sum / decoded_texture_size : 0.0;
+          // For the floor's texture, print the palette bytes the decode actually
+          // read. Both builds take this same CPU path (GPU texture decoding is
+          // off by default) with the same GetTlutAddress(), so if the output
+          // differs the *input palette* must -- and these 32 bytes are it.
+          if (texture_info.GetRawAddress() == 0x009a9e60 ||
+              texture_info.GetRawAddress() == 0x009b1e80)
+          {
+            const u8* tl = texture_info.GetTlutAddress();
+            const size_t tls = creation_info.palette_size;
+            const u8* tmem_base = TexDecoder_GetTmemSpan(0).data();
+            std::printf("[tlut] addr=%#010x fmt=%u tmem_off=%#06lx size=%zu bytes:",
+                        texture_info.GetRawAddress(),
+                        (unsigned)texture_info.GetTlutFormat(),
+                        tl && tmem_base ? (long)(tl - tmem_base) : -1L, tls);
+            for (size_t i = 0; tl && i < tls && i < 32; ++i)
+              std::printf(" %02x", tl[i]);
+            std::printf("\n");
+            std::fflush(stdout);
+          }
           std::printf("[decode] addr=%#010x %ux%u fmt=%u %s src=%zu srcnz=%zu "
                       "dst=%zu dstnz=%zu mean=%.2f fnv=%016llx levels=%u\n",
                       texture_info.GetRawAddress(), width, height,
