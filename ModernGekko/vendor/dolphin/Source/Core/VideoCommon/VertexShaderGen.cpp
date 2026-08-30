@@ -1,6 +1,10 @@
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <set>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include "VideoCommon/VertexShaderGen.h"
 
 #include "Common/Assert.h"
@@ -877,6 +881,30 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
   else
     out.Write("gl_Position = o.pos;\n");
   out.Write("}}\n");
+
+
+  // MODERNGEKKO_DUMP_VS="<numTexGens>" prints the generated vertex shader for
+  // shaders with that many texgens, once each.
+  //
+  // Texture coordinates are generated here, not in the pixel shader, and
+  // FLAT_SHADE=uv shows the floor's coordinates tiling on the desktop and not
+  // tiling in the browser. The pixel shaders for the same UID were already
+  // diffed and are equivalent; this is the other half.
+  if (const char* want = std::getenv("MODERNGEKKO_DUMP_VS"))
+  {
+    unsigned tg = 0;
+    if (std::sscanf(want, "%u", &tg) == 1 && uid_data->numTexGens == tg)
+    {
+      static std::set<std::string> dumped_vs;
+      const std::string src = out.GetBuffer();
+      if (dumped_vs.insert(src).second)
+      {
+        std::printf("[vshader] ==== numTexGens=%u (%zu bytes) ====\n%s"
+                    "[vshader] ==== end ====\n", tg, src.size(), src.c_str());
+        std::fflush(stdout);
+      }
+    }
+  }
 
   return out;
 }

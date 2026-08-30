@@ -451,9 +451,15 @@ it does not show a *tiled* one, and the tiling is the whole point.
 
 The shader normalises by texture size --
 `float size_s = float(texdim[texmap].x * 128)` -- and `texdims` is set from
-`entry->native_width/height` in `BindTextures`. If that differs between the
-builds, the coordinate scale differs and the tiling collapses exactly as seen,
-so the bind census now carries the native dimensions alongside the address.
+`entry->native_width/height` in `BindTextures`. **That is not it**: the bind
+census carries those dimensions now, and across all 82 textures bound in both
+builds in the level, not one differs.
+
+So the coordinate scale is right and the coordinates themselves are wrong.
+**Texture coordinates are generated in the vertex shader**, and only the pixel
+shader has been diffed so far. `MODERNGEKKO_DUMP_VS="<numTexGens>"` prints the
+vertex shader for a given texgen count -- 2 for the floor -- so the other half
+can be compared.
 
 ### A separate defect found on the way: GPU readback traps the wasm build
 
