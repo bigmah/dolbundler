@@ -2135,6 +2135,58 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
 
       entry->texture->Load(0, width, height, expanded_width, dst_buffer, decoded_texture_size);
 
+      // DOLWEB_READBACK=1 reads level 0 back off the GPU straight after
+      // uploading it and checksums both sides.
+      //
+      // Every comparison so far has checked what the CPU *produced*; none has
+      // checked what the GPU actually holds. That distinction is the one thing
+      // the paint experiment cannot see: painting writes a single flat colour,
+      // which survives any stride, offset or partial-write error in the upload
+      // unchanged, so "painting fixes the floor" is equally consistent with a
+      // correct texture being uploaded wrongly. This is the direct test.
+      static const bool readback = std::getenv("DOLWEB_READBACK") != nullptr;
+      if (readback && width > 0 && height > 0)
+      {
+        static std::set<u32> readback_seen;
+        static u64 mismatches = 0;
+        if (readback_seen.size() < 64 && readback_seen.insert(texture_info.GetRawAddress()).second)
+        {
+          unsigned long long cpu = 1469598103934665603ull;
+          for (u32 y = 0; y < height; ++y)
+          {
+            const u8* row = dst_buffer + (size_t)y * expanded_width * 4;
+            for (u32 i = 0; i < width * 4; ++i)
+              cpu = (cpu ^ row[i]) * 1099511628211ull;
+          }
+          TextureConfig rc(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
+                           AbstractTextureType::Texture_2DArray);
+          auto rb = g_gfx->CreateStagingTexture(StagingTextureType::Readback, rc);
+          if (rb)
+          {
+            rb->CopyFromTexture(entry->texture.get(), 0, 0);
+            rb->Flush();
+            if (rb->Map())
+            {
+              const u8* base = reinterpret_cast<const u8*>(rb->GetMappedPointer());
+              const size_t stride = rb->GetMappedStride();
+              unsigned long long gpu = 1469598103934665603ull;
+              for (u32 y = 0; y < height; ++y)
+                for (u32 i = 0; i < width * 4; ++i)
+                  gpu = (gpu ^ base[(size_t)y * stride + i]) * 1099511628211ull;
+              if (gpu != cpu)
+                ++mismatches;
+              std::printf("[readback] addr=%#010x %ux%u fmt=%u cpu=%016llx gpu=%016llx %s"
+                          " (%llu mismatches)\n",
+                          texture_info.GetRawAddress(), width, height,
+                          (unsigned)texture_info.GetTextureFormat(), cpu, gpu,
+                          gpu == cpu ? "MATCH" : "*** DIFFERS ***",
+                          (unsigned long long)mismatches);
+              std::fflush(stdout);
+            }
+          }
+        }
+      }
+
       arbitrary_mip_detector.AddLevel(width, height, expanded_width, dst_buffer);
 
       dst_buffer += decoded_texture_size;
