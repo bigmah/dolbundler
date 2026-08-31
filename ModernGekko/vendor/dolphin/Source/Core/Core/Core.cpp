@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -189,7 +190,23 @@ static bool StartCanvasOwningThread(pthread_t* thread, void* (*entry)(void*), vo
   // picture in headless Chrome, where dual core rendered 99.3% black at guest
   // 130 and 150 with the guest clock running at a full 100%.
 #if !defined(DOLWEB_OFFSCREEN_CANVAS)
-  wants_canvas = false;
+  // ...which on a real iPhone means asking for it. Removing the request fixed
+  // headless Chrome and broke the device: dual core rendered nothing at all on
+  // an iPhone 15 Pro Max while the guest ran the game perfectly -- levels
+  // loading, 27 fps counted, screen black. Putting the request back fixes it.
+  //
+  // Nothing else reproduces either half. Headless Chrome, the iOS simulator and
+  // *desktop Safari on real WebKit and real Metal* all render with the request
+  // removed; only the device does not. So the device decides, and Chrome takes
+  // the override, because Chrome is a measurement tool and the phone is the
+  // target.
+  const char* canvas_thread = std::getenv("DOLWEB_CANVAS_THREAD");
+  if (canvas_thread && (canvas_thread[0] == '0' || canvas_thread[0] == '\0'))
+  {
+    WARN_LOG_FMT(BOOT, "DOLWEB_CANVAS_THREAD=0: not asking for the canvas. "
+                       "Dual core renders nothing on a real iPhone this way.");
+    wants_canvas = false;
+  }
 #endif
 
   if (!wants_canvas)
