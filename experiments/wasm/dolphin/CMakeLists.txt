@@ -30,6 +30,17 @@ set(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME ON CACHE BOOL "" FORCE)
 # No SDL3 window, no imgui launcher, no port tool: the page is the frontend.
 set(MODERNGEKKO_ENABLE_FRONTEND OFF CACHE BOOL "" FORCE)
 
+# Whether the rendering thread is allowed to own the browser's canvas. This has
+# to be declared before ModernGekko is added, because Core.cpp lives inside it
+# and has to know: asking for a canvas transfer in a build that cannot transfer
+# canvases is a proxied postMessage that buys nothing, and it can cost the
+# picture entirely.
+option(DOLWEB_OFFSCREEN_CANVAS
+       "Hand the canvas to the rendering thread (faster, but WebKit shows nothing)" OFF)
+if(DOLWEB_OFFSCREEN_CANVAS)
+  add_compile_definitions(DOLWEB_OFFSCREEN_CANVAS=1)
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../ModernGekko
                  ${CMAKE_BINARY_DIR}/moderngekko EXCLUDE_FROM_ALL)
 
@@ -271,8 +282,7 @@ endif()
   # Page.captureScreenshot cannot see a transferred canvas either, so a headless
   # run looks identical whether it works or not -- which is how ON survived as a
   # default. Check it in the simulator, not in Chrome.
-  option(DOLWEB_OFFSCREEN_CANVAS
-         "Hand the canvas to the rendering thread (faster, but WebKit shows nothing)" OFF)
+  # Declared near the top, because Core.cpp has to see it as a compile define.
   if(DOLWEB_OFFSCREEN_CANVAS)
     target_link_options(dolweb PRIVATE
       -sOFFSCREENCANVAS_SUPPORT=1

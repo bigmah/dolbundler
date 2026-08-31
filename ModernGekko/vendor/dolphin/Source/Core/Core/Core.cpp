@@ -180,6 +180,18 @@ static bool StartCanvasOwningThread(pthread_t* thread, void* (*entry)(void*), vo
   // so a refusal there is a thread that is never created and a pthread_create
   // that has already returned success. The emulation thread simply never ran,
   // with no error anywhere.
+  // And only when this build can actually transfer one. Without
+  // -sOFFSCREENCANVAS_SUPPORT the transfer cannot happen, but *asking* for it
+  // still changes how the thread is created: emscripten routes the spawn
+  // through the browser's main thread by postMessage so the transfer can be
+  // performed there. That buys nothing here -- a build linked without the
+  // support gets a working proxied context either way -- and it costs the
+  // picture in headless Chrome, where dual core rendered 99.3% black at guest
+  // 130 and 150 with the guest clock running at a full 100%.
+#if !defined(DOLWEB_OFFSCREEN_CANVAS)
+  wants_canvas = false;
+#endif
+
   if (!wants_canvas)
     return pthread_create(thread, nullptr, entry, arg) == 0;
 
