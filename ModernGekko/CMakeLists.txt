@@ -857,6 +857,18 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/src")
     add_test(NAME moderngekko.paired_single
              COMMAND moderngekko_paired_single_test)
+    # The fast path compiles out on anything with a real FMA instruction, so a
+    # native test would otherwise validate the fallback and nothing else. Force
+    # it on: what needs testing is the path only wasm takes.
+    target_compile_definitions(moderngekko_paired_single_test
+                               PRIVATE DOLRECOMP_FMA_FASTPATH=1)
+
+    # gekko_fma on its own, against fma, over the input shapes that reach it in
+    # flight plus the exponent edges each of its guards exists for.
+    add_executable(moderngekko_gekko_fma_test
+        vendor/dolphin/DolRecomp/tests/test_gekko_fma.c)
+    add_test(NAME moderngekko.gekko_fma
+             COMMAND moderngekko_gekko_fma_test)
 
     # Header-only, so the test needs no companion translation unit.
     add_executable(moderngekko_launcher_savestates_test

@@ -1142,6 +1142,8 @@ static f64 force_25_bit(f64 value) {
     return f64_value(bits);
 }
 
+#include "gekko_fma.h"
+
 bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
              bool subtract, bool negative, f64* output) {
     f64 addend = subtract ? -b : b;
@@ -1149,15 +1151,15 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
     f64 unrounded_result = 0.0;
 
     if (!single) {
-        result = fma(a, c, addend);
+        result = gekko_fma(a, c, addend);
     } else {
         f64 rounded_c = force_25_bit(c);
-        result = fma(a, rounded_c, addend);
+        result = gekko_fma(a, rounded_c, addend);
         u64 bits = f64_bits(result);
         if ((bits & 0x000000001FFFFFFFull) == 0x0000000010000000ull) {
             f64 a_prime = addend - result;
             f64 b_prime = result + a_prime;
-            f64 error = fma(a, rounded_c, a_prime) + (addend - b_prime);
+            f64 error = gekko_fma(a, rounded_c, a_prime) + (addend - b_prime);
             if (error != 0.0) {
                 if ((error > 0.0) == (result > 0.0)) bits++;
                 else bits--;
@@ -1517,9 +1519,9 @@ void ppc_ps_div_op(CPUState* cpu, u8 d, u8 a, u8 b) {
 
 void ppc_ps_madd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
                     bool subtract, bool negative) {
-    f64 ps0 = fma(cpu->fpr[a], force_25_bit(cpu->fpr[c]),
+    f64 ps0 = gekko_fma(cpu->fpr[a], force_25_bit(cpu->fpr[c]),
                   subtract ? -cpu->fpr[b] : cpu->fpr[b]);
-    f64 ps1 = fma(cpu->ps1[a], force_25_bit(cpu->ps1[c]),
+    f64 ps1 = gekko_fma(cpu->ps1[a], force_25_bit(cpu->ps1[c]),
                   subtract ? -cpu->ps1[b] : cpu->ps1[b]);
     if (negative && !isnan(ps0))
         ps0 = -ps0;
@@ -1530,14 +1532,14 @@ void ppc_ps_madd_op(CPUState* cpu, u8 d, u8 a, u8 c, u8 b,
 
 void ppc_ps_madds0(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
     f64 scalar = force_25_bit(cpu->fpr[c]);
-    write_paired_result(cpu, d, fma(cpu->fpr[a], scalar, cpu->fpr[b]),
-                        fma(cpu->ps1[a], scalar, cpu->ps1[b]));
+    write_paired_result(cpu, d, gekko_fma(cpu->fpr[a], scalar, cpu->fpr[b]),
+                        gekko_fma(cpu->ps1[a], scalar, cpu->ps1[b]));
 }
 
 void ppc_ps_madds1(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {
     f64 scalar = force_25_bit(cpu->ps1[c]);
-    write_paired_result(cpu, d, fma(cpu->fpr[a], scalar, cpu->fpr[b]),
-                        fma(cpu->ps1[a], scalar, cpu->ps1[b]));
+    write_paired_result(cpu, d, gekko_fma(cpu->fpr[a], scalar, cpu->fpr[b]),
+                        gekko_fma(cpu->ps1[a], scalar, cpu->ps1[b]));
 }
 
 void ppc_ps_sum0(CPUState* cpu, u8 d, u8 a, u8 c, u8 b) {

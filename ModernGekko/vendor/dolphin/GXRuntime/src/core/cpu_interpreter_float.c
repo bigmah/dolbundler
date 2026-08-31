@@ -283,16 +283,25 @@ f64 force_25_bit(f64 value) {
     return f64_value(bits);
 }
 
-/* DOLRECOMP_MEASURE_FAST_FMA replaces the fused multiply-add with a plain
-   multiply and add. It is NOT correct -- PowerPC's fmadd rounds once and this
-   rounds twice -- and exists only to put a number on what the fused path costs.
-   WebAssembly has no FMA instruction, so every fma() here is musl's software
-   implementation, and a profile of the emulator thread in gameplay puts it at
+/* WebAssembly has no FMA instruction, so every fma() here is musl's software
+   implementation, and a profile of the emulator thread in gameplay put it at
    8.4%: the single hottest function in the build.
-   If the measurement justifies it, the fix is a fast *exact* fma (Dekker
-   two-product with a slow-path fallback), not this. */
+
+   gekko_fma is the fast *exact* replacement this comment used to ask for. It
+   takes a plain multiply-add whenever the product is provably exact -- which is
+   bit-identical, because the rounding it skips does nothing -- and falls back to
+   fma otherwise. The macro routes the call sites below without touching them;
+   the header is included first, so its own fallback call is not caught by it.
+
+   DOLRECOMP_MEASURE_FAST_FMA is the older measurement hook: an unconditional
+   multiply-add. It is NOT correct -- PowerPC's fmadd rounds once and this rounds
+   twice -- and exists only to put a ceiling on what the fused path costs. */
+#include "../../../DolRecomp/src/cpu/gekko_fma.h"
+
 #ifdef DOLRECOMP_MEASURE_FAST_FMA
 #define fma(a, b, c) ((a) * (b) + (c))
+#else
+#define fma(a, b, c) gekko_fma((a), (b), (c))
 #endif
 
 bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
