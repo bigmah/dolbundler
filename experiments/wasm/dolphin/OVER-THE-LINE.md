@@ -54,6 +54,25 @@ itself into Andy's House, window `?ab=30&abfrom=125`:
 | iPhone 15 Pro Max, **Null**, in the level | **95%** (median 102, 70-134) |
 | iPhone 15 Pro Max, **OpenGL**, in the level | *pending* |
 
+**2026-08-31, on the device, throttled (so 100% is a ceiling, not a headroom
+reading):**
+
+| iPhone 15 Pro Max | speed median | 2nd half | under 70% |
+|---|---|---|---|
+| defaults (dual core, canvas requested) | **100%** | 97% | 22% |
+| `DOLWEB_SHADER_MODE=1` (ubershaders) | **56%** | 29% | 87% |
+
+**Ubershaders are a regression here** -- they render, but at roughly half the
+speed. The per-pixel cost is not worth the absence of compile stalls on this
+GPU.
+
+**The hitching is in gameplay, not loading.** Of 344 dips below 70% in a working
+session, only **42 landed within three log lines of a file load**. An earlier
+sample said the opposite and was taken over a boot-heavy window -- a reminder
+that "correlated with loads" has to be measured in the level, not across a boot.
+The owner of the device said "the gameplay is slow, I get that the first load
+takes a while" before the data did, and was right.
+
 The phone's CPU half is **not** the problem: 95% against the simulator's 85%,
 on a core that ought to be slower than the M4's. The gap is the other way round
 because the simulator shares the Mac's GPU and its Safari is not the phone's
