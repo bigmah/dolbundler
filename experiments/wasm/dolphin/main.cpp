@@ -405,6 +405,25 @@ int main(int argc, char** argv)
   // thing that is busy.
   if (const char* scale = std::getenv("DOLWEB_EFB_SCALE"))
     config.graphics.internal_resolution_scale = std::atoi(scale);
+  // Shader compilation mode. Dolphin's default is Synchronous, which compiles
+  // every new shader on the video thread while the frame waits -- and the
+  // asynchronous modes cannot help here, because they need the second GL
+  // context that this build fails to create ("Failed to create shared context
+  // for shader compiling", on every engine including the device).
+  //
+  // SynchronousUberShaders (1) is the one that does not need it: one
+  // general-purpose shader draws everything, so nothing is compiled mid-frame.
+  // It trades per-pixel cost for the absence of stalls, which is a real trade
+  // and not obviously a win on a phone -- hence a knob rather than a default.
+  //   0 Synchronous  1 SynchronousUberShaders
+  //   2 AsynchronousUberShaders  3 AsynchronousSkipRendering
+  if (const char* mode = std::getenv("DOLWEB_SHADER_MODE"))
+  {
+    const int m = std::atoi(mode);
+    Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
+                    static_cast<ShaderCompilationMode>(m));
+    std::printf("[dolweb] shader compilation mode %d\n", m);
+  }
   // A diagnostic more than a setting: Stretch takes the presenter's draw-rect
   // arithmetic out of the picture, which is how you tell "the image is being
   // placed wrong" from "the XFB only has content in part of it".
