@@ -66,9 +66,14 @@ rm -f "$OUT"/shot-*.png
 url="http://127.0.0.1:$PORT/index.html?auto=1&report=1&backend=$BACKEND"
 [ -n "$EXTRA" ] && url="$url&$EXTRA"
 echo "url: $url"
-# about:blank first: openurl on the page Safari is already showing does not
-# reload it, so a second run would measure the first one still running.
-xcrun simctl openurl "$udid" "about:blank" >/dev/null 2>&1 || true
+# Terminate Safari rather than navigating it. openurl on the page Safari is
+# already showing does not reload it, and about:blank only ever reaches the
+# *frontmost* tab -- every other tab keeps running its emulator. Two of them
+# competing reads as the build being five times slower than it is: a run that
+# should have measured 100% reported 13%, and the next 1%, with two simulator
+# WebContent processes at 112% and 99% CPU. Killing Safari is the only way to
+# know what is running.
+xcrun simctl terminate "$udid" com.apple.mobilesafari >/dev/null 2>&1 || true
 sleep 2
 # openurl can time out (NSPOSIXErrorDomain code=60) while the page still loads
 # and runs perfectly -- the simulator is slow to acknowledge, not refusing. With
