@@ -698,6 +698,54 @@ shader that never ran -- including the ring that "fixed" the ground at a cost of
 6x, which was only changing when the texture cache re-decoded. Fixed in
 `fd230c5`. **Check that the instrument compiled before believing what it shows.**
 
+## 2b. Performance: what to do next (written 2026-08-31)
+
+**Start here: take one unthrottled reading on the device.**
+
+    ...index.html?auto=1&report=1&env=MODERNGEKKO_EMULATION_SPEED=0
+
+Every phone number in this file is **throttled**, so 100% is a ceiling and not a
+headroom reading -- it cannot tell "comfortably fast" from "barely keeping up
+and dropping frames", and the person holding the phone reports the second while
+the log shows 100%. Unthrottled, the device renders normally and stays playable,
+which is why this is a better instrument than `?ab=`, whose Null half is a black
+screen that gets closed before it produces a result.
+
+The answer forks the work, and until it exists both branches are guesswork:
+
+- **above 100%** -- there is headroom, and the dips are spiky work. Go after
+  texture uploads, EFB copies, and shader compilation, in that order. 88% of
+  dips are *not* near a file load, so they are in the frame, not the disc.
+- **well below 100%** -- the renderer is a wall and the fix is structural.
+  Then the question is what the proxied GL call path costs on the device, which
+  dual core reduced but did not remove.
+
+**Ruled out, with evidence:**
+
+| | why |
+|---|---|
+| LLVM backend | 213.8 MB vs 86.5 MB, overflows the stack at boot, on a build already at 614 MB on a device that has jetsam-killed the tab |
+| Ubershaders | measured on the device: 56% against 100% |
+| Internal resolution | already 1x native; `GFX_EFB_SCALE` defaults to 1 |
+| The CPU | 95% with the Null backend on the phone |
+| Disc read-ahead | written, then reverted: only 42 of 344 dips are near a load, so it targets the wrong thing. Its 22%-vs-97% "regression" was contention, not the change -- do not cite that number |
+
+**Still untried, in order:** the recompiler knobs (`DOLRECOMP_C_MAX_CALL_DEPTH`,
+`DOLRECOMP_C_LOOP_CYCLE_BUDGET`), tuned in the menus and never retuned for
+gameplay -- the budget must stay well under 4096 or the ARAM-init livelock
+returns; then texture upload batching; then EFB copy elimination.
+
+**Two knobs exist so a device hypothesis costs a URL and not a rebuild:**
+`DOLWEB_SHADER_MODE`, `DOLWEB_CANVAS_THREAD`. Add more of these rather than
+rebuilding -- only the person holding the phone can run the test.
+
+**Before believing any slowdown, check the machine is quiet.** Leftover
+emulators made three separate changes look like 5x regressions in one session:
+simulator tabs, simulator Safari, desktop Safari. `ps -Ao pcpu,comm -r | head`,
+and ask whether `reports.jsonl` is still growing when nothing should be running.
+`sim-run.sh` and `safari-run.sh` now both close by the real window title, before
+as well as after.
+
 ## 3. Not yet swept
 
 Menus, Andy's House and Olliewood are all that have been looked at. Every defect
