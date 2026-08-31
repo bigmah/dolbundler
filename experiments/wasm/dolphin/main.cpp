@@ -361,12 +361,10 @@ int main(int argc, char** argv)
 #else
   config.audio.backend = "No Audio Output";
 #endif
-  // The GPU can have its own thread, and it is the single largest performance
-  // win measured in this build -- and it is NOT the default. Gameplay,
-  // throttle off, frames actually rendered:
+  // The GPU has its own thread, and it is the single largest performance win
+  // measured in this build. Gameplay, throttle off, frames actually rendered:
   //
   //   single core   45.8 fps median      dual core   67.3 fps median
-  //
   //
   // (Guest-seconds-per-wall-second reads 82.9% -> 100-115%, but with dual core
   // the CPU thread runs ahead of the GPU, so that metric flatters it. Frames
@@ -381,17 +379,19 @@ int main(int argc, char** argv)
   // was measured in the menus, where the renderer is nearly free and the extra
   // thread only costs synchronisation.
   //
-  // **It is opt-in anyway, because in WebKit it intermittently renders nothing
-  // at all.** Same build, two consecutive simulator runs: one drew a picture in
-  // 0 of 10 screenshots across 200 seconds -- guest clock advancing at 100%,
-  // 0.0 fps, a black screen for the entire run -- and the next drew one in 10
-  // of 10. Chrome never showed it. That is a coin flip on the target device,
-  // and no frame rate is worth it.
+  // This was opt-in for a while on the belief that WebKit intermittently
+  // rendered nothing with it -- "0 of 10 screenshots across 200 seconds". That
+  // was a measurement artifact, not a defect. `simctl openurl` can time out
+  // while the page loads and runs perfectly; sim-run.sh ran under `set -e`, so
+  // the timeout aborted the run before it took a single screenshot, and the
+  // detector scored zero screenshots as zero pictures. The run it "failed" on
+  // went on to render for sixteen hours at 99% speed. No dual-core session in
+  // the whole report log has ever shown the claimed signature of 0 fps at a
+  // full-speed guest clock. sim-run.sh now tolerates the timeout and the
+  // detector separates "never launched" from "launched and drew nothing".
   //
-  // The same shape as the OffscreenCanvas failure: WebKit, threads and a
-  // canvas. Worth chasing, because 45.8 -> 67.3 fps is the largest win
-  // measured here; until it is understood, DOLWEB_CPU_THREAD=1 turns it on for
-  // anyone measuring.
+  // DOLWEB_CPU_THREAD=0 turns it off.
+  config.cpu_thread = true;
   if (const char* cpu_thread = std::getenv("DOLWEB_CPU_THREAD"))
     config.cpu_thread = (cpu_thread[0] != '0' && cpu_thread[0] != '\0');
   // Two builds only line up if they are measured in the same scene, and a boot
