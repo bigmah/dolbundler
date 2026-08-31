@@ -70,7 +70,14 @@ echo "url: $url"
 # reload it, so a second run would measure the first one still running.
 xcrun simctl openurl "$udid" "about:blank" >/dev/null 2>&1 || true
 sleep 2
-xcrun simctl openurl "$udid" "$url"
+# openurl can time out (NSPOSIXErrorDomain code=60) while the page still loads
+# and runs perfectly -- the simulator is slow to acknowledge, not refusing. With
+# `set -e` a bare call turns that into an aborted run that takes no screenshots,
+# which then reads as "the build rendered nothing". It cost a wrong conclusion
+# about dual core once; do not restore the bare call.
+if ! xcrun simctl openurl "$udid" "$url"; then
+  echo "  openurl reported a failure; the page usually loads anyway, continuing"
+fi
 
 n=0
 elapsed=0
