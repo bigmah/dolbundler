@@ -289,7 +289,7 @@ So the ~14% is real and unclaimable until someone makes WebKit present a
 transferred canvas. The 24 points remain the biggest single lever, and the route
 to them is not this.
 
-### The largest win measured, and why it is not the default
+### The largest win measured, and why it is now the default
 
 **Giving the GPU its own thread.** Gameplay, throttle off, frames actually
 rendered:
@@ -308,20 +308,44 @@ It also retires "dual core is an 11% loss": that was measured in the **menus**,
 where the renderer is nearly free and the extra thread only costs
 synchronisation. In gameplay the renderer is the thing being waited on.
 
-**And it is opt-in, because in WebKit it intermittently renders nothing.** Same
-build, two consecutive simulator runs:
+**It is the default as of 2026-08-31, and the reason it was not is retracted.**
+The file used to record this:
 
 | run | shots showing a picture |
 |---|---|
 | first | **0 of 10** -- 200 s of black, guest clock at 100%, 0.0 fps |
 | second | 10 of 10 |
 
-Chrome never showed it. That is a coin flip on the target device and no frame
-rate is worth it. `DOLWEB_CPU_THREAD=1` turns it on for measurement.
+The first run took **no screenshots at all**. `simctl openurl` had timed out
+while the page loaded and ran fine, `sim-run.sh` was under `set -e`, and the
+detector scored zero screenshots as zero pictures. The page it supposedly killed
+went on to run for sixteen hours at 99% speed. No dual-core session in
+`reports.jsonl` has ever shown 0 fps at a full-speed guest clock. Re-run with
+the timeout tolerated: 3 runs, 3 rendered.
 
-It is the same shape as the OffscreenCanvas failure -- WebKit, threads and a
-canvas -- and understanding that one probably explains both. **This is the
-highest-value open thread in the file.**
+**But the guess underneath it was right.** There *was* a canvas defect, in the
+other engine:
+
+| Chrome, gameplay | near-black @ g130 | fps | speed |
+|---|---|---|---|
+| dual core, before | **0.993** | 0 | 100% (throttled, so blind) |
+| single core | 0.428 | 39.8 | 67% |
+| dual core, after | **0.428** | **51.5** | **86%** |
+
+`StartCanvasOwningThread` decided whether to request a canvas transfer from
+`wsi.type == WindowSystemType::Emscripten` -- always -- without asking whether
+the build could perform one. It cannot: `DOLWEB_OFFSCREEN_CANVAS` is OFF, so
+nothing links `-sOFFSCREENCANVAS_SUPPORT`. Asking anyway still routes the spawn
+through the browser's main thread by postMessage. The **emulation** thread
+survives that, because it has a claim/fallback guard that starts a plain thread
+when the canvas-carrying one never arrives; the **video** thread has no guard,
+and it initialised video without error, logged no warning, and drew to something
+the page never shows. Steady state after the fix is 60.0 fps at 100%.
+
+So the prediction in this file -- "the same shape as the OffscreenCanvas failure
+-- WebKit, threads and a canvas -- and understanding that one probably explains
+both" -- was correct. One cause, two symptoms, two engines. What was wrong was
+which engine had it.
 
 **Use frames rendered, not guest time, to judge dual core.** Guest seconds per
 wall second reads 82.9% -> 100-115%, but with a second thread the CPU runs ahead
