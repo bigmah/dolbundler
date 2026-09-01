@@ -362,6 +362,88 @@ static int emit_lookup_indexed(FILE* out, const FunctionList* funcs) {
     return 1;
 }
 
+void function_list_sorted_bounds(const FunctionList* funcs, u32* starts, u32* ends) {
+    FunctionRange* sorted = (FunctionRange*)malloc(
+        (funcs->count ? funcs->count : 1u) * sizeof(*sorted));
+    if (!sorted)
+        return;
+    memcpy(sorted, funcs->ranges, funcs->count * sizeof(*sorted));
+    qsort(sorted, funcs->count, sizeof(*sorted), range_compare);
+    for (u32 i = 0; i < funcs->count; i++) {
+        starts[i] = sorted[i].start;
+        ends[i] = sorted[i].end;
+    }
+    free(sorted);
+}
+
+static FunctionRange* sorted_ranges(const FunctionList* funcs) {
+    FunctionRange* sorted = (FunctionRange*)malloc(
+        (funcs->count ? funcs->count : 1u) * sizeof(*sorted));
+    if (!sorted)
+        return NULL;
+    memcpy(sorted, funcs->ranges, funcs->count * sizeof(*sorted));
+    qsort(sorted, funcs->count, sizeof(*sorted), range_compare);
+    return sorted;
+}
+
+void emit_chunk_index_lookup(FILE* out, const FunctionList* funcs) {
+    FunctionRange* sorted = sorted_ranges(funcs);
+    FunctionList view = {0};
+    if (!sorted)
+        return;
+    view.ranges = sorted;
+    view.count = funcs->count;
+    view.capacity = funcs->count;
+
+    fprintf(out, "\n#define DOLRECOMP_CHUNK_COUNT %uu\n", funcs->count);
+    fprintf(out,
+            "extern const DolRecompFunction %sdolrecomp_chunk_table[];\n",
+            generated_symbol_prefix());
+    fprintf(out,
+            "\n/* The chassis's index of the chunk covering `address`, or -1. Sorted by\n"
+            "   start address like the chassis's chunk_ranges, so the gate's chunk_open\n"
+            "   can be asked about it directly. */\n");
+    fprintf(out,
+            "static inline DOLRECOMP_UNUSED int dolrecomp_chunk_index_of(u32 address) {\n");
+    for (u32 first = 0; first < view.count;) {
+        u32 end = uniform_run_end(&view, first);
+        const FunctionRange* head = &sorted[first];
+        if (end == first + 1u || head->start >= head->end) {
+            fprintf(out,
+                    "    if (address >= 0x%08Xu && address < 0x%08Xu && "
+                    "((address - 0x%08Xu) & 3u) == 0u) return %u;\n",
+                    head->start, head->end, head->start, first);
+        } else {
+            const FunctionRange* last = &sorted[end - 1u];
+            fprintf(out, "    {\n");
+            fprintf(out, "        u32 offset = address - 0x%08Xu;\n", head->start);
+            fprintf(out,
+                    "        if (offset < 0x%08Xu && (offset & 3u) == 0u) "
+                    "return %u + (int)(offset / 0x%08Xu);\n",
+                    last->end - head->start, first, head->end - head->start);
+            fprintf(out, "    }\n");
+        }
+        first = end;
+    }
+    fprintf(out, "    return -1;\n");
+    fprintf(out, "}\n");
+    free(sorted);
+}
+
+void emit_chunk_table_definition(FILE* out, const FunctionList* funcs) {
+    FunctionRange* sorted = sorted_ranges(funcs);
+    if (!sorted)
+        return;
+    fprintf(out,
+            "\n// Every chunk, in the chassis's order; dolrecomp_chunk_index_of() indexes it.\n");
+    fprintf(out, "const DolRecompFunction %sdolrecomp_chunk_table[%uu] = {\n",
+            generated_symbol_prefix(), funcs->count);
+    for (u32 i = 0; i < funcs->count; i++)
+        fprintf(out, "    %sfunc_%08X,\n", generated_symbol_prefix(), sorted[i].start);
+    fprintf(out, "};\n");
+    free(sorted);
+}
+
 static void emit_lookup_linear(FILE* out, const FunctionList* funcs) {
     fprintf(out, "\nstatic inline DolRecompFunction dolrecomp_find_original(u32 address) {\n");
     for (u32 first = 0; first < funcs->count;) {
@@ -393,11 +475,44 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
     if (dispatch_lookup_mode() != DISPATCH_LOOKUP_INDEXED ||
         !emit_lookup_indexed(out, funcs))
         emit_lookup_linear(out, funcs);
+    emit_chunk_index_lookup(out, funcs);
+    // DOLRECOMP_MODULE_LOOP=1: after the chassis dispatches into the module,
+    // keep following transfers in place -- a blr back to a chunk the chassis
+    // would have dispatched into, a bctr, a fallthrough the gate refused a
+    // moment ago -- for as long as the gate allows. Every transfer asks the
+    // gate the same three questions a direct call does, so the SMC guard, the
+    // slice and pending exceptions are all still honoured; what is skipped is
+    // the chassis's own round trip, which is a rel-section scan, two host-call
+    // lookups, a chunk lookup and a timebase advance per dispatch. The chassis
+    // says whether it has per-dispatch work of its own through the gate's
+    // CONTINUE flag; read once per chassis dispatch.
+    const char* module_loop = getenv("DOLRECOMP_MODULE_LOOP");
+    const bool want_loop = module_loop && strcmp(module_loop, "1") == 0 && funcs->count;
+    if (want_loop) {
+        fprintf(out, "\nstatic inline void dolrecomp_continue(CPUState* ctx) {\n");
+        fprintf(out, "    bool %sdolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index);\n",
+                generated_symbol_prefix());
+        fprintf(out, "    bool %sdolrecomp_native_gate_continues(void);\n",
+                generated_symbol_prefix());
+        fprintf(out, "    if (!%sdolrecomp_native_gate_continues()) return;\n",
+                generated_symbol_prefix());
+        fprintf(out, "    for (;;) {\n");
+        fprintf(out, "        if (ctx->exception) return;\n");
+        fprintf(out, "        int chunk = dolrecomp_chunk_index_of(ctx->pc);\n");
+        fprintf(out, "        if (chunk < 0 || !%sdolrecomp_native_gate_allows(ctx, (u32)chunk)) return;\n",
+                generated_symbol_prefix());
+        fprintf(out, "        %sdolrecomp_chunk_table[chunk](ctx);\n", generated_symbol_prefix());
+        fprintf(out, "    }\n");
+        fprintf(out, "}\n");
+        printf("  in-module dispatch loop enabled\n");
+    }
     fprintf(out, "\nstatic inline int dolrecomp_call_original(CPUState* ctx, u32 address) {\n");
     fprintf(out, "    DolRecompFunction fn = dolrecomp_find_original(address);\n");
     fprintf(out, "    if (!fn) return 0;\n");
     fprintf(out, "    ctx->pc = address;\n");
     fprintf(out, "    fn(ctx);\n");
+    if (want_loop)
+        fprintf(out, "    dolrecomp_continue(ctx);\n");
     fprintf(out, "    return 1;\n");
     fprintf(out, "}\n");
     fprintf(out, "\nstatic inline bool dolrecomp_physical_pc_alias(CPUState* ctx, u32 address, u32* alias_out) {\n");

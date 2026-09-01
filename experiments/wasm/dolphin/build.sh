@@ -67,7 +67,16 @@ NODE=OFF
 # DOLRECOMP_DIRECT_CALLS` should match. Note DOLRECOMP_C_MAX_CALL_DEPTH only
 # means anything once this is on -- it is the ceiling on the host recursion these
 # calls create, and on a module without them it governs nothing.
-MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c128-tail/generated}"
+#
+# 2026-09-01, same recipe, newer dolrecomp (gexe52-c128-tc): the fallthrough off
+# a chunk's end and every bctr/bctrl are resolved in the module too, and the
+# transfers with nothing to resume into are *real* wasm tail calls (musttail ->
+# return_call; needs -mtail-call below, and Safari 18.2+). That took chassis
+# dispatches from 9.05 to 0.94 per 1000 guest cycles, deterministic, and the OGL
+# gameplay rate 923 -> 992 M ticks/sample (+7.4%, three interleaved pairs). The
+# same regeneration also fixed the gate index every text-section call passed:
+# it was computed from a per-section table and named the chunk four below.
+MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c128-tc/generated}"
 BUILD=""
 OPT="${DOLWEB_MODULE_OPT:-3}"
 # Cross-translation-unit inlining over a whole game is 65 MB of bitcode through
@@ -131,7 +140,13 @@ SIMD="${DOLWEB_SIMD:-}"
 # 1024 and not more: the chassis rescues a spinning loop by charging
 # LOOP_GUARD_YIELD_CYCLES (4096) so the guard trips, and a budget at or above
 # that would bring back the ARAM-init livelock.
-CFLAGS_EXTRA="${DOLWEB_CFLAGS:--DDOLRECOMP_C_MAX_CALL_DEPTH=64 -DDOLRECOMP_C_LOOP_CYCLE_BUDGET=1024}"
+#
+# -mtail-call: clang then defines __wasm_tail_call__, which is what turns the
+# generated code's DOLRECOMP_TAIL_CALL into a musttail return_call instead of a
+# host call bounded by the depth ceiling. Every engine this targets has had wasm
+# tail calls since 2023-2024 (Safari 18.2); a module built with it will not
+# instantiate on one that has not.
+CFLAGS_EXTRA="${DOLWEB_CFLAGS:--mtail-call -DDOLRECOMP_C_MAX_CALL_DEPTH=64 -DDOLRECOMP_C_LOOP_CYCLE_BUDGET=1024}"
 EXTRA=()
 
 while [ $# -gt 0 ]; do

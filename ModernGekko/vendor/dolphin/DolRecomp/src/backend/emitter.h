@@ -23,7 +23,11 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 // passing count == 0 restores the safe return-to-chassis form.
 // `starts` must be sorted: the emitter binary-searches it, and the index it
 // finds is the chassis chunk index the dispatch gate is keyed by.
-void emit_set_chunk_table(const u32* starts, u32 count, bool gated);
+// Every chunk in the module, sorted by start address -- the chassis's order --
+// with the matching ends. Must be the complete table: a per-section one numbers
+// the chunks differently from the chassis, and the gate index emitted into a
+// call would then name the wrong chunk.
+void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count, bool gated);
 
 // HLE generation only: lower a non-local `bl` whose continuation is local to
 // a DOLRECOMP_OUTCALL(target, return, label) macro instead of a plain leave,

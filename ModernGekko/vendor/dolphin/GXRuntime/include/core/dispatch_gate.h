@@ -25,6 +25,8 @@
 extern "C" {
 #endif
 
+struct CPUState;
+
 typedef struct StaticRecompDispatchGate
 {
   // One byte per chunk, parallel to the module descriptor's chunk_ranges:
@@ -44,7 +46,21 @@ typedef struct StaticRecompDispatchGate
   const uint32_t* pending;
   uint32_t pending_sync;
   uint32_t pending_async;
+  // STATICRECOMP_GATE_* bits. CONTINUE says the chassis does nothing per
+  // dispatch that the module cannot skip -- no dispatch trace, no sampling,
+  // no idle-loop match, no REL translation -- so a module entered by the
+  // chassis may keep following transfers in place, asking the gate before
+  // each one, until the gate says no. Without it the module returns after
+  // every chunk exactly as it always did.
+  uint32_t flags;
+  // Moves the module's charge accumulator into the live budget and advances
+  // the guest timebase by it -- what every hook does on entry. A loop guard
+  // that trips calls it so the accumulator it tests starts over, instead of
+  // returning to the chassis for the same flush. NULL when there is no chassis.
+  void (*flush)(struct CPUState* cpu);
 } StaticRecompDispatchGate;
+
+#define STATICRECOMP_GATE_CONTINUE 1u
 
 // Native modules publish the chassis-owned pointers here so generated loop
 // guards can read them directly.  A zeroed value means no gate is available.

@@ -41,12 +41,20 @@ this Mac measures. See `OVER-THE-LINE.md`.
 The recompiled module is supplied by path and never enters the repository:
 
 ```sh
-DOLRECOMP_C_CHUNK_INSTRUCTIONS=256 \
+DOLRECOMP_C_CHUNK_INSTRUCTIONS=128 DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1 \
 ModernGekko/build/vendor/dolphin/DolRecomp/dolrecomp --gamecube --backend c -j14 \
-    build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c256
-cp build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c256/generated/main.dol
-DOLWEB_MODULES='GEXE52=/abs/path/build-wasm/gexe52-c256/generated' ./build.sh
+    build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c128-tc
+cp build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c128-tc/generated/main.dol
+DOLWEB_MODULES='GEXE52=/abs/path/build-wasm/gexe52-c128-tc/generated' ./build.sh
 ```
+
+`DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1` is not optional: without them
+every transfer between chunks returns to the chassis. With them, and the chunks
+compiled with `-mtail-call` (build.sh's default), a cross-chunk `b`, a `bctr` and
+the fallthrough off a chunk's end are real wasm tail calls, and a `bctrl` is a
+gated call through the module's own chunk table -- **9.05 -> 0.94 chassis
+dispatches per 1000 guest cycles**. `./ab-state.py A B` is the interleaved A/B
+from the savestate that measured it.
 
 **The chunk size is not a detail.** A C-backend chunk is one function entered
 through a `switch (ctx->pc)` over every instruction in it, so the chunk size is

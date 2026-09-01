@@ -169,6 +169,7 @@ private:
   static void HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32 cia);
   static void HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia);
   static bool HookHostCall(CPUState* cpu, u32 address);
+  static void HookFlushGuestCharge(CPUState* cpu);
 
   // Keep Dolphin's MSR-derived state (translation mode, feature flags) in step
   // with the guest MSR before any MMU access or exception delivery.

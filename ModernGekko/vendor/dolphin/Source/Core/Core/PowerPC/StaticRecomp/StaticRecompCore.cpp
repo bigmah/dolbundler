@@ -447,6 +447,16 @@ void StaticRecompCore::PublishGate(bool publish)
                                           EXCEPTION_PERFORMANCE_MONITOR);
   m_gate.pending_async =
       EXCEPTION_EXTERNAL_INT | EXCEPTION_DECREMENTER | EXCEPTION_PERFORMANCE_MONITOR;
+  // The per-dispatch work in Run() that a module cannot do for itself. When
+  // none of it is wanted the module may chain chunks in place; the gate's
+  // budget and pending checks are what bound that, and the charge flush and
+  // timebase advance happen when it finally returns, as they do after a run
+  // of direct calls today.
+  const bool per_dispatch_work = m_collect_dispatch_samples || m_has_rel_modules ||
+                                 m_idle_pc != 0 || std::getenv("STATICRECOMP_TRACE_FILE") ||
+                                 (m_lockstep_verifier && m_lockstep_verifier->IsEnabled());
+  m_gate.flags = per_dispatch_work ? 0u : STATICRECOMP_GATE_CONTINUE;
+  m_gate.flush = &StaticRecompCore::HookFlushGuestCharge;
   m_module_source.publish_gate(&m_gate, m_module_source.publish_gate_user);
   m_gate_published = true;
 }

@@ -1359,6 +1359,67 @@ keystrokes are invisible to Dolphin's macOS keyboard device), `screencapture -R`
 over the window rect, and **activate the window first** or the grab photographs
 whatever is in front of it.
 
+## 0j. Real tail calls: chassis dispatches -90%, CPU +15.6% (2026-09-01, afternoon)
+
+The dispatch-site histogram (`?env=STATICRECOMP_DISPATCH_SAMPLES=1`, the top 16
+sites are in the shutdown log) said where the 9 dispatches per 1000 guest cycles
+came from, and it was not calls:
+
+- **7% of all dispatches were one site, `0x800038E0`**: the fallthrough off the end
+  of `chunk_3707_data0_800036E0` into the next chunk. A paired-single loop
+  straddles that boundary and crossed it twice per iteration, each crossing a
+  `ctx->pc = ...; return;`. Fixed-stride chunks cut loops as readily as functions.
+- Most of the rest were **return continuations** (`8004EDC0`, `8004EDC8`,
+  `8004F488`...): a direct call's callee hit something it could not follow in place
+  -- a `bctrl`, mostly -- and returned with a foreign pc, so every host frame above
+  it unwound and every one of them became a chassis dispatch on the way back.
+
+Three emitter changes (`backend/emitter.c`, `backend/dispatch.c`,
+`app/pipeline.c`), all on when `DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1`:
+
+1. The chunk-end fallthrough is a gated transfer into the next chunk.
+2. `bctrl`/`bctr`/`bclrl` resolve at run time through a generated
+   `dolrecomp_chunk_index_of()` and `dolrecomp_chunk_table[]` (its one definition
+   is `chunks/dolrecomp_chunk_table.c`, because the manifest is never compiled),
+   gated like a direct call. A `blr` still returns: a host frame is waiting.
+3. Every transfer with nothing to resume into -- cross-chunk `b`/`bc`, `bctr`, the
+   fallthrough -- is `DOLRECOMP_TAIL_CALL(f(ctx))`, which is
+   `__attribute__((musttail)) return f(ctx)` when clang defines
+   `__wasm_tail_call__` (`-mtail-call`, now in build.sh's default CFLAGS) and the
+   old bounded host call elsewhere. wasm `return_call` has been in Safari since
+   18.2; the Mac's `jsc` validated and ran one, and the phone is on iOS 26.
+
+**And a bug**: `pipeline.c` handed the emitter a chunk table rebuilt per *section*
+from the chunks emitted so far, but the index it yields is passed to the gate,
+whose `chunk_open[]` follows the complete address-sorted list. This DOL's data0
+sits below text1, so every text1 call asked about the chunk four below its target
+(2708 for 2712). Harmless only while no chunk is closed. The table is now built
+over every section before any chunk is written.
+
+    module                dispatches / 1000 cycles   Null M ticks/sample   OGL
+    gexe52-c128-tail             9.02                  1051.5 median        923.2
+    gexe52-c128-tc               0.94                  1215.6 (+15.6%)      991.6 (+7.4%)
+
+Null: four interleaved rounds, arms 1045-1085 against 1179-1237, **no overlap**.
+OGL: three rounds, one pair overlapped (the user's Chrome was busy on the machine);
+the CPU half is the number. `./ab-state.py A B --rounds N` is the harness. Renders,
+`smc_failed=0`, 60 fps, module 95.0 -> 90.4 MB.
+
+**Then the remaining 0.94 were loop-guard trips**, one per 1024 accumulated
+cycles, each unwinding the host stack. An in-module dispatch loop
+(`DOLRECOMP_MODULE_LOOP=1`, gate flag `STATICRECOMP_GATE_CONTINUE`) takes chassis
+dispatches to one per slice (0.16/1000) -- and the first attempt was *slower*,
+because the module never flushes its charge accumulator, so past 1024 every guard
+in every chunk tripped on every iteration. The guard now flushes through a gate
+callback (`gate->flush`, the same accounting a hook gets on entry, timebase
+included) and reads the live slice instead of a fixed budget. Result against the
+tc build: **-0.4%, arms overlapping -- neutral**. The chassis round trip was
+already cheap once there were only 0.45 M of them a second. Left in, opt-in.
+
+**Still a Mac number.** The phone's CPU thread read 87% with Null; +15% there is
+the difference between the CPU thread keeping up and not. The renderer thread is
+the other, larger half on the device and nothing above touches it.
+
 ## 0i. The renderer became measurable, and it says "call-bound"
 
 Fixing the OGL savestate above turned a harness that could not rank a renderer

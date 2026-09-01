@@ -316,14 +316,16 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
 // read-only thereafter, so no locking. NULL means "no table": every cross-chunk
 // branch takes the safe return-to-chassis path.
 static const u32* g_chunk_starts = NULL;
+static const u32* g_chunk_ends = NULL;
 static u32 g_chunk_count = 0;
 
 // Whether a direct call asks the chassis's gate first. Off means the old
 // opt-in benchmark mode, which skips the SMC guard.
 static bool g_gated_calls;
 
-void emit_set_chunk_table(const u32* starts, u32 count, bool gated) {
+void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count, bool gated) {
     g_chunk_starts = count ? starts : NULL;
+    g_chunk_ends = count ? ends : NULL;
     g_chunk_count = count ? count : 0;
     g_gated_calls = gated;
 }
@@ -375,12 +377,14 @@ static int chunk_index_for(u32 addr) {
         else
             hi = mid;
     }
-    return lo ? (int)(lo - 1u) : -1;
-}
-
-static u32 chunk_start_for(u32 addr) {
-    int index = chunk_index_for(addr);
-    return index < 0 ? 0u : g_chunk_starts[index];
+    if (!lo)
+        return -1;
+    // The chunk found is the last one starting at or below addr; it only
+    // covers addr if addr is inside it. An address past the end of a section
+    // -- the fallthrough off its last chunk -- belongs to nothing.
+    if (g_chunk_ends && addr >= g_chunk_ends[lo - 1u])
+        return -1;
+    return (int)(lo - 1u);
 }
 
 
@@ -441,28 +445,90 @@ static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
 // way. The win is one fewer chassis dispatch per tail call; the gate keeps the
 // SMC guard exact, and dolrecomp_call_enter keeps a chain of tail calls from
 // running the host stack out.
-static bool emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
+static bool emit_cross_chunk_tail_to(FILE* out, u32 target) {
     if (!g_tail_calls || !g_chunk_starts)
         return false;
-    int target_index = chunk_index_for(inst->branch_target);
+    int target_index = chunk_index_for(target);
     if (target_index < 0)
         return false;
     u32 target_chunk = g_chunk_starts[target_index];
 
-    fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+    fprintf(out, "            ctx->pc = 0x%08Xu;\n", target);
     if (g_gated_calls) {
         fprintf(out, "            bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index);\n");
-        fprintf(out, "            if (dolrecomp_native_gate_allows(ctx, %uu) && dolrecomp_call_enter()) {\n",
+        fprintf(out, "            if (dolrecomp_native_gate_allows(ctx, %uu)) {\n",
                 (unsigned)target_index);
     } else {
-        fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+        fprintf(out, "            {\n");
     }
     fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
-    fprintf(out, "                func_%08X(ctx);\n", target_chunk);
-    fprintf(out, "                dolrecomp_call_leave();\n");
+    fprintf(out, "                DOLRECOMP_TAIL_CALL(func_%08X(ctx));\n", target_chunk);
     fprintf(out, "            }\n");
     fprintf(out, "            return;\n");
     return true;
+}
+
+// An indirect transfer -- bctr, bctrl -- resolved in place. The target is only
+// known at run time, so the module's own table answers which chunk covers it,
+// and the gate is asked about that chunk exactly as for a direct call. A call
+// resumes inline if the callee came back to the instruction after it; a jump
+// is a tail call. Anything the table does not cover, or the gate refuses, takes
+// the plain return and the chassis dispatches as before.
+static bool emit_indirect_transfer(FILE* out, const PPCInst* inst,
+                                   u32 func_start, u32 func_end) {
+    if (!g_chunk_starts)
+        return false;
+    u32 continuation = inst->address + 4u;
+    if (inst->lk && !branch_target_is_local(func_start, func_end, continuation))
+        return false;
+    if (!inst->lk && !g_tail_calls)
+        return false;
+
+    fprintf(out, "            {\n");
+    fprintf(out, "                int chunk = dolrecomp_chunk_index_of(target);\n");
+    if (g_gated_calls) {
+        fprintf(out, "                bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index);\n");
+        fprintf(out, "                if (chunk >= 0 && dolrecomp_native_gate_allows(ctx, (u32)chunk)) {\n");
+    } else {
+        fprintf(out, "                if (chunk >= 0) {\n");
+    }
+    if (inst->lk) {
+        fprintf(out, "                    if (dolrecomp_call_enter()) {\n");
+        fprintf(out, "                        dolrecomp_chunk_table[chunk](ctx);\n");
+        fprintf(out, "                        dolrecomp_call_leave();\n");
+        fprintf(out, "                        if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
+                continuation, continuation);
+        fprintf(out, "                    }\n");
+    } else {
+        fprintf(out, "                    DOLRECOMP_TAIL_CALL(dolrecomp_chunk_table[chunk](ctx));\n");
+    }
+    fprintf(out, "                }\n");
+    fprintf(out, "            }\n");
+    return true;
+}
+
+// The loop guard. A backward branch charges its block and compares the chunk's
+// accumulator against a fixed budget; past it, the loop yields so the chassis
+// can deliver events and rescue a spin. With a gate the yield is not needed for
+// that -- the guard can flush through the gate and read the live slice instead,
+// and only return when the slice really is spent or an exception is pending.
+// Without one it returns as it always did.
+static void emit_loop_guard(FILE* out, const char* indent, u32 resume_pc,
+                            bool resume_is_return_dispatch) {
+    fprintf(out, "%sif (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n", indent);
+    if (g_gated_calls) {
+        fprintf(out, "%s    bool dolrecomp_loop_guard_continue(CPUState* ctx);\n", indent);
+        fprintf(out, "%s    if (!dolrecomp_loop_guard_continue(ctx)) {\n", indent);
+        if (!resume_is_return_dispatch)
+            fprintf(out, "%s        ctx->pc = 0x%08Xu;\n", indent, resume_pc);
+        fprintf(out, "%s        return;\n", indent);
+        fprintf(out, "%s    }\n", indent);
+    } else {
+        if (!resume_is_return_dispatch)
+            fprintf(out, "%s    ctx->pc = 0x%08Xu;\n", indent, resume_pc);
+        fprintf(out, "%s    return;\n", indent);
+    }
+    fprintf(out, "%s}\n", indent);
 }
 
 static void emit_direct_branch(FILE* out, const PPCInst* inst,
@@ -486,12 +552,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
                 fprintf(out, "                return;\n");
                 fprintf(out, "            }\n");
             }
-            if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
-                fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
-                fprintf(out, "                return;\n");
-                fprintf(out, "            }\n");
-            }
+            if (local_backward)
+                emit_loop_guard(out, "            ", inst->branch_target, false);
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
         } else if (g_hle_outcalls &&
                    branch_target_is_local(func_start, func_end,
@@ -509,10 +571,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     }
     if (local_backward) {
         if (direct_backedge) {
-            fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
-            fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
-            fprintf(out, "                return;\n");
-            fprintf(out, "            }\n");
+            emit_loop_guard(out, "            ", inst->branch_target, false);
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
         } else {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
@@ -520,7 +579,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         }
     } else if (local_target) {
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
-    } else if (!emit_cross_chunk_tail(out, inst)) {
+    } else if (!emit_cross_chunk_tail_to(out, inst->branch_target)) {
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "            return;\n");
     }
@@ -528,8 +587,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
 
 static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
                                 const char* target_expr,
-                                bool route_local_returns,
-                                u32 function_address) {
+                                bool route_local_returns, bool resolve_in_place,
+                                u32 function_address, u32 function_end) {
     fprintf(out, "    {\n");
     fprintf(out, "        u32 target = %s;\n", target_expr);
     emit_branch_condition(out, inst->bo, inst->bi);
@@ -538,6 +597,8 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
     }
     fprintf(out, "            ctx->pc = target;\n");
+    if (resolve_in_place)
+        emit_indirect_transfer(out, inst, function_address, function_end);
     if (route_local_returns)
         fprintf(out, "            goto return_dispatch_%08X;\n", function_address);
     else
@@ -630,6 +691,22 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "    if (dolrecomp_call_depth)\n"
         "        dolrecomp_call_depth--;\n"
         "}\n"
+        "\n"
+        "/* A cross-chunk transfer with nothing to resume into -- a `b` into another\n"
+        "   chunk, a `bctr`, the fallthrough off a chunk's last instruction. Where the\n"
+        "   target has real tail calls the callee replaces this frame, so a guest loop\n"
+        "   that straddles a chunk boundary costs no host stack and needs no depth\n"
+        "   accounting: the frame that eventually returns is whichever one the guest's\n"
+        "   blr lands in, and the caller that made the original host call is still\n"
+        "   the one waiting. wasm has them behind -mtail-call (clang then defines\n"
+        "   __wasm_tail_call__); elsewhere it is an ordinary host call that returns,\n"
+        "   bounded by the depth ceiling, exactly as before. */\n"
+        "#if defined(__wasm_tail_call__) || defined(DOLRECOMP_C_MUSTTAIL)\n"
+        "#define DOLRECOMP_TAIL_CALL(call) __attribute__((musttail)) return call\n"
+        "#else\n"
+        "#define DOLRECOMP_TAIL_CALL(call) \\\n"
+        "    do { if (dolrecomp_call_enter()) { call; dolrecomp_call_leave(); } return; } while (0)\n"
+        "#endif\n"
         "\n"
         "static inline u32 dolrecomp_rotl32(u32 value, u32 sh) {\n"
         "    sh &= 31u;\n"
@@ -1791,12 +1868,17 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_BCLR:
+        // A return is the one transfer that must actually return: the host
+        // frame that made the call is waiting for it. Only a bclrl -- a call
+        // through LR -- is resolved in place.
         emit_dynamic_branch(out, inst, "ctx->lr & ~3u",
-                            route_local_returns, func_start);
+                            route_local_returns, inst->lk != 0, func_start,
+                            func_end);
         break;
 
     case PPC_OP_BCCTR:
-        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u", false, func_start);
+        emit_dynamic_branch(out, inst, "ctx->ctr & ~3u", false, true,
+                            func_start, func_end);
         break;
 
     case PPC_OP_TWI:
@@ -2081,11 +2163,19 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
             has_local_returns);
     }
 
-    fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
+    // Falling off the end of a chunk is a transfer into the next one, and on a
+    // title chunked at a fixed stride it is a hot one: a loop that straddles
+    // the boundary crosses it every iteration. Tail into the neighbour rather
+    // than hand every crossing to the chassis.
+    fprintf(out, "    {\n");
+    if (!emit_cross_chunk_tail_to(out, func_end)) {
+        fprintf(out, "            ctx->pc = 0x%08Xu;\n", func_end);
+        fprintf(out, "            return;\n");
+    }
+    fprintf(out, "    }\n");
     if (has_local_returns) {
-        fprintf(out, "    return;\n");
         fprintf(out, "return_dispatch_%08X:\n", func_addr);
-        fprintf(out, "    if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) return;\n");
+        emit_loop_guard(out, "    ", 0, true);
         fprintf(out, "    switch (ctx->pc) {\n");
         for (u32 i = 0; i < count; ++i) {
             if (cfg.return_targets[i]) {

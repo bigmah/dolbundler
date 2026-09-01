@@ -54,6 +54,31 @@ bool MODULE_SYMBOL(dolrecomp_native_gate_allows)(CPUState* ctx, u32 chunk_index)
     return true;
 }
 
+// A loop guard that tripped asks here whether to keep looping. The guard tests
+// the module's own charge accumulator against a fixed budget, and only a flush
+// resets that accumulator -- so once a dispatch has run past the budget, every
+// guard in every chunk it reaches would trip on every iteration, each one a
+// trip back to the chassis whose only effect is the flush. Flush through the
+// gate instead, exactly as a hook does on entry, and continue while the live
+// slice has room and nothing is pending. Returning false is the old behaviour.
+bool MODULE_SYMBOL(dolrecomp_loop_guard_continue)(CPUState* ctx)
+{
+    const StaticRecompDispatchGate* gate = &MODULE_SYMBOL(dolrecomp_native_gate);
+    if (!gate->flush)
+        return false;
+    gate->flush(ctx);
+    return staticrecomp_dispatch_budget_allows(gate, ctx->downcount) &&
+           !staticrecomp_dispatch_has_pending(gate, ctx->msr);
+}
+
+// Whether the chassis is content to let the module chain chunks in place.
+// Read once per chassis dispatch by dolrecomp_continue, not per transfer.
+bool MODULE_SYMBOL(dolrecomp_native_gate_continues)(void)
+{
+    const StaticRecompDispatchGate* gate = &MODULE_SYMBOL(dolrecomp_native_gate);
+    return gate->chunk_open && (gate->flags & STATICRECOMP_GATE_CONTINUE) != 0;
+}
+
 static void chassis_publish_gate(const StaticRecompDispatchGate* gate)
 {
     if (gate && gate->chunk_count == MODULE_CHUNK_RANGE_COUNT)

@@ -45,8 +45,10 @@ endif()
 if(NOT generated_source MATCHES "if \\(!ppc_fp_available_inline\\(ctx, 0x8000317Cu\\)\\) return;")
     message(FATAL_ERROR "generated floating-point code has no MSR FP gate")
 endif()
-if(NOT generated_source MATCHES "ppc_fallback_instruction\\(ctx, 0x7C13A0ACu")
-    message(FATAL_ERROR "dcbf codegen does not route through the environment fallback")
+# dcbf goes to the host's cache-control hook and carries on in the block; it
+# used to fall back to the environment and return, one dispatch per flush.
+if(NOT generated_source MATCHES "ppc_cache_control\\(ctx, PPC_CACHE_DCBF, ea, 0x")
+    message(FATAL_ERROR "dcbf codegen does not route through the cache-control hook")
 endif()
 
 get_filename_component(output_dir "${OUTPUT_C}" DIRECTORY)

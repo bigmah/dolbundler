@@ -44,9 +44,9 @@ static u32 c_chunk_instructions(void) {
     char* end = NULL;
     errno = 0;
     unsigned long value = strtoul(configured, &end, 10);
-    if (errno || !end || *end || value < 128u || value > 4096u) {
+    if (errno || !end || *end || value < 16u || value > 4096u) {
         fprintf(stderr,
-                "warning: DOLRECOMP_C_CHUNK_INSTRUCTIONS must be 128..4096; "
+                "warning: DOLRECOMP_C_CHUNK_INSTRUCTIONS must be 16..4096; "
                 "using %u\n",
                 DOLC_DEFAULT_CHUNK_INSTRUCTIONS);
         return DOLC_DEFAULT_CHUNK_INSTRUCTIONS;
@@ -1067,6 +1067,80 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
     FunctionList funcs = {0};
     SMCAnalysis smc = {0};
 
+    // Direct cross-chunk calls bypass the chassis dispatcher. That is unsafe
+    // for runtimes which validate mutable guest code at dispatch boundaries,
+    // so only emit them after an explicit opt-in for controlled benchmarks.
+    // Hosts that intercept SDK functions at their guest addresses need the
+    // dispatcher reachable from intra-chunk calls too; see
+    // emit_set_hle_local_calls.
+    //
+    // The chunk table the emitter resolves against is built here, over every
+    // section, before any chunk is written. It used to be rebuilt per section
+    // from the chunks emitted so far, and the index it produced was that
+    // partial list's -- but the index goes into the generated code as the
+    // argument to the chassis's gate, whose chunk_open runs parallel to the
+    // *complete* list sorted by address. On a DOL whose data section sits
+    // below its second text section, every text-section call asked the gate
+    // about the chunk four below its target.
+    {
+        const char* hle_local = getenv("DOLRECOMP_HLE_LOCAL_CALLS");
+        if (hle_local && strcmp(hle_local, "1") == 0) {
+            printf("  HLE-visible intra-chunk calls enabled\n");
+            emit_set_hle_local_calls(true);
+        }
+    }
+    // Two modes. DOLRECOMP_DIRECT_CALLS asks the chassis's dispatch gate
+    // before following a call, which is what the chassis would have checked
+    // itself, so it keeps the SMC guard and the timing slice exact.
+    // DOLRECOMP_UNSAFE_DIRECT_CALLS is the older benchmark mode that does
+    // not, and is what the "unsafe" in its name is about.
+    u32* chunk_starts = NULL;
+    u32* chunk_ends = NULL;
+    {
+        const char* gated = getenv("DOLRECOMP_DIRECT_CALLS");
+        const char* direct = getenv("DOLRECOMP_UNSAFE_DIRECT_CALLS");
+        const bool want_gated = gated && strcmp(gated, "1") == 0;
+        const bool want_ungated = direct && strcmp(direct, "1") == 0;
+        if (want_gated || want_ungated) {
+            FunctionList all_chunks = {0};
+            for (u32 s = 0; s < section_count; s++) {
+                const LoadedCodeSection* section = &sections[s];
+                if (section->size == 0 || !section->data) continue;
+                u32 num_insts = section->size / 4;
+                for (u32 start = 0; start < num_insts; start += chunk_instructions) {
+                    u32 n = num_insts - start;
+                    if (n > chunk_instructions)
+                        n = chunk_instructions;
+                    if (!function_list_add(&all_chunks,
+                                           section->address + start * 4u,
+                                           section->address + (start + n) * 4u)) {
+                        function_list_free(&all_chunks);
+                        fclose(header);
+                        fclose(manifest);
+                        return 0;
+                    }
+                }
+            }
+            chunk_starts = (u32*)malloc((size_t)all_chunks.count * sizeof(u32));
+            chunk_ends = (u32*)malloc((size_t)all_chunks.count * sizeof(u32));
+            if (chunk_starts && chunk_ends) {
+                printf("  cross-chunk direct calls enabled (%s), %u chunks\n",
+                       want_gated ? "gated" : "UNSAFE, no gate", all_chunks.count);
+                function_list_sorted_bounds(&all_chunks, chunk_starts, chunk_ends);
+                emit_set_chunk_table(chunk_starts, chunk_ends, all_chunks.count,
+                                     want_gated);
+                // Tail calls reuse the same chunk table and gate, so they are
+                // only offered once direct calls are on.
+                const char* tails = getenv("DOLRECOMP_TAIL_CALLS");
+                if (tails && strcmp(tails, "1") == 0) {
+                    emit_set_tail_calls(true);
+                    printf("  cross-chunk tail calls enabled\n");
+                }
+            }
+            function_list_free(&all_chunks);
+        }
+    }
+
     for (u32 s = 0; s < section_count; s++) {
         const LoadedCodeSection* section = &sections[s];
         if (section->size == 0 || !section->data) continue;
@@ -1211,69 +1285,13 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             file_count++;
         }
 
-        // Direct cross-chunk calls bypass the chassis dispatcher. That is unsafe
-        // for runtimes which validate mutable guest code at dispatch boundaries,
-        // so only emit them after an explicit opt-in for controlled benchmarks.
-        // funcs accumulates across sections; targets in a later section still
-        // fall back to the dispatcher because their symbols are not known yet.
-        // Hosts that intercept SDK functions at their guest addresses need the
-        // dispatcher reachable from intra-chunk calls too; see
-        // emit_set_hle_local_calls.
-        const char* hle_local = getenv("DOLRECOMP_HLE_LOCAL_CALLS");
-        if (hle_local && strcmp(hle_local, "1") == 0) {
-            printf("  HLE-visible intra-chunk calls enabled\n");
-            emit_set_hle_local_calls(true);
-        }
-
-        // Two modes. DOLRECOMP_DIRECT_CALLS asks the chassis's dispatch gate
-        // before following a call, which is what the chassis would have checked
-        // itself, so it keeps the SMC guard and the timing slice exact.
-        // DOLRECOMP_UNSAFE_DIRECT_CALLS is the older benchmark mode that does
-        // not, and is what the "unsafe" in its name is about.
-        const char* gated = getenv("DOLRECOMP_DIRECT_CALLS");
-        const char* direct = getenv("DOLRECOMP_UNSAFE_DIRECT_CALLS");
-        const bool want_gated = gated && strcmp(gated, "1") == 0;
-        const bool want_ungated = direct && strcmp(direct, "1") == 0;
-        u32* chunk_starts = NULL;
-        if (want_gated || want_ungated) {
-            printf("  cross-chunk direct calls enabled (%s)\n",
-                   want_gated ? "gated" : "UNSAFE, no gate");
-            chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
-            if (chunk_starts) {
-                for (u32 i = 0; i < funcs.count; ++i)
-                    chunk_starts[i] = funcs.ranges[i].start;
-                // Sorted, and it matters twice: the emitter binary-searches
-                // this, and the index it finds has to be the chassis's chunk
-                // index, which gen_module_tables.py derives from the *sorted*
-                // func_ declarations. Sections are not emitted in address order
-                // -- this DOL's data section starts below its second text
-                // section -- so insertion order is not sorted.
-                for (u32 i = 1; i < funcs.count; ++i) {
-                    u32 key = chunk_starts[i];
-                    u32 j = i;
-                    while (j > 0 && chunk_starts[j - 1] > key) {
-                        chunk_starts[j] = chunk_starts[j - 1];
-                        j--;
-                    }
-                    chunk_starts[j] = key;
-                }
-                emit_set_chunk_table(chunk_starts, funcs.count, want_gated);
-                // Tail calls reuse the same chunk table and gate, so they are
-                // only offered once direct calls are on.
-                const char* tails = getenv("DOLRECOMP_TAIL_CALLS");
-                if (tails && strcmp(tails, "1") == 0) {
-                    emit_set_tail_calls(true);
-                    printf("  cross-chunk tail calls enabled\n");
-                }
-            }
-        }
-
         u32 active_jobs = effective_chunk_jobs(section_job_count, jobs);
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
         if (!run_chunk_jobs(chunk_jobs, section_job_count, jobs)) {
-            emit_set_chunk_table(NULL, 0, false);
+            emit_set_chunk_table(NULL, NULL, 0, false);
             free(chunk_starts);
+            free(chunk_ends);
             smc_analysis_free(&smc);
             function_list_free(&funcs);
             free(chunk_jobs);
@@ -1282,12 +1300,12 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             fclose(manifest);
             return 0;
         }
-        emit_set_chunk_table(NULL, 0, false);
-        free(chunk_starts);
-
         free(chunk_jobs);
         free(insts);
     }
+    emit_set_chunk_table(NULL, NULL, 0, false);
+    free(chunk_starts);
+    free(chunk_ends);
 
     if (smc.possible) {
         u32 display_count = smc.range_count;
@@ -1325,6 +1343,28 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
 
     emit_dispatch_helpers(header, &funcs, entry_point);
     emit_footer(header);
+    // The chunk table's one definition goes in the chunks directory, because
+    // that is the only thing a module build compiles: the manifest is read for
+    // its list and never built. Named so it sorts after every chunk_ file.
+    {
+        char table_path[1100];
+        FILE* table = NULL;
+        if (!join_path(table_path, sizeof(table_path), chunks_dir,
+                       "dolrecomp_chunk_table.c") ||
+            !(table = fopen(table_path, "w"))) {
+            fprintf(stderr, "error: can't open output '%s'\n", table_path);
+            smc_analysis_free(&smc);
+            function_list_free(&funcs);
+            fclose(header);
+            fclose(manifest);
+            return 0;
+        }
+        fprintf(table, "// DolRecomp output\n#include \"../%s\"\n", include_name);
+        emit_chunk_table_definition(table, &funcs);
+        fclose(table);
+        fprintf(manifest, "// %s/dolrecomp_chunk_table.c\n", chunks_label);
+        file_count++;
+    }
     smc_analysis_free(&smc);
     function_list_free(&funcs);
     fprintf(manifest, "\n// %u C files\n", file_count);

@@ -27,6 +27,13 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
          core->m_module_source.host_call(cpu, address, core->m_module_source.host_call_user);
 }
 
+// The gate's flush: a loop guard that tripped inside the module, asking for
+// the same accounting a hook gets on entry.
+void StaticRecompCore::HookFlushGuestCharge(CPUState* cpu)
+{
+  static_cast<StaticRecompCore*>(cpu->external_user_data)->FlushGuestCharge();
+}
+
 void StaticRecompCore::ResetExternalPollRun()
 {
   m_poll_run = 0;
