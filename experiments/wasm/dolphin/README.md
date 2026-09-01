@@ -41,11 +41,11 @@ this Mac measures. See `OVER-THE-LINE.md`.
 The recompiled module is supplied by path and never enters the repository:
 
 ```sh
-DOLRECOMP_C_CHUNK_INSTRUCTIONS=128 DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1 \
+DOLRECOMP_C_CHUNK_INSTRUCTIONS=64 DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1 \
 ModernGekko/build/vendor/dolphin/DolRecomp/dolrecomp --gamecube --backend c -j14 \
-    build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c128-tc
-cp build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c128-tc/generated/main.dol
-DOLWEB_MODULES='GEXE52=/abs/path/build-wasm/gexe52-c128-tc/generated' ./build.sh
+    build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c64-tc
+cp build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c64-tc/generated/main.dol
+DOLWEB_MODULES='GEXE52=/abs/path/build-wasm/gexe52-c64-tc/generated' ./build.sh
 ```
 
 `DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1` is not optional: without them
@@ -55,6 +55,12 @@ the fallthrough off a chunk's end are real wasm tail calls, and a `bctrl` is a
 gated call through the module's own chunk table -- **9.05 -> 0.94 chassis
 dispatches per 1000 guest cycles**. `./ab-state.py A B` is the interleaved A/B
 from the savestate that measured it.
+
+**64 instructions per chunk now, not 128** (2026-09-01): with cross-chunk
+transfers as real tail calls the cost of a boundary fell, and 64 measured +2.0%
+in Chrome and +1.3-3.4% under the simulator's JSC against 128, at 90.0 MB.
+The table below is the older sweep, taken when every crossing was a chassis
+dispatch; its reasoning about where the minimum sits no longer applies.
 
 **The chunk size is not a detail.** A C-backend chunk is one function entered
 through a `switch (ctx->pc)` over every instruction in it, so the chunk size is

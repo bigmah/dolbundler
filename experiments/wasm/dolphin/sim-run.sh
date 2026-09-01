@@ -95,6 +95,12 @@ while [ "$elapsed" -lt "$SECONDS_BUDGET" ]; do
   echo "  ${elapsed}s -> $OUT/shot-$(printf %02d "$n").png"
 done
 
+# And terminate it afterwards too. A finished run leaves its WebContent process
+# at 100% CPU -- the page's budget stops the emulator, not the worker -- and
+# that core is missing from whatever is measured next: the simulator A/B of
+# 2026-09-01 saw both arms drop 15% between rounds for exactly this reason.
+xcrun simctl terminate "$udid" com.apple.mobilesafari >/dev/null 2>&1 || true
+
 echo "--- what the page reported ---"
 if [ -f "$REPORTS" ]; then
   tail -n +$((before + 1)) "$REPORTS" |

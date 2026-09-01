@@ -1420,6 +1420,85 @@ already cheap once there were only 0.45 M of them a second. Left in, opt-in.
 the difference between the CPU thread keeping up and not. The renderer thread is
 the other, larger half on the device and nothing above touches it.
 
+### The same change on the phone's engine: +4-6%, and why
+
+The iOS Simulator runs the phone's JavaScriptCore on this Mac, and from the
+gameplay savestate it reads **within 1% of the device** (Null 842/843 M
+ticks/sample here against the phone's 843.7 in the record). So it is the JSC
+harness, and it says the tail-call build is **+4.2-5.7%** there (842.0/843.4 ->
+890.4/878.4, two interleaved rounds), not V8's +15.6%. Two reasons:
+
+- **JSC runs this module at 0.69x of V8 on the same machine** (842 against 1215).
+  Whatever the dispatch change saves is a smaller fraction of a slower baseline,
+  and the phone's CPU half is a B3-codegen question before it is a dispatch one.
+- `jsc --options` lists the tiering knobs the phone runs with:
+  `maximumOMGCandidateCost=100000` (a function over that never reaches the
+  optimising tier -- a 4096-instruction chunk is ~1 MB of wasm, a 128 one is
+  20-41 KB, which is the 2.3x cliff of 0a and why 256 and 128 tie),
+  `thresholdForOMGOptimizeAfterWarmUp=50000` at 15 per entry,
+  `useWasmTailCalls=true`, `useWasmFastMemory=true`.
+
+Real tail calls against the host-call fallback for the same module, in the
+simulator: +4.5% then a tie, with both arms dropping 15% between rounds --
+the previous run's WebContent was still spinning at 100% CPU (sim-run.sh now
+terminates Safari afterwards as well), and a Unity build was running on the
+machine. Kept: never slower, and it removes the host-stack growth a loop across
+a chunk boundary used to cost.
+
+### 64-instruction chunks: +2% on both engines, and the floor is gone
+
+The node sweep stopped at 128 because every crossing was a chassis dispatch,
+and 128 was where the crossings cost more than the smaller switch saved. They
+are tail calls now, so the trade-off moved. `DOLRECOMP_C_CHUNK_INSTRUCTIONS=64`
+(the floor in `pipeline.c` was 128; it is 16), 7417 chunks, otherwise the same
+module recipe:
+
+    engine                        128-tc              64-tc
+    headless Chrome (Null)        993.4 median        1013.3 (+2.0%, arms do not overlap)
+    iOS Simulator JSC (Null)      762.3 / 746.7       772.1 / 771.9 (+1.3% / +3.4%)
+
+Renders, `smc_failed=0`, 90.4 -> 90.0 MB. It is the default module now. 32 is
+untried, and the noise on a machine running someone's Unity build is larger than
+the +1% it might add; try it when the Mac is idle.
+
+### The video thread, sized on the Mac, and the number to take to the phone
+
+`gpu=NN%` in the perf line is new: the GPU thread's busy fraction over the
+sample (one clock read per wakeup, only when it had work). Mac, dual core,
+throttled, from the gameplay state, 60 fps: **21%**. Batching the FIFO reads to
+1 KB per pass (the atomics per 32-byte block are all seq_cst on wasm) moved it to
+20.6% -- neutral here, kept as a device hypothesis.
+
+Do the arithmetic with the phone's known numbers and the video thread is the
+whole problem: the phone's CPU thread is ~1.4x slower than this Mac's (843 vs
+1215 M ticks/sample, Null), but at 19 fps and 30% speed its video thread is
+spending ~50 ms a frame against this Mac's 3.5 ms -- **~15x**. Dolphin's own
+video work does not scale that way between an M4 and an A17; the WebGL call
+path does. A frame issues ~3800 GL calls, and on iOS every one crosses into
+WebKit's GPU process. That is the lever, and it is only measurable on the
+device.
+
+**What to run on the phone** (serve with `python3 ../serve.py dolphin --lan`,
+open the HTTPS address; every run is a URL, no rebuild):
+
+    # 1. the CPU half, before/after today: renderer off, throttle off
+    index.html?backend=Null&seconds=90&report=1&auto=1&env=DOLWEB_STATE=/game/oglplay.sav&env=DOLWEB_CPU_THREAD=0&env=MODERNGEKKO_EMULATION_SPEED=0
+    #    ./use-build.sh web128 for the old module, snap-c64 for the new; then ./state-rate.py --ua phone
+
+    # 2. the shipping configuration, read gpu= and fps
+    index.html?backend=OGL&seconds=90&report=1&auto=1&env=DOLWEB_STATE=/game/oglplay.sav
+
+    # 3. the same with redundant GL state calls dropped (neutral on the Mac; the phone is where a call costs)
+    index.html?backend=OGL&seconds=90&report=1&auto=1&env=DOLWEB_STATE=/game/oglplay.sav&env=DOLWEB_GL_DEDUP=1
+
+    # 4. per-call GL cost on the device, which has never been taken there
+    index.html?backend=OGL&seconds=90&report=1&auto=1&env=DOLWEB_STATE=/game/oglplay.sav&env=DOLWEB_TIME_GL=1
+
+If (2) reads gpu= near 100% and (4) shows the state calls costing microseconds
+each, the next project is fewer GL calls per frame -- uniform-bind elision,
+texture-bind dedup, and deferring draws so several uploads become one -- and it
+should be sized from (4), not from anything this Mac says.
+
 ## 0i. The renderer became measurable, and it says "call-bound"
 
 Fixing the OGL savestate above turned a harness that could not rank a renderer

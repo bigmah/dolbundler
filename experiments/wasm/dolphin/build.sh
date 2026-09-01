@@ -76,7 +76,14 @@ NODE=OFF
 # gameplay rate 923 -> 992 M ticks/sample (+7.4%, three interleaved pairs). The
 # same regeneration also fixed the gate index every text-section call passed:
 # it was computed from a per-section table and named the chunk four below.
-MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c128-tc/generated}"
+#
+# And 64, not 128, once boundary crossings became tail calls: the node sweep's
+# reason to stop at 128 was that every crossing was a chassis dispatch, and it
+# is not any more. 64-instruction chunks (7417 of them, DOLRECOMP_C_CHUNK_
+# INSTRUCTIONS=64 -- the floor is 16 now) measured +2.0% in headless Chrome
+# (993.4 -> 1013.3 M ticks/sample, two interleaved rounds, arms not overlapping)
+# and +1.3%/+3.4% in the iOS Simulator's JSC, 90.4 -> 90.0 MB. 32 is untried.
+MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c64-tc/generated}"
 BUILD=""
 OPT="${DOLWEB_MODULE_OPT:-3}"
 # Cross-translation-unit inlining over a whole game is 65 MB of bitcode through
