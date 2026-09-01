@@ -186,20 +186,27 @@ extern void* g_mem_write_journal_user;
 static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size, u32* out_offset) {
     u32 masked_addr = addr & ~0x40000000u;
     
-    // Check MEM2 (EXRAM) first as it is much more common in Wii titles
-    if (cpu->exram) {
-        u32 offset = masked_addr - 0x90000000u;
-        if (offset <= cpu->exram_size - size) {
-            if (out_offset) *out_offset = (u32)-1;
-            return cpu->exram + offset;
-        }
-    }
-    
-    // Check MEM1
+    // MEM1 first. This used to check MEM2 first "as it is much more common in
+    // Wii titles", but on a GameCube title `cpu->exram` is NULL -- Dolphin only
+    // allocates EXRAM for Wii -- so that check was a load and a branch on every
+    // guest memory access that could never succeed. It is not a load the
+    // compiler can hoist out of a chunk either: the guest stores here go through
+    // a u8*, which may alias the CPUState fields, so `cpu->exram` has to be
+    // re-read after every store. A Wii title now pays one extra compare against
+    // ram_size before reaching its MEM2 hit, which is the cheaper side of the
+    // trade for this project.
     u32 offset = masked_addr - 0x80000000u;
     if (offset <= cpu->ram_size - size) {
         if (out_offset) *out_offset = offset;
         return cpu->ram + offset;
+    }
+
+    if (cpu->exram) {
+        u32 exram_offset = masked_addr - 0x90000000u;
+        if (exram_offset <= cpu->exram_size - size) {
+            if (out_offset) *out_offset = (u32)-1;
+            return cpu->exram + exram_offset;
+        }
     }
 
     // The locked cache. Checked last, so a hit in RAM pays nothing for it, and

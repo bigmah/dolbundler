@@ -215,16 +215,25 @@ private:
   // they returned. The run above needs a *stable* value; this one does not, and
   // that is the difference between a heuristic and a liveness guarantee.
   static constexpr u32 POLL_SITE_SPIN_READS = 256;
-  // Comfortably above DOLRECOMP_C_LOOP_CYCLE_BUDGET (256), which is the budget
-  // the generated loop guards test against and which the chassis has no way to
-  // read out of a module. Overshooting it only costs a spin loop a few cycles of
-  // guest time it was not going to use.
+  // Comfortably above DOLRECOMP_C_LOOP_CYCLE_BUDGET -- 1024 since 2026-08-31,
+  // not the 256 this comment used to name -- which is the budget the generated
+  // loop guards test against and which the chassis has no way to read out of a
+  // module. Overshooting it only costs a spin loop a few cycles of guest time it
+  // was not going to use. Note this describes LOOP_GUARD_YIELD_CYCLES below, not
+  // POLL_SITE_SPIN_READS above: the two are different units (cycles against
+  // reads) and reading it as though it constrained the reads suggests a broken
+  // invariant that is not there.
   static constexpr s64 LOOP_GUARD_YIELD_CYCLES = 4096;
   u32 m_poll_site_run = 0;
   bool m_poll_run_live = false;
   bool m_poll_skip_enabled = true;
   u64 m_poll_reads = 0;
   u64 m_poll_yields = 0;
+  // Measured 2026-09-01 and then removed: consecutive dispatches land in the
+  // same chunk only **0.4%** of the time (1.64 M of 426 M). Do not build a
+  // "same chunk as last time" cache over m_chunk_lookup_table -- it would miss
+  // 99.6% of the time and add a branch to every one of those. Nearly every
+  // dispatch is a cross-chunk transition.
   // primary<<16 | extended, for the four primaries that have an extended field.
   bool m_fallback_histogram_enabled = false;
   std::map<u32, u64> m_fallback_histogram;

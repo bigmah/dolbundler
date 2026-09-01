@@ -1258,6 +1258,13 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
                     chunk_starts[j] = key;
                 }
                 emit_set_chunk_table(chunk_starts, funcs.count, want_gated);
+                // Tail calls reuse the same chunk table and gate, so they are
+                // only offered once direct calls are on.
+                const char* tails = getenv("DOLRECOMP_TAIL_CALLS");
+                if (tails && strcmp(tails, "1") == 0) {
+                    emit_set_tail_calls(true);
+                    printf("  cross-chunk tail calls enabled\n");
+                }
             }
         }
 

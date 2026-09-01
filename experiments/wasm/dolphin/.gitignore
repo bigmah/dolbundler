@@ -3,3 +3,12 @@ web/dolweb.js
 web/dolweb.wasm
 web/dolweb.data
 web/game
+
+# Screenshot runs. sim-run.sh writes one directory per run and they are
+# hundreds of PNGs; the conclusions belong in OVER-THE-LINE.md, not here.
+sim-shots*/
+
+# A second copy of the page whose dolweb.* symlink to a different build, so two
+# builds can be measured on a phone without toggling a symlink between runs.
+# Local absolute paths; serve-dolphin.sh does not create it.
+web/old/

@@ -404,6 +404,22 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
                   ShaderCompilationMode::AsynchronousUberShaders);
 #endif
   Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, true);
+#ifdef __EMSCRIPTEN__
+  // A savestate normally serialises the EFB and the texture cache, which means
+  // reading textures back off the GPU: SerializeTexture -> ReadTexels ->
+  // OGLStagingTexture::Map -> glMapBufferRange. WebGL2 has no buffer mapping of
+  // any kind, so that entry point is a null function pointer and the GPU thread
+  // traps -- "null function" in Chrome, "call_indirect to a signature that does
+  // not match" in Safari -- taking save *and* load with it. Nothing renders
+  // this path except a state, which is why the emulator is otherwise fine.
+  //
+  // Both readback sites (FramebufferManager::DoState and
+  // TextureCacheBase::DoState) are gated on this one flag, so turning it off is
+  // the whole fix. The cost is that a loaded state re-renders its EFB and
+  // re-uploads its textures instead of restoring them, which is a frame of
+  // work, not a correctness problem.
+  Config::SetBase(Config::GFX_SAVE_TEXTURE_CACHE_TO_STATE, false);
+#endif
   const std::vector<std::string> audio_backends =
       AudioCommon::GetSoundBackends();
   if (impl->config.headless) {

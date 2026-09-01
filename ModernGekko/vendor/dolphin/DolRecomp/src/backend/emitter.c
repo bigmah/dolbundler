@@ -328,6 +328,17 @@ void emit_set_chunk_table(const u32* starts, u32 count, bool gated) {
     g_gated_calls = gated;
 }
 
+// Cross-chunk *tail* calls. emit_cross_chunk_call only fires for `bl`, which has
+// a continuation to resume into; a plain `b` to another chunk had nothing to
+// resume and so always went back through the chassis. Running the target as a
+// host call and then returning still saves the chassis one dispatch, and the
+// depth ceiling bounds the recursion a chain of them creates.
+static bool g_tail_calls;
+
+void emit_set_tail_calls(bool enabled) {
+    g_tail_calls = enabled;
+}
+
 static bool g_hle_outcalls;
 
 void emit_set_hle_outcalls(bool enabled) {
@@ -424,6 +435,36 @@ static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
     return true;
 }
 
+// A cross-chunk branch with no link and no local continuation. Unlike
+// emit_cross_chunk_call there is nothing to `goto` afterwards -- whatever the
+// target leaves in ctx->pc is the next thing to run -- so this returns either
+// way. The win is one fewer chassis dispatch per tail call; the gate keeps the
+// SMC guard exact, and dolrecomp_call_enter keeps a chain of tail calls from
+// running the host stack out.
+static bool emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
+    if (!g_tail_calls || !g_chunk_starts)
+        return false;
+    int target_index = chunk_index_for(inst->branch_target);
+    if (target_index < 0)
+        return false;
+    u32 target_chunk = g_chunk_starts[target_index];
+
+    fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
+    if (g_gated_calls) {
+        fprintf(out, "            bool dolrecomp_native_gate_allows(CPUState* ctx, u32 chunk_index);\n");
+        fprintf(out, "            if (dolrecomp_native_gate_allows(ctx, %uu) && dolrecomp_call_enter()) {\n",
+                (unsigned)target_index);
+    } else {
+        fprintf(out, "            if (dolrecomp_call_enter()) {\n");
+    }
+    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
+    fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "                dolrecomp_call_leave();\n");
+    fprintf(out, "            }\n");
+    fprintf(out, "            return;\n");
+    return true;
+}
+
 static void emit_direct_branch(FILE* out, const PPCInst* inst,
                                bool local_target, bool direct_backedge,
                                u32 func_start, u32 func_end) {
@@ -479,7 +520,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         }
     } else if (local_target) {
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
-    } else {
+    } else if (!emit_cross_chunk_tail(out, inst)) {
         fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
         fprintf(out, "            return;\n");
     }

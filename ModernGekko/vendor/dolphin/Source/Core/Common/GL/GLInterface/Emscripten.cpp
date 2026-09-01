@@ -191,6 +191,32 @@ enum GLProfileIndex
   GLP_TexStorage3D,
   GLP_CopyTexSubImage3D,
   GLP_GenerateMipmap,
+  // Counted, not just timed. The 28 entries above left 80% of a device
+  // frame invisible; a frame with 535 draws issues thousands of these.
+  GLP_Enable,
+  GLP_Disable,
+  GLP_Scissor,
+  GLP_Viewport,
+  GLP_ActiveTexture,
+  GLP_TexParameteri,
+  GLP_VertexAttribPointer,
+  GLP_VertexAttribIPointer,
+  GLP_EnableVertexAttribArray,
+  GLP_DisableVertexAttribArray,
+  GLP_BindVertexArray,
+  GLP_BindBuffer,
+  GLP_BlendFunc,
+  GLP_BlendEquation,
+  GLP_ColorMask,
+  GLP_DepthMask,
+  GLP_DepthFunc,
+  GLP_CullFace,
+  GLP_Clear,
+  GLP_ClearColor,
+  GLP_PixelStorei,
+  GLP_Uniform1i,
+  GLP_DrawRangeElements,
+  GLP_FlushMappedBufferRange,
   GLP_COUNT,
 };
 
@@ -205,15 +231,29 @@ GLProfileEntry g_gl_profile[GLP_COUNT] = {
     {"glUniform4fv"},     {"glTexSubImage3D"},  {"glCompressedTexSubImage3D"},
     {"glTexImage3D"},     {"glTexStorage3D"},   {"glCopyTexSubImage3D"},
     {"glGenerateMipmap"},
+    {"glEnable"}, {"glDisable"}, {"glScissor"}, {"glViewport"}, {"glActiveTexture"}, {"glTexParameteri"}, {"glVertexAttribPointer"}, {"glVertexAttribIPointer"}, {"glEnableVertexAttribArray"}, {"glDisableVertexAttribArray"}, {"glBindVertexArray"}, {"glBindBuffer"}, {"glBlendFuncSeparate"}, {"glBlendEquationSeparate"}, {"glColorMask"}, {"glDepthMask"}, {"glDepthFunc"}, {"glCullFace"}, {"glClear"}, {"glClearColor"}, {"glPixelStorei"}, {"glUniform1i"}, {"glDrawRangeElements"}, {"glFlushMappedBufferRange"},
 };
+
+// Timing has to be free when it is not asked for. DOLWEB_GL_DEDUP installs the
+// same shims as DOLWEB_TIME_GL -- that is how the dedup gets to intercept a call
+// at all -- so an unconditional timer here charged two emscripten_get_now() to
+// every one of a frame's 3795 GL calls even when nothing was being timed. It
+// cost more than the dedup saved and turned a win into a 62.2% -> 56.2%
+// regression, which is what the measurement caught.
+bool g_gl_timing = false;
 
 struct GLProfileScope
 {
   GLProfileIndex index;
   double start;
-  explicit GLProfileScope(GLProfileIndex i) : index(i), start(emscripten_get_now()) {}
+  explicit GLProfileScope(GLProfileIndex i)
+      : index(i), start(g_gl_timing ? emscripten_get_now() : 0.0)
+  {
+  }
   ~GLProfileScope()
   {
+    if (!g_gl_timing)
+      return;
     g_gl_profile[index].calls.fetch_add(1, std::memory_order_relaxed);
     g_gl_profile[index].nanos.fetch_add(
         static_cast<uint64_t>((emscripten_get_now() - start) * 1e6),
@@ -379,6 +419,154 @@ void ProfiledGenerateMipmap(GLenum target)
   glGenerateMipmap(target);
 }
 
+
+// One wrapper for any entry point, so counting a new call costs a line rather
+// than a function. The 28 hand-written ones above predate this; they still work
+// and are left alone.
+template <GLProfileIndex Idx, typename Sig, Sig* fn>
+struct GLCount;
+template <GLProfileIndex Idx, typename R, typename... A, R (*fn)(A...)>
+struct GLCount<Idx, R(A...), fn>
+{
+  static R Call(A... args)
+  {
+    DOLWEB_GL_SHIM(Idx);
+    return fn(args...);
+  }
+};
+#define DOLWEB_COUNT(slot, gl) \
+  {#gl, (void*)&GLCount<slot, decltype(gl), gl>::Call}
+
+
+// --- DOLWEB_GL_DEDUP=1: drop calls that set state already set ----------------
+//
+// A level frame issues 3795 GL calls for 466 draws: 811 glBindBufferRange, 288
+// glBindTexture, 288 glActiveTexture, 151 glBindSampler, 118 glUseProgram. Much
+// of that re-binds what is already bound. On a desktop a redundant bind is a
+// pointer compare; in WebGL every call crosses into JS and is validated, and the
+// device pays about 3 us for each one.
+//
+// Filtering here rather than in the backend keeps it reversible and keeps
+// Dolphin's code honest: this layer only ever drops a call whose arguments equal
+// the ones it already passed through, so the driver sees the same state either
+// way. Anything that could be changed behind our back -- buffer *contents*,
+// draws, uploads -- is not deduplicated.
+bool GLDedupEnabled()
+{
+  static const bool enabled = std::getenv("DOLWEB_GL_DEDUP") != nullptr;
+  return enabled;
+}
+
+struct GLStateCache
+{
+  GLuint program = 0xFFFFFFFFu;
+  GLuint vao = 0xFFFFFFFFu;
+  GLenum active_unit = 0xFFFFFFFFu;
+  GLuint tex[64] = {};       // by unit, for GL_TEXTURE_2D_ARRAY
+  GLuint sampler[64] = {};
+  struct Range { GLuint buf; GLintptr off; GLsizeiptr size; };
+  Range ubo[8] = {};
+  bool tex_valid[64] = {};
+  bool sampler_valid[64] = {};
+  bool ubo_valid[8] = {};
+};
+GLStateCache g_state;
+std::atomic<uint64_t> g_dedup_dropped{0};
+std::atomic<uint64_t> g_dedup_total{0};
+
+void DedupUseProgram(GLuint p)
+{
+  DOLWEB_GL_SHIM(GLP_UseProgram);
+  if (g_gl_timing) g_dedup_total.fetch_add(1, std::memory_order_relaxed);
+  if (GLDedupEnabled() && p == g_state.program)
+  {
+    if (g_gl_timing) g_dedup_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_state.program = p;
+  glUseProgram(p);
+}
+void DedupActiveTexture(GLenum unit)
+{
+  DOLWEB_GL_SHIM(GLP_ActiveTexture);
+  if (g_gl_timing) g_dedup_total.fetch_add(1, std::memory_order_relaxed);
+  if (GLDedupEnabled() && unit == g_state.active_unit)
+  {
+    if (g_gl_timing) g_dedup_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_state.active_unit = unit;
+  glActiveTexture(unit);
+}
+void DedupBindTexture(GLenum target, GLuint tex)
+{
+  DOLWEB_GL_SHIM(GLP_BindTexture);
+  if (g_gl_timing) g_dedup_total.fetch_add(1, std::memory_order_relaxed);
+  const unsigned unit = g_state.active_unit - GL_TEXTURE0;
+  // Only the array target is cached; Dolphin binds nothing else per draw, and a
+  // cache that guessed about other targets would be a correctness risk.
+  if (GLDedupEnabled() && target == GL_TEXTURE_2D_ARRAY && unit < 64 &&
+      g_state.tex_valid[unit] && g_state.tex[unit] == tex)
+  {
+    if (g_gl_timing) g_dedup_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (target == GL_TEXTURE_2D_ARRAY && unit < 64)
+  {
+    g_state.tex[unit] = tex;
+    g_state.tex_valid[unit] = true;
+  }
+  glBindTexture(target, tex);
+}
+void DedupBindSampler(GLuint unit, GLuint sampler)
+{
+  DOLWEB_GL_SHIM(GLP_BindSampler);
+  if (g_gl_timing) g_dedup_total.fetch_add(1, std::memory_order_relaxed);
+  if (GLDedupEnabled() && unit < 64 && g_state.sampler_valid[unit] &&
+      g_state.sampler[unit] == sampler)
+  {
+    if (g_gl_timing) g_dedup_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (unit < 64)
+  {
+    g_state.sampler[unit] = sampler;
+    g_state.sampler_valid[unit] = true;
+  }
+  glBindSampler(unit, sampler);
+}
+void DedupBindVertexArray(GLuint vao)
+{
+  DOLWEB_GL_SHIM(GLP_BindVertexArray);
+  if (g_gl_timing) g_dedup_total.fetch_add(1, std::memory_order_relaxed);
+  if (GLDedupEnabled() && vao == g_state.vao)
+  {
+    if (g_gl_timing) g_dedup_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_state.vao = vao;
+  glBindVertexArray(vao);
+}
+void DedupBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset,
+                          GLsizeiptr size)
+{
+  DOLWEB_GL_SHIM(GLP_BindBufferRange);
+  if (g_gl_timing) g_dedup_total.fetch_add(1, std::memory_order_relaxed);
+  if (GLDedupEnabled() && target == GL_UNIFORM_BUFFER && index < 8 &&
+      g_state.ubo_valid[index] && g_state.ubo[index].buf == buffer &&
+      g_state.ubo[index].off == offset && g_state.ubo[index].size == size)
+  {
+    if (g_gl_timing) g_dedup_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (target == GL_UNIFORM_BUFFER && index < 8)
+  {
+    g_state.ubo[index] = {buffer, offset, size};
+    g_state.ubo_valid[index] = true;
+  }
+  glBindBufferRange(target, index, buffer, offset, size);
+}
+
 const struct
 {
   const char* name;
@@ -400,11 +588,11 @@ const struct
     {"glBlitFramebuffer", (void*)&ProfiledBlitFramebuffer},
     {"glDrawArrays", (void*)&ProfiledDrawArrays},
     {"glDrawElements", (void*)&ProfiledDrawElements},
-    {"glUseProgram", (void*)&ProfiledUseProgram},
-    {"glBindTexture", (void*)&ProfiledBindTexture},
+    {"glUseProgram", (void*)&DedupUseProgram},
+    {"glBindTexture", (void*)&DedupBindTexture},
     {"glBindFramebuffer", (void*)&ProfiledBindFramebuffer},
-    {"glBindBufferRange", (void*)&ProfiledBindBufferRange},
-    {"glBindSampler", (void*)&ProfiledBindSampler},
+    {"glBindBufferRange", (void*)&DedupBindBufferRange},
+    {"glBindSampler", (void*)&DedupBindSampler},
     {"glUniform4fv", (void*)&ProfiledUniform4fv},
     {"glTexSubImage3D", (void*)&ProfiledTexSubImage3D},
     {"glCompressedTexSubImage3D", (void*)&ProfiledCompressedTexSubImage3D},
@@ -412,11 +600,39 @@ const struct
     {"glTexStorage3D", (void*)&ProfiledTexStorage3D},
     {"glCopyTexSubImage3D", (void*)&ProfiledCopyTexSubImage3D},
     {"glGenerateMipmap", (void*)&ProfiledGenerateMipmap},
+    DOLWEB_COUNT(GLP_Enable, glEnable),
+    DOLWEB_COUNT(GLP_Disable, glDisable),
+    DOLWEB_COUNT(GLP_Scissor, glScissor),
+    DOLWEB_COUNT(GLP_Viewport, glViewport),
+    {"glActiveTexture", (void*)&DedupActiveTexture},
+    DOLWEB_COUNT(GLP_TexParameteri, glTexParameteri),
+    DOLWEB_COUNT(GLP_VertexAttribPointer, glVertexAttribPointer),
+    DOLWEB_COUNT(GLP_VertexAttribIPointer, glVertexAttribIPointer),
+    DOLWEB_COUNT(GLP_EnableVertexAttribArray, glEnableVertexAttribArray),
+    DOLWEB_COUNT(GLP_DisableVertexAttribArray, glDisableVertexAttribArray),
+    {"glBindVertexArray", (void*)&DedupBindVertexArray},
+    DOLWEB_COUNT(GLP_BindBuffer, glBindBuffer),
+    DOLWEB_COUNT(GLP_BlendFunc, glBlendFuncSeparate),
+    DOLWEB_COUNT(GLP_BlendEquation, glBlendEquationSeparate),
+    DOLWEB_COUNT(GLP_ColorMask, glColorMask),
+    DOLWEB_COUNT(GLP_DepthMask, glDepthMask),
+    DOLWEB_COUNT(GLP_DepthFunc, glDepthFunc),
+    DOLWEB_COUNT(GLP_CullFace, glCullFace),
+    DOLWEB_COUNT(GLP_Clear, glClear),
+    DOLWEB_COUNT(GLP_ClearColor, glClearColor),
+    DOLWEB_COUNT(GLP_PixelStorei, glPixelStorei),
+    DOLWEB_COUNT(GLP_Uniform1i, glUniform1i),
+    DOLWEB_COUNT(GLP_DrawRangeElements, glDrawRangeElements),
+    DOLWEB_COUNT(GLP_FlushMappedBufferRange, glFlushMappedBufferRange),
 };
 
 bool GLProfilingEnabled()
 {
-  static const bool enabled = std::getenv("DOLWEB_TIME_GL") != nullptr;
+  static const bool enabled = []() {
+    const bool on = std::getenv("DOLWEB_TIME_GL") != nullptr;
+    g_gl_timing = on;
+    return on;
+  }();
   return enabled;
 }
 
@@ -427,11 +643,18 @@ void ReportGLProfile(double frame_ms)
   {
     const uint64_t calls = entry.calls.exchange(0, std::memory_order_relaxed);
     const uint64_t nanos = entry.nanos.exchange(0, std::memory_order_relaxed);
-    if (nanos / 1000000.0 < 1.0)
+    // Print anything that was called at all: the question is now how many
+    // calls a frame issues, not only which ones are individually slow.
+    if (calls == 0)
       continue;
     std::printf("  %s %.1fms/%llu", entry.name, nanos / 1e6 / 100.0,
                 (unsigned long long)(calls / 100));
   }
+  const uint64_t dropped = g_dedup_dropped.exchange(0, std::memory_order_relaxed);
+  const uint64_t total = g_dedup_total.exchange(0, std::memory_order_relaxed);
+  if (total)
+    std::printf("  [dedup %llu/%llu]", (unsigned long long)(dropped / 100),
+                (unsigned long long)(total / 100));
   std::printf("\n");
   std::fflush(stdout);
 }
@@ -439,7 +662,10 @@ void ReportGLProfile(double frame_ms)
 
 void* GLContextEmscripten::GetFuncAddress(const std::string& name)
 {
-  if (GLProfilingEnabled())
+  // Either flag installs the shims: DOLWEB_TIME_GL wants the timing, and
+  // DOLWEB_GL_DEDUP needs the wrappers to exist at all. Gating only on the
+  // former made DOLWEB_GL_DEDUP=1 silently measure the baseline.
+  if (GLProfilingEnabled() || GLDedupEnabled())
   {
     for (const auto& entry : kProfiledEntries)
     {

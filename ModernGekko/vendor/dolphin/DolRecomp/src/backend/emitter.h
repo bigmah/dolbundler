@@ -30,6 +30,8 @@ void emit_set_chunk_table(const u32* starts, u32 count, bool gated);
 // so the stand-in build can resolve cross-pattern calls at run time. Never
 // used for whole-module output -- pattern addresses from different titles
 // overlap, so nothing may bind at build time.
+void emit_set_tail_calls(bool enabled);
+
 void emit_set_hle_outcalls(bool enabled);
 
 // Give the host a chance to intercept a `bl` whose target sits inside the same

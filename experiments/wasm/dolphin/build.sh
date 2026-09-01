@@ -15,27 +15,105 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 
 NODE=OFF
-MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c/generated}"
+# 128-instruction chunks, not the C backend's 4096 default.
+#
+# README.md documented a 256 recipe and this default was never moved to match
+# it, so every browser build -- and every device figure in OVER-THE-LINE.md
+# before 2026-08-31 -- was quietly taken on the 4096 module.
+#
+# 128 and not 256, and not the node sweep's answer either. Node (V8) ranks them
+# 4096 193.6% < 128 194.8% < 512 209.6% < 256 218.4%, putting 128 next to worst.
+# Simulator Safari, renderer on, input driven through the window, two runs each:
+#
+#     chunks   wall to guest 200   guest speed   samples under 70%
+#     4096     245 s, 240 s        92%, 99%      3/45, 0/42
+#     256      245 s, 205 s        100%, 100%    0/40, 0/40
+#     128      205 s, 205 s        100%, 100%    0/40, 0/40
+#
+# 128 is the only one that both reproduces and holds 100% with no hitching, and
+# its module is the smallest (86.2 MB against 91.6). A 4096-instruction chunk is
+# one `switch (ctx->pc)` in one enormous wasm function and JSC is much less
+# willing than V8 to optimise those -- so anything tuned in the node harness
+# that changes the shape of the generated code has to be re-measured here.
+#
+# Do not try to rank these by frame rate: fps over the same guest window came
+# back 32.8-47.1 with no relation to build. See OVER-THE-LINE.md section 0a.
+# Generated with DOLRECOMP_DIRECT_CALLS=1. Without it the module emits **no**
+# cross-chunk calls at all -- every transfer between chunks sets ctx->pc and
+# returns to the chassis, 492,202 such sites -- and the chassis dispatches 8.6 M
+# times a second. With it, gated so the chassis dispatch gate is still consulted
+# and the SMC guard stays exact:
+#
+# DOLRECOMP_TAIL_CALLS=1 then does the same for a cross-chunk `b` -- a tail call,
+# which has no continuation to resume into and so always went back to the chassis
+# even with direct calls on. Dispatches per 1000 guest cycles, which is
+# deterministic and so immune to the machine's drift:
+#
+#     stock module                18.2
+#     + direct calls              11.34  11.34  11.31
+#     + tail calls                 9.05   9.05   9.05     -50% against stock
+#
+# and guest ticks per sample, OGL gameplay: 881.4 -> 895.9 (+1.6%) for direct
+# calls, measured while spreads were tight. The tail-call half read +0.9% with
+# overlapping arms on a machine that had warmed up, so treat the timing as
+# directional and the dispatch count as the result.
+#
+# Regenerate with:
+#   DOLRECOMP_C_CHUNK_INSTRUCTIONS=128 DOLRECOMP_DIRECT_CALLS=1 \
+#     DOLRECOMP_TAIL_CALLS=1 dolrecomp --gamecube -jN <main.dol> <outdir>
+#
+# Check the binary first: both dolrecomp builds on disk in August predated the
+# feature and silently ignored the variable. `strings dolrecomp | grep
+# DOLRECOMP_DIRECT_CALLS` should match. Note DOLRECOMP_C_MAX_CALL_DEPTH only
+# means anything once this is on -- it is the ceiling on the host recursion these
+# calls create, and on a module without them it governs nothing.
+MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c128-tail/generated}"
 BUILD=""
 OPT="${DOLWEB_MODULE_OPT:-3}"
 # Cross-translation-unit inlining over a whole game is 65 MB of bitcode through
-# one wasm-ld invocation. Worth having, but not worth blocking the first
-# measurement on, so it is opt-in here and default-on for iOS.
+# one wasm-ld invocation, and it is OFF because it does not pay.
+#
+# This was briefly ON. On 2026-08-31 it measured +14% (127.8/123.8 against
+# 144.7/143.4) and that reading is **withdrawn**: two runs an arm, in the
+# simulator, on the boot-anchored instrument whose spread is +/-15%. +14% sits
+# inside that noise.
+#
+# Re-measured 2026-09-01 from a savestate, three runs an arm interleaved, spread
+# 0.3-0.4%, guest ticks per perf sample:
+#
+#     backend   LTO+IPO off              LTO+IPO on
+#     OGL       883.1  891.2  890.2      879.7  874.3  878.4      -1.3%
+#     Null     1076.4 1075.6 1080.4     1063.7 1061.8 1064.5      -1.2%
+#
+# Consistent, and the arms do not overlap in either backend. It also costs 11 MB
+# of wasm (86.2 -> 97.5), which a phone pays for on every cold load.
+#
+# Caveat kept deliberately: both re-measurements are V8, and the withdrawn +14%
+# was simulator Safari. JSC is not measured -- desktop Safari was attempted and
+# yields ~4 samples a run, because safari-run.sh restarts the browser and each
+# run re-downloads ~100 MB cold; it needs ~300 s runs. If someone measures JSC
+# and LTO wins there, turn it back on with the numbers written down.
 IPO="${DOLWEB_MODULE_IPO:-OFF}"
 # Dolphin turns LTO on for Release, which over a whole game module is one
-# wasm-ld invocation holding every chunk's bitcode. Off by default here for the
-# same reason as the module's own IPO: iterate first, then measure whether it
-# is worth the link time.
+# wasm-ld invocation holding every chunk's bitcode. Off with the module's IPO --
+# they only mean anything together, and the measurement above is of both.
 LTO="${DOLWEB_LTO:-OFF}"
-# wasm SIMD is off, and --simd does not currently work. It is a compile flag, so
-# it reaches xxhash.h, which then takes its wasm SIMD path by including
-# <arm_neon.h> -- SIMDe on this toolchain -- from inside its own `extern "C" {`,
-# where SIMDe's C++ headers cannot be declared. Three attempts at working around
-# that failed (XXH_VECTOR does not gate the include, pre-including
-# <emscripten.h> only moves the error to libc++, and the function-like
-# XXH_HAS_INCLUDE escape did not propagate), and the gain is unproven: the guest
-# kernels measured identical with and without it, and with the renderer costing
-# almost nothing there is no texture-decode wall for it to move either.
+# wasm SIMD is off because it does not pay, not because it cannot be built.
+#
+# --simd puts -msimd128 in both C and C++ flags, and the C++ half is what breaks:
+# it reaches xxhash.h, which takes its wasm SIMD path by including <arm_neon.h>
+# -- SIMDe on this toolchain -- from inside its own `extern "C" {`, where SIMDe's
+# C++ headers cannot be declared. But the C++ side is not the side that could use
+# SIMD. Putting the flag in the C flags only reaches the generated chunks and
+# GXRuntime and builds clean:
+#
+#     DOLWEB_CFLAGS="-msimd128 -DDOLRECOMP_C_MAX_CALL_DEPTH=64 ..." ./build.sh
+#
+# Measured 2026-09-01 in gameplay from a savestate, interleaved against an
+# otherwise identical build: 885.7 against 877.6 M guest ticks per sample --
+# nothing, with the arms overlapping. The reason is structural: the generated
+# code is scalar per guest instruction with nothing to vectorise across them, and
+# a paired single is two f32 in a four-wide vector. Do not retry this.
 SIMD="${DOLWEB_SIMD:-}"
 # Extra C flags, which reach the generated chunks as well as Dolphin's C. The
 # knobs worth sweeping live there as #defines with -D overrides:

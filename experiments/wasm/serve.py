@@ -261,6 +261,44 @@ def make_handler(root, iso_path=None):
                 sys.stderr.flush()
 
         def do_POST(self):
+            # A savestate the page read back out of the emulator's own
+            # filesystem. /user is a memory filesystem in the browser, so a state
+            # written there dies with the page; this keeps it next to the disc so
+            # the next run can load it with DOLWEB_STATE=/game/<name>.
+            #
+            # It exists because the harness cannot otherwise resolve anything
+            # below about 15%: every measured run boots and drives the game with
+            # timed input, and by the measurement window the skater is somewhere
+            # different -- the same build read 51.2% and 66.0% within an hour. A
+            # state makes every run start from one instant of one scene.
+            if self.path.split("?")[0] == "/savestate":
+                n = int(self.headers.get("Content-Length", 0))
+                name = os.path.basename(self.headers.get("X-State-Name", "state.sav"))
+                if not name.endswith(".sav"):
+                    name += ".sav"
+                data = self.rfile.read(n)
+                # Into the game tree, and into its manifest: a fetch directory
+                # only knows the children something inserted, so a file the
+                # manifest does not list cannot be opened however well it is
+                # served.
+                game = os.path.join(root, "game")
+                out = os.path.join(game, name)
+                with open(out, "wb") as f:
+                    f.write(data)
+                manifest = os.path.join(game, ".manifest")
+                try:
+                    listed = open(manifest).read().split()
+                except OSError:
+                    listed = []
+                if name not in listed:
+                    with open(manifest, "a") as f:
+                        f.write(name + "\n")
+                print(f"savestate: {len(data)} bytes -> {out} (manifest updated)",
+                      flush=True)
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             n = int(self.headers.get("Content-Length", 0))
             rec = json.loads(self.rfile.read(n))
             png = rec.pop("png", None)

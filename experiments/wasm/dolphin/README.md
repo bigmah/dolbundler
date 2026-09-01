@@ -35,7 +35,7 @@ this Mac measures. See `OVER-THE-LINE.md`.
 ./build.sh --node          # the measurement build: NODERAWFS, no canvas
 ./build.sh                 # the browser build
 ./build.sh --no-module     # interpreter only, for a matched baseline
-./build.sh --lto --ipo     # the slow, fully optimised link (unmeasured)
+# (--lto --ipo are the default now: +14% CPU, see OVER-THE-LINE.md 0f)
 ```
 
 The recompiled module is supplied by path and never enters the repository:
@@ -66,6 +66,30 @@ A curve with a minimum, not a free win: past 256 the calls that leave a chunk
 and return through the dispatcher cost more than the smaller switch saves.
 `./bench-node.py` is the measurement.
 
+**That table is V8's answer, and Safari's is not the same one.** Simulator
+Safari, renderer on, two runs per build, wall seconds to reach a fixed guest
+second — the only comparison here that reproduces:
+
+| instructions per chunk | guest 125 | guest 200 |
+|---|---|---|
+| 4096 | 160, 165 | 240, 245 |
+| **256** | 130, 130 | 205, 205 |
+| **128** | 130, 130 | 205, 205 |
+
+**About 1.2x, and 256 against 128 is a tie** — where node puts 128 well behind
+256. A 4096-instruction chunk is one `switch` in one enormous wasm function, and
+JSC is less willing than V8 to optimise those, so 4096 is clearly the wrong end;
+below that this harness cannot separate them. **Nothing tuned in the node harness
+that changes the shape of the generated code should be believed for the device
+until it is re-measured in Safari** — which is where this default sat at 4096
+while this file documented 256.
+
+**Do not try to quote a gameplay frame rate from an `?acts=` run.** The last
+scripted press is at guest 160; after it the skater goes wherever physics takes
+him, so equal guest windows are not equal scenes. Over guest 200-260 the same
+128 build measured 52.4 fps and then 34.4, and all three chunk sizes overlap.
+See `OVER-THE-LINE.md` section 0a for the three wrong answers this produced.
+
 `build.sh` also applies the Emscripten patches for the two Externals that are
 nested git repositories (SFML, zlib-ng), which is where a fix would otherwise be
 invisible to this repo's history.
@@ -83,7 +107,12 @@ Then `http://127.0.0.1:8712/index.html`, or from a phone the printed HTTPS
 address. Useful query parameters: `?backend=Null` to take the renderer out of a
 measurement, `?seconds=N` to stop after a budget, `?auto=1` to start without a
 click, `?report=1` to POST progress back to `serve.py`, `?pad=1` to force the
-on-screen controls, `?env=NAME=VALUE` for any of the emulator's knobs.
+on-screen controls, `?env=NAME=VALUE` for any of the emulator's knobs,
+`?acts=g25:5,...` for a guest-anchored timeline of button presses, and `?log=N`
+for Dolphin's own log (1 the boot narrative, 3 the video backend, 5 a line per
+DVD read). **`?log=` is not free and must not be left on while measuring** — see
+"Measuring" below; `?report=1` used to imply it, and that is what made every
+browser figure here incomparable with a node one.
 
 **A LAN address over plain HTTP is not a secure context**, and
 SharedArrayBuffer is a secure-context feature — without it the emulator cannot
@@ -105,11 +134,92 @@ Two things about the disc are not obvious and are load-bearing:
 node drive-dolphin.mjs --seconds 300 --backend OGL --audio 1 --press 200
 ```
 
+**To compare two builds or two renderer settings, measure from a savestate.**
+Booting spreads +/- 15 %; the same scene entered from a state spreads 0.5 %,
+which is the difference between being able to rank a change and not. Capture
+once, then reuse:
+
+```sh
+# capture: throttled, acts= drives the skater into the level, page uploads it
+node drive-dolphin.mjs --port 8713 --backend OGL --seconds 300 \
+  --extra "savestate=oglplay:235&env=MODERNGEKKO_SAVE_STATE_AFTER=235:/user/oglplay.sav&acts=$ACTS"
+
+# measure: unthrottled, single core, from the state
+node drive-dolphin.mjs --port 8713 --backend OGL --seconds 55 \
+  --extra "env=DOLWEB_STATE=/game/oglplay.sav&env=DOLWEB_CPU_THREAD=0&env=MODERNGEKKO_EMULATION_SPEED=0"
+```
+
+Measure **in the level, not the menu** -- gameplay is twice the work and the two
+disagree about results. Interleave the arms A/B/A/B rather than running three of
+each, and quote the spread. Savestates under OGL only started working on
+2026-09-01; see OVER-THE-LINE.md section 0h for why, and 0i for what the harness
+then said about the renderer.
+
+**On a phone, read the result with `./state-rate.py --ua phone`.** It prints guest
+ticks per perf sample per run, and the renderer-on/off ratio when it sees both.
+Do not read "% speed" for this: with the throttle on it caps at exactly 100 and
+cannot see a difference at all. Runs are grouped by the `run` id the page mints
+per load -- reports from before 2026-09-01 lack it and are skipped.
+
+`--workerlog 1` makes `drive-dolphin.mjs` print the wasm stack when the emulator
+traps. Without it a worker's crash reaches the page as a bare `ErrorEvent` with
+no frames, and the build has no name section, so see 0h for the `build.ninja`
+`--emit-symbol-map` trick that turns `$func17915` into a C++ name in minutes.
+
 `[perf]` lines carry the number that matters — **speed**, the fraction of real
 time the guest is keeping up with. Read speed and not fps: a GameCube game's own
 frame rate varies by scene, so fps alone says nothing about whether emulation is
 keeping up. And **take the throttle off** (`MODERNGEKKO_EMULATION_SPEED=0`) or a
 build with headroom reads 100% exactly like a build with none.
+
+**Do not turn the log on to measure.** `?log=N` gives Dolphin's own log; in the
+browser it is not a diagnostic you can leave on, because a `printf` from the
+emulation thread is a postMessage to the main thread and that is the thread
+WASMFS proxies every disc read through. Desktop Safari, Null, over the same 150
+wall seconds: **105.9% with it off, 45.7% with it on, and a second run with it on
+stalled at guest second 1.1** and stopped posting reports at all. Until
+2026-08-31 `?report=1` turned it on by itself, which is why nothing in
+`OVER-THE-LINE.md` older than that is comparable with a node figure.
+
+**`safari-run.sh`, `ab-safari.sh` and `reach.sh` drive the machine's own
+Safari**, which means they open and close windows in whatever browser the person
+at the keyboard is using. Fine on an idle Mac, rude on a busy one, and a
+measurement taken beside a video is not a measurement anyway. `sim-run.sh` puts
+the page in the iOS Simulator instead — the same WebKit, out of the way — and is
+the one to reach for when the Mac is in use.
+
+**The build directories left in `build-wasm/`, and what is in them.** They exist
+so two builds can be compared without a rebuild between the readings, and the
+names do not say what they hold:
+
+| dir | module | notes |
+|---|---|---|
+| `web` | 4096-chunk | the old default; **stale**, keep only as the slow control |
+| `web256` | 256-chunk | superseded by 128 |
+| `web128` | 128-chunk | no LTO — the control for the LTO measurement |
+| `web128-lto` | 128-chunk | **what `./build.sh` now produces**: LTO + IPO, +14% |
+| `web128-deep` | 128-chunk | call depth 128 / loop budget 2048; unresolved, see 0g |
+| `web128p` | 128-chunk | `--profiling-funcs`, for readable profiles only |
+
+That is 5.3 GB. Delete all but `web128-lto` if you are not mid-comparison.
+`./use-build.sh <name>` points the served page at one of them — note that
+`use-build.sh web` serves the *4096* build, which is not what `./build.sh`
+builds any more.
+
+Two builds can be compared in the same browser without a rebuild between the
+readings — `web/` holds symlinks for exactly that:
+
+```sh
+./use-build.sh web256      # point the served page at build-wasm/web256
+./ab-safari.sh             # one Null/OpenGL pair, in the level, guest-anchored
+./phone-window.py --machine safari-mac --from 125 --to 175
+```
+
+`ab-safari.sh` waits for the two `ab-result` rows rather than for a clock, so a
+slow build is not silently truncated into a fast one's window.
+`phone-window.py` does the same arithmetic for a plain `?report=1` session, which
+is the better instrument on a phone: `?ab=`'s Null half is a black screen, and
+that is the half someone closes before it finishes.
 
 Three instruments were each built to answer a question that could not be
 answered by reading code, and all three are worth keeping:

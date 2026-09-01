@@ -286,6 +286,60 @@ extern "C" EMSCRIPTEN_KEEPALIVE void dolweb_set_control(int control, double stat
 // In a browser the user directory lives in linear memory, so Dolphin's own
 // diagnostics -- a shader it could not compile, most usefully -- are otherwise
 // written somewhere nothing can read them.
+// Read a whole file out of the emulator's filesystem so the page can keep it.
+//
+// This exists for savestates, and savestates exist because the harness cannot
+// otherwise resolve anything below about 15%: every measured run boots the game
+// and drives it with timed input, and by the window the skater is somewhere
+// different, so the same build measured 51.2% and 66.0% an hour apart. A state
+// makes every run start from one instant of one scene.
+//
+// /user is a memory filesystem here, so a state written to it dies with the
+// page. The page reads it back through this and POSTs it to serve.py, which
+// writes it into the served game tree; the next run loads it with
+// DOLWEB_STATE=/game/<name>, over the same fetch mount as the disc.
+// The size comes back through a second call rather than an out-parameter: the
+// build exports ccall, cwrap and the heap views to JS and nothing else, so
+// getValue and _malloc are not available to read one.
+int g_last_read_size = 0;
+
+extern "C" EMSCRIPTEN_KEEPALIVE int dolweb_last_read_size()
+{
+  return g_last_read_size;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint8_t* dolweb_read_file(const char* path)
+{
+  int* out_size = &g_last_read_size;
+  *out_size = 0;
+  FILE* file = std::fopen(path, "rb");
+  if (!file)
+    return nullptr;
+  std::fseek(file, 0, SEEK_END);
+  const long size = std::ftell(file);
+  std::fseek(file, 0, SEEK_SET);
+  if (size <= 0)
+  {
+    std::fclose(file);
+    return nullptr;
+  }
+  uint8_t* buffer = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(size)));
+  if (!buffer)
+  {
+    std::fclose(file);
+    return nullptr;
+  }
+  const size_t read = std::fread(buffer, 1, static_cast<size_t>(size), file);
+  std::fclose(file);
+  *out_size = static_cast<int>(read);
+  return buffer;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void dolweb_free(uint8_t* p)
+{
+  std::free(p);
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE void dolweb_cat(const char* path)
 {
   FILE* file = std::fopen(path, "rb");
@@ -465,8 +519,20 @@ int main(int argc, char** argv)
     // this CPUState layout, say so instead of quietly interpreting the whole
     // game and reporting the interpreter's speed as the module's.
     config.allow_interpreter = false;
-    std::printf("[dolweb] disc %s: embedded module attached (%u code ranges)\n",
-                disc_id.c_str(), module->num_code_ranges);
+    // Name the module directory, not just the game. A report says which
+    // machine and which backend and never which build, so two runs of two
+    // different recompiled modules read as one series -- which is how the
+    // 4096-chunk module survived in the browser build while README.md
+    // documented the 256 one. The page copies this line into its reports.
+    std::printf("[dolweb] disc %s: embedded module attached (%u code ranges) "
+                "from %s\n",
+                disc_id.c_str(), module->num_code_ranges,
+#ifdef DOLWEB_NATIVE_MODULE_TAG
+                DOLWEB_NATIVE_MODULE_TAG
+#else
+                "(untagged)"
+#endif
+    );
   }
   else
   {

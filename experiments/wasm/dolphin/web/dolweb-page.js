@@ -15,6 +15,25 @@ const ENV = params.getAll('env');
 // drive it from outside, so the page has to report on itself.
 const AUTO = params.get('auto') === '1';
 const REPORT = params.get('report') === '1';
+// ?log=N turns Dolphin's own log on: 1 is the boot narrative, 3 is what the
+// video backend found, 5 is a line per DVD read.
+//
+// It used to ride on ?report=1 instead, on the reasoning that reporting is a
+// diagnostic mode. That coupling made the flag every measurement here sets
+// change what it measured. In a pthread build a printf from the emulator
+// thread is a postMessage to the browser's main thread -- the thread WASMFS
+// needs to service the disc -- and Dolphin logs hardest exactly where the game
+// loads most. Desktop Safari, Null, 150 s wall, guest-anchored:
+//
+//     ?report=1                        guest 69 s reached,   45.7%
+//     ?report=1 + DOLWEB_DEBUG_LOG=0   guest 150 s reached, 105.9%
+//
+// So every browser figure in OVER-THE-LINE.md before 2026-08-31 is a logging
+// figure, and the node harness -- which never set it -- was never comparable.
+// Ask for the log deliberately or do not get it.
+const LOG = params.get('log') || '';
+// ?savestate=level:240 -- see the upload below.
+const SAVESTATE = params.get('savestate') || '';
 
 // --- ?acts= ------------------------------------------------------------------
 //
@@ -105,6 +124,7 @@ function log(text) {
 // hand the user back the black screen this exists to explain.
 let bootHz = 0;
 let bootDone = false;
+let buildTag = '';
 function bootWatch(text) {
   if (bootDone) return;
   const clk = /guest clock (\d+) Hz/.exec(text);
@@ -115,6 +135,12 @@ function bootWatch(text) {
     return;
   }
   if (text.includes('embedded module attached')) {
+    // "... from GEXE52=/abs/path/build-wasm/gexe52-c256/generated" -- keep the
+    // directory. It is the only thing in a session that says *which build*
+    // produced the numbers, and its absence is how a 4096-chunk module went on
+    // being measured as if it were the 256-chunk one.
+    const m = / from \S*?([^/\s]+)\/generated/.exec(text);
+    if (m) buildTag = m[1];
     loading('Booting the game', 'recompiled code attached');
     return;
   }
@@ -231,6 +257,14 @@ function instantiateCounted(imports, receive) {
   return {};  // async: receive() is called above
 }
 
+// Identity for this page load, so a reader can tell one run's reports from
+// another's. Nothing else in a report can: `ms` is the page's own clock, so two
+// pages posting at once interleave two unrelated clocks, and a stale tab that
+// keeps re-posting its last perf lines forever is indistinguishable from a live
+// one. Reconstructing runs without this was tried and produced a confidently
+// wrong answer (a renderer cost of 0.62x against a measured 1.24x).
+const RUN_ID = Math.random().toString(36).slice(2, 10);
+
 function report(payload) {
   if (!REPORT) return;
   try {
@@ -238,7 +272,9 @@ function report(payload) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ua: navigator.userAgent,
+                             run: RUN_ID,
                              ms: Math.round(performance.now() - T0),
+                             ...(buildTag ? { build: buildTag } : {}),
                              ...(AB ? { ab: AB_BACKEND } : {}), ...payload }),
     });
   } catch (e) { /* the run matters more than the report */ }
@@ -283,6 +319,7 @@ const abSamples = [];
 // acts timeline has to work when ?ab is not in play.
 let guestHz = 0;
 let guestSeconds = 0;
+const actsFired = [];
 
 function actsWatch(text) {
   const clk = /guest clock (\d+) Hz/.exec(text);
@@ -293,6 +330,15 @@ function actsWatch(text) {
   for (const a of ACTS) {
     if (a.done || guestSeconds < a.at) continue;
     a.done = true;
+    // Kept for the ab-result. A guest-anchored window says *when* it opened; it
+    // does not say the game is where the timeline meant to put it. Two builds
+    // measured at guest 125-155 came back at 84% and 209% -- sample ranges
+    // 64-106 and 189-228, the level and the menus -- and nothing in either
+    // result said which was which. The wall clock each act fired at is the
+    // cheapest evidence there is: it costs nothing and it travels with the
+    // number it qualifies.
+    actsFired.push({ c: a.control, g: +guestSeconds.toFixed(1),
+                     w: +((performance.now() - T0) / 1000).toFixed(1) });
     // Deferred: this runs from inside log(), and logging from there re-enters it.
     const note = `[page] act: control ${a.control} at guest ${guestSeconds.toFixed(0)} s`;
     setTimeout(() => log(note), 0);
@@ -349,6 +395,10 @@ function abFinish(ticks) {
     window: `${AB_FROM}-${AB_FROM + AB}s`,
     samples: s.length, median: at(0.5), p25: at(0.25), p75: at(0.75),
     min: s[0] ?? 0, max: s[s.length - 1] ?? 0,
+    // Which of the timeline's presses actually happened before the window
+    // opened, and at what wall second. Two builds can share a guest window and
+    // still be in different scenes; this is what says so.
+    acts: actsFired.slice(),
   };
   log('[page] ab: ' + JSON.stringify(result));
   report(result);
@@ -395,6 +445,48 @@ let setControl = null;
 
 function wireKeyboard(module) {
   setControl = module.cwrap('dolweb_set_control', null, ['number', 'number']);
+  // ?savestate=<name>:<seconds> writes a state after N seconds of run time and
+  // uploads it next to the disc, so later runs can start from it with
+  // ?env=DOLWEB_STATE=/game/<name>.sav instead of booting and driving the game.
+  //
+  // That is the only way to measure anything small here: a run that boots and
+  // presses buttons on a timer ends up with the skater somewhere different every
+  // time, and the same build measured 51.2% and 66.0% an hour apart. Three
+  // interleaved pairs could not separate a renderer change from that noise.
+  log(`[state] savestate param = ${JSON.stringify(SAVESTATE)}`);
+  if (SAVESTATE) {
+    const [stateName, stateAfter] = SAVESTATE.split(':');
+    log(`[state] will poll /user/${stateName}.sav from ${stateAfter}s`);
+    const path = `/user/${stateName}.sav`;
+    // Poll rather than time it. The emulator's own timer starts when Run()
+    // does, which is several seconds after the module exists, so a single
+    // timeout here read the file about two seconds before it was written and
+    // reported "nothing at /user/level.sav" twice.
+    setTimeout(async () => {
+      let ptr = 0, size = 0;
+      for (let i = 0; i < 60 && !size; i++) {
+        try {
+          ptr = module.ccall('dolweb_read_file', 'number', ['string'], [path]);
+          size = module.ccall('dolweb_last_read_size', 'number', [], []);
+        } catch (e) { log(`[state] ccall failed: ${e}`); return; }
+        if (!size) await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (!ptr || !size) { log(`[state] nothing at ${path} after 120 s`); return; }
+      // Copy into a plain, non-shared buffer and hand fetch a Blob. The heap
+      // here is a SharedArrayBuffer (it has to be: the emulator is threaded),
+      // and Safari rejects a body backed by shared memory with a bare
+      // "TypeError: Load failed" that says nothing about the cause.
+      const bytes = new Uint8Array(size);
+      bytes.set(module.HEAPU8.subarray(ptr, ptr + size));
+      const body = new Blob([bytes]);
+      module.ccall('dolweb_free', null, ['number'], [ptr]);
+      try {
+        await fetch('/savestate', { method: 'POST', body,
+                                    headers: { 'X-State-Name': `${stateName}.sav` } });
+        log(`[state] uploaded ${size} bytes as ${stateName}.sav`);
+      } catch (e) { log(`[state] upload failed: ${e}`); }
+    }, (+stateAfter + 8) * 1000);
+  }
   const press = (e, down) => {
     const button = BUTTONS[e.code];
     if (button !== undefined) {
@@ -568,15 +660,26 @@ async function startAudio(module) {
 function capabilities() {
   let webgl2 = false;
   let renderer = '';
+  let exts = [];
   try {
     const probe = document.createElement('canvas').getContext('webgl2');
     webgl2 = !!probe;
     if (probe) {
       const info = probe.getExtension('WEBGL_debug_renderer_info');
       renderer = info ? probe.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'masked';
+      // Which extensions this engine actually offers, because Dolphin decides
+      // its whole vertex-upload strategy on one of them and asks for it by a
+      // name WebGL never uses. StreamBuffer::Create falls back to "upload
+      // everything to offset zero" when bSupportsGLBaseVertex is false, which is
+      // the 1197 glBufferData calls a level frame issues for its 466 draws --
+      // and that flag is set by looking for GL_ARB/EXT/OES_draw_elements_base_
+      // vertex, none of which a WebGL context reports even when
+      // WEBGL_draw_instanced_base_vertex_base_instance is right there.
+      exts = probe.getSupportedExtensions() || [];
     }
   } catch (e) { /* reported as false */ }
   return {
+    exts,
     crossOriginIsolated: !!self.crossOriginIsolated,
     sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
     // A module whose only content is a *shared* memory. Declaring one requires
@@ -640,13 +743,11 @@ async function boot() {
 
   const module = await createDolWeb({
     canvas,
-    // Reporting is a diagnostic mode, so turn Dolphin's own boot log on with it
-    // unless the caller asked for a level. On a phone the alternative is typing
-    // a URL-encoded parameter by hand, and the run that needed it has usually
-    // already happened.
+    // Only ?log= asks for the log. See LOG above for what it cost when
+    // ?report=1 asked for it too.
     arguments: [GAME, '/user', BACKEND, SECONDS, ...ENV,
-                ...(REPORT && !ENV.some((e) => e.startsWith('DOLWEB_DEBUG_LOG'))
-                    ? ['DOLWEB_DEBUG_LOG=1'] : [])],
+                ...(LOG && !ENV.some((e) => e.startsWith('DOLWEB_DEBUG_LOG'))
+                    ? [`DOLWEB_DEBUG_LOG=${LOG}`] : [])],
     print: log,
     printErr: log,
     onTitle: (t) => { document.title = t; status(t); },

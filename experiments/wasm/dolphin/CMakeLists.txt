@@ -149,6 +149,16 @@ if(DOLWEB_NATIVE_MODULES)
     target_link_libraries(dolweb PRIVATE "g${_native_game_id}_recomp")
   endforeach()
 
+  # Which module this binary actually embeds, said out loud at boot.
+  #
+  # A report in reports.jsonl names the machine and the backend but never the
+  # build, so two runs of two different modules are indistinguishable after the
+  # fact -- and on 2026-08-31 the browser build turned out to have been linking
+  # the 4096-chunk module for its whole life while README.md documented the 256
+  # one. The generated directory's name is the thing that differed, and nothing
+  # anywhere recorded it.
+  string(APPEND _native_registry
+    "#define DOLWEB_NATIVE_MODULE_TAG \"${DOLWEB_NATIVE_MODULES}\"\n")
   string(APPEND _native_registry "${_native_registry_declarations}\n"
     "static const DolWebNativeModuleEntry kDolWebNativeModules[] = {\n"
     "${_native_registry_entries}};\n")

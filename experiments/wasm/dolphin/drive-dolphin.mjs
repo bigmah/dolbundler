@@ -126,6 +126,11 @@ function note(text) {
 // opening line and its "==== end ====", so a block instrument survives the trip.
 let inBlock = false;
 
+// Populated by the auto-attach handler below, which can fire long before the
+// profiling section further down is evaluated -- so it is declared out here
+// rather than there, where it was a const in the temporal dead zone.
+const workerSessions = new Set();
+
 cdp.on((m) => {
   // Attaching to workers is what makes the emulator profileable at all: the
   // core runs on one, and the page's own session sees an idle main thread.
@@ -133,6 +138,14 @@ cdp.on((m) => {
     const t = m.params.targetInfo || {};
     if (t.type === 'worker' || t.type === 'shared_worker') {
       workerSessions.add(m.params.sessionId);
+      // The page only ever sees a worker's crash as a forwarded ErrorEvent with
+      // no frames. The wasm stack exists only on the worker's own session, so a
+      // trap inside the emulator is unreadable without this. Off by default:
+      // it routes every printf through CDP, which is not free on a perf run.
+      if (opt.workerlog) {
+        cdp.send('Runtime.enable', {}, m.params.sessionId).catch(() => {});
+        cdp.send('Log.enable', {}, m.params.sessionId).catch(() => {});
+      }
       if (opt.profile) console.log(`[profile] attached to ${t.type} ${t.url || ''}`.trim());
     }
   }
@@ -141,9 +154,15 @@ cdp.on((m) => {
     note(m.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
   if (m.method === 'Log.entryAdded')
     note('[browser] ' + m.params.entry.text);
-  if (m.method === 'Runtime.exceptionThrown')
-    note('[exception] ' + (m.params.exceptionDetails.exception?.description ||
-                           m.params.exceptionDetails.text));
+  if (m.method === 'Runtime.exceptionThrown') {
+    const d = m.params.exceptionDetails;
+    note('[exception] ' + (d.exception?.description || d.text));
+    // A wasm trap's frames are the only thing that names the C++ function that
+    // called a null pointer, and CDP hands them over only if we ask.
+    for (const f of (d.stackTrace?.callFrames || []).slice(0, 40))
+      note('[frame] ' + (f.functionName || '?') + '  ' +
+           (f.url || '').split('/').pop() + ':' + f.lineNumber);
+  }
 });
 
 const env = (opt.env ? String(opt.env).split(';') : [])
@@ -164,7 +183,22 @@ await cdp.send('Target.setAutoAttach',
 await cdp.send('Page.navigate', { url });
 await sleep(1500);
 // The page waits for a click so that audio and the module load are user-driven.
-await cdp.eval("document.getElementById('start').click(); 'clicked'");
+//
+// Wait for the button rather than assuming the page has parsed. A fixed 1500 ms
+// was enough until the page grew; past that the eval threw `Uncaught` on a null
+// element and took the whole run with it, which reads exactly like the emulator
+// failing to start.
+{
+  let clicked = false;
+  for (let i = 0; i < 40 && !clicked; i++) {
+    const r = await cdp.eval(
+      "(() => { const b = document.getElementById('start');" +
+      " if (!b) return 'no-button'; b.click(); return 'clicked'; })()").catch(() => null);
+    clicked = r === 'clicked';
+    if (!clicked) await sleep(500);
+  }
+  if (!clicked) throw new Error('start button never appeared');
+}
 
 // Screenshots as it goes, not only at the end: a game is somewhere different
 // every second and one picture of a fade-to-black says nothing.
@@ -192,9 +226,18 @@ const cpuProfile = opt.profile ? (() => {
 
 // Self time per function, which is what "where does the frame go" means. The
 // profiler reports a tree; the samples are what actually ran.
-const workerSessions = new Set();
 
 function summariseProfile(prof, label = '') {
+  // Self time alone cannot see VideoCommon: -O3 inlines the whole video loop
+  // into its thread entry lambda, so 22% of the video thread reads as
+  // `GetInitializedVideoGuard::$_3::__invoke` and nothing below it is visible.
+  // Keep the raw tree so total time per frame can be recovered afterwards.
+  if (process.env.DOLWEB_PROFILE_DUMP) {
+    try {
+      writeFileSync(`${process.env.DOLWEB_PROFILE_DUMP}-${label.slice(0, 12)}.json`,
+                    JSON.stringify(prof));
+    } catch (e) { console.log(`[profile] dump failed: ${e}`); }
+  }
   const byId = new Map(prof.nodes.map((n) => [n.id, n]));
   const self = new Map();
   const total = prof.samples ? prof.samples.length : 0;

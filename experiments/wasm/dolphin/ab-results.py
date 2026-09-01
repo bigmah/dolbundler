@@ -33,9 +33,12 @@ def machine_of(caps):
     if "ANGLE" in renderer:
         return "chrome-mac"
     if renderer == "Apple GPU":
-        # The phone is a 4-core A17 at 430x932; the simulator borrows the Mac's
-        # core count and its own device's screen. Neither the UA nor the
-        # renderer string separates them -- only these do.
+        # Three machines answer to "Apple GPU". Desktop Safari sends a Macintosh
+        # user agent; the simulator sends the *phone's*, so among the iPhone UAs
+        # only the core count and the screen separate device from simulator --
+        # the phone is a 4-core A17 at 430x932.
+        if "iPhone" not in (caps.get("ua") or ""):
+            return "safari-mac"
         if cores == 4 and screen.startswith("430x932"):
             return "phone"
         return "simulator"
