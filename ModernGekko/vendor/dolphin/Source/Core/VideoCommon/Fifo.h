@@ -74,11 +74,19 @@ public:
   void RunGpuLoop();
   void ExitGpuLoop();
   void EmulatorState(bool running);
+  // Nanoseconds the GPU thread has spent in its loop body doing work, in
+  // total. A reader differences two samples against wall time to get the
+  // thread's busy fraction -- the number that says whether the frame rate is
+  // waiting on the CPU thread or on this one, which no speed figure can.
+  u64 GetGpuBusyNs() const { return m_gpu_busy_ns.load(std::memory_order_relaxed); }
   void ResetVideoBuffer();
 
 private:
   void RefreshConfig();
-  void ReadDataFromFifo(u32 read_ptr);
+  // size defaults to one gather-pipe block (GPFifo::GATHER_PIPE_SIZE, not
+  // visible here); the GPU thread passes a batch of them.
+  void ReadDataFromFifo(u32 read_ptr, u32 size = 32);
+  u32 BatchableFifoBlocks(u32 read_ptr) const;
   void ReadDataFromFifoOnCPU(u32 read_ptr);
   int RunGpuOnCpu(int ticks);
   int WaitForGpuThread(int ticks);
@@ -87,6 +95,7 @@ private:
   static constexpr u32 FIFO_SIZE = 2 * 1024 * 1024;
 
   Common::BlockingLoop m_gpu_mainloop;
+  std::atomic<u64> m_gpu_busy_ns{0};
 
   Common::Flag m_emu_running_state;
 

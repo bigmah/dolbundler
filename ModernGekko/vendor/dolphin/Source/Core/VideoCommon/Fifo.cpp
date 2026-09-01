@@ -4,6 +4,7 @@
 #include "VideoCommon/Fifo.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 
 #include "Common/Assert.h"
@@ -212,16 +213,15 @@ void* FifoManager::PopFifoAuxBuffer(size_t size)
 }
 
 // Description: RunGpuLoop() sends data through this function.
-void FifoManager::ReadDataFromFifo(u32 read_ptr)
+void FifoManager::ReadDataFromFifo(u32 read_ptr, u32 size)
 {
-  if (GPFifo::GATHER_PIPE_SIZE >
-      static_cast<size_t>(m_video_buffer + FIFO_SIZE - m_video_buffer_write_ptr))
+  if (size > static_cast<size_t>(m_video_buffer + FIFO_SIZE - m_video_buffer_write_ptr))
   {
     const size_t existing_len = m_video_buffer_write_ptr - m_video_buffer_read_ptr;
-    if (GPFifo::GATHER_PIPE_SIZE > static_cast<size_t>(FIFO_SIZE - existing_len))
+    if (size > static_cast<size_t>(FIFO_SIZE - existing_len))
     {
-      PanicAlertFmt("FIFO out of bounds (existing {} + new {} > {})", existing_len,
-                    GPFifo::GATHER_PIPE_SIZE, FIFO_SIZE);
+      PanicAlertFmt("FIFO out of bounds (existing {} + new {} > {})", existing_len, size,
+                    FIFO_SIZE);
       return;
     }
     memmove(m_video_buffer, m_video_buffer_read_ptr, existing_len);
@@ -230,8 +230,34 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
   }
   // Copy new video instructions to m_video_buffer for future use in rendering the new picture
   auto& memory = m_system.GetMemory();
-  memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
-  m_video_buffer_write_ptr += GPFifo::GATHER_PIPE_SIZE;
+  memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, size);
+  m_video_buffer_write_ptr += size;
+}
+
+// How many gather-pipe blocks the GPU thread may consume before it next
+// updates the command processor's view of the FIFO. One, exactly as before,
+// while a breakpoint is armed: the read pointer has to be compared against it
+// block by block. Otherwise up to a kilobyte, bounded by what the CPU has
+// committed and by the ring's end, so the run is contiguous in guest memory.
+//
+// This exists for WebAssembly. Every load and store on the FIFO's bookkeeping
+// is an atomic, and wasm has no relaxed ordering -- each one is sequentially
+// consistent -- so the dozen or so the loop below spends per 32 bytes were a
+// measurable share of the video thread on the phone, where that thread is the
+// one the frame rate waits for. The CP registers the CPU polls only ever saw
+// a snapshot anyway; a coarser one is still a snapshot.
+u32 FifoManager::BatchableFifoBlocks(u32 read_ptr) const
+{
+  constexpr u32 MAX_BATCH_BLOCKS = 1024 / GPFifo::GATHER_PIPE_SIZE;
+  const auto& fifo = m_system.GetCommandProcessor().GetFifo();
+  if (fifo.bFF_BPEnable.load(std::memory_order_relaxed))
+    return 1;
+  const u32 distance = fifo.CPReadWriteDistance.load(std::memory_order_relaxed);
+  u32 blocks = std::min<u32>(distance / GPFifo::GATHER_PIPE_SIZE, MAX_BATCH_BLOCKS);
+  const u32 end = fifo.CPEnd.load(std::memory_order_relaxed);
+  if (read_ptr <= end)
+    blocks = std::min<u32>(blocks, (end - read_ptr) / GPFifo::GATHER_PIPE_SIZE + 1);
+  return std::max<u32>(blocks, 1);
 }
 
 // The deterministic_gpu_thread version.
@@ -313,6 +339,13 @@ void FifoManager::RunGpuLoop()
           auto& fifo = command_processor.GetFifo();
           command_processor.SetCPStatusFromGPU();
 
+          // Timed only when there is something to do, so an idle wakeup does
+          // not count as work. One clock read per wakeup, not per block.
+          const bool has_work = fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
+                                fifo.CPReadWriteDistance.load(std::memory_order_relaxed) != 0;
+          const auto busy_start = has_work ? std::chrono::steady_clock::now() :
+                                             std::chrono::steady_clock::time_point{};
+
           // check if we are able to run this buffer
           while (!command_processor.IsInterruptWaiting() &&
                  fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
@@ -324,16 +357,19 @@ void FifoManager::RunGpuLoop()
 
             u32 cyclesExecuted = 0;
             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
-            ReadDataFromFifo(readPtr);
+            const u32 blocks = BatchableFifoBlocks(readPtr);
+            const u32 batch_bytes = blocks * GPFifo::GATHER_PIPE_SIZE;
+            ReadDataFromFifo(readPtr, batch_bytes);
 
-            if (readPtr == fifo.CPEnd.load(std::memory_order_relaxed))
+            const u32 last_block = readPtr + batch_bytes - GPFifo::GATHER_PIPE_SIZE;
+            if (last_block == fifo.CPEnd.load(std::memory_order_relaxed))
               readPtr = fifo.CPBase.load(std::memory_order_relaxed);
             else
-              readPtr += GPFifo::GATHER_PIPE_SIZE;
+              readPtr = last_block + GPFifo::GATHER_PIPE_SIZE;
 
             const s32 distance =
                 static_cast<s32>(fifo.CPReadWriteDistance.load(std::memory_order_relaxed)) -
-                GPFifo::GATHER_PIPE_SIZE;
+                static_cast<s32>(batch_bytes);
             ASSERT_MSG(COMMANDPROCESSOR, distance >= 0,
                        "Negative fifo.CPReadWriteDistance = {} in FIFO Loop !\nThat can produce "
                        "instability in the game. Please report it.",
@@ -344,7 +380,7 @@ void FifoManager::RunGpuLoop()
                 DataReader(m_video_buffer_read_ptr, write_ptr), &cyclesExecuted);
 
             fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
-            fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
+            fifo.CPReadWriteDistance.fetch_sub(batch_bytes, std::memory_order_seq_cst);
             if ((write_ptr - m_video_buffer_read_ptr) == 0)
             {
               fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
@@ -369,6 +405,15 @@ void FifoManager::RunGpuLoop()
             // leading the CPU thread to wait in Video_OutputXFB or Video_AccessEFB thus slowing
             // things down.
             AsyncRequests::GetInstance()->PullEvents();
+          }
+
+          if (has_work)
+          {
+            m_gpu_busy_ns.fetch_add(
+                static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - busy_start)
+                                     .count()),
+                std::memory_order_relaxed);
           }
 
           // fast skip remaining GPU time if fifo is empty

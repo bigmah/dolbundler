@@ -34,6 +34,7 @@
 #include "Core/HW/SystemTimers.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "VideoCommon/Fifo.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 #include "InputCommon/InputConfig.h"
 #include "VideoCommon/PerformanceMetrics.h"
@@ -245,6 +246,8 @@ void StartPerfLog(double interval_seconds)
                   system.GetSystemTimers().GetTicksPerSecond());
       std::fflush(stdout);
     }
+    auto last_perf = std::chrono::steady_clock::now();
+    u64 last_busy_ns = 0;
     while (s_running.load())
     {
       std::this_thread::sleep_for(
@@ -261,11 +264,21 @@ void StartPerfLog(double interval_seconds)
       // one. A GameCube game's attract loop is the same every boot, so equal
       // tick ranges mean equal scenes -- which is the only way to put Null next
       // to OpenGL honestly when savestates will not load on this target.
-      std::printf("[perf] %.1f fps  %.0f%% speed  pc=0x%08x lr=0x%08x cpu=%d ticks=%llu\n",
+      // gpu= is the video thread's busy fraction over the interval: in dual
+      // core it is the thread the frame rate waits for when it reads ~100%,
+      // and a speed figure alone cannot tell that apart from a slow CPU thread.
+      const u64 busy_ns = system.GetFifo().GetGpuBusyNs();
+      const auto now = std::chrono::steady_clock::now();
+      const double wall_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_perf).count();
+      const double gpu_busy = wall_ns > 0 ? 100.0 * (busy_ns - last_busy_ns) / wall_ns : 0.0;
+      last_perf = now;
+      last_busy_ns = busy_ns;
+      std::printf("[perf] %.1f fps  %.0f%% speed  pc=0x%08x lr=0x%08x cpu=%d ticks=%llu gpu=%.0f%%\n",
                   metrics.GetFPS(), metrics.GetSpeed() * 100.0,
                   system.GetPPCState().pc, system.GetPPCState().spr[SPR_LR],
                   static_cast<int>(system.GetCPU().GetState()),
-                  static_cast<unsigned long long>(system.GetCoreTiming().GetTicks()));
+                  static_cast<unsigned long long>(system.GetCoreTiming().GetTicks()), gpu_busy);
       std::fflush(stdout);
     }
   }).detach();
