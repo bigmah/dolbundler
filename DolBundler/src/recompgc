@@ -167,7 +167,7 @@ driver_pid() {
 
 driver_start() {
   local name="$1"
-  [ -n "$DRIVER_BIN" ] || die "no gc_controller checkout was found when DolBundler was built; re-run build.sh with GC_CONTROLLER_DIR=<path>"
+  [ -n "$DRIVER_BIN" ] || die "the GameCube controller driver did not build when DolBundler was built; re-run DolBundler/build.sh and read what it says under \"Building the GameCube controller driver\""
   [ -x "$DRIVER_BIN" ] || die "$DRIVER_BIN is missing; build it with: cargo build --release --manifest-path $GC_CONTROLLER/Cargo.toml"
   mkdir -p "$PIPE_DIR" "$USER_DIR/Logs"
 
@@ -266,7 +266,7 @@ if [ "$MODE" = driver ]; then
       if [ -n "$running" ]; then
         ok "gc_controller is running (pid $running), pipe $PIPE_DIR/$pipe"
       elif [ -z "$DRIVER_BIN" ]; then
-        note "no gc_controller checkout is configured"
+        note "the GameCube controller driver was not built; re-run DolBundler/build.sh"
         exit 1
       else
         note "gc_controller is not running"
