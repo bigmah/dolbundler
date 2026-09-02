@@ -99,6 +99,7 @@ typedef bool (*PPCHostCall)(CPUState* cpu, u32 address);
 typedef u32 (*PPCSPRRead)(CPUState* cpu, u16 spr, u32 cia);
 typedef void (*PPCSPRWrite)(CPUState* cpu, u16 spr, u32 value, u32 cia);
 typedef void (*PPCCacheControl)(CPUState* cpu, u8 operation, u32 ea, u32 cia);
+typedef void (*PPCGatherFlush)(CPUState* cpu);
 
 enum {
     PPC_CACHE_DCBST,
@@ -175,6 +176,20 @@ struct CPUState {
      * sizeof(CPUState), so the two have to be edited together. */
     u8* l1cache;
     u32 l1cache_size;
+
+    /* The write-gather pipe, when the chassis offers it. Every GX vertex
+     * component the guest emits is a store to 0xCC008000, and each one used to
+     * leave the module through external_write: a hook, a poll-run reset, a
+     * charge flush and Dolphin's GPFifo::Write32, about a million times a
+     * second in a busy scene. With these set the module writes into Dolphin's
+     * gather buffer itself -- `gather_pipe_slot` points at the live
+     * ppc_state.gather_pipe_ptr, so the two never disagree -- and calls
+     * `gather_pipe_flush` only once the pointer reaches `gather_pipe_limit`
+     * (32 bytes in), which is when Dolphin's own JITs call CheckGatherPipe.
+     * NULL slot means take the hook. */
+    u8** gather_pipe_slot;
+    u8* gather_pipe_limit;
+    PPCGatherFlush gather_pipe_flush;
 };
 
 #include <stdio.h>
@@ -182,6 +197,38 @@ struct CPUState {
 typedef void (*PPCMemWriteJournal)(u32 offset, u32 size, void* user);
 extern PPCMemWriteJournal g_mem_write_journal;
 extern void* g_mem_write_journal_user;
+
+/* Three costs on every guest memory access that a shipping build never needs,
+ * each behind its own define so a lockstep or debugging build keeps them:
+ *
+ * GXRUNTIME_NO_WRITE_JOURNAL         The write journal only exists for the
+ *                                    lockstep verifier (installed by
+ *                                    ppc_set_mem_write_journal). Without this
+ *                                    every store loads the hook pointer and
+ *                                    branches on it -- and a store through a
+ *                                    u8* may alias the hook itself, so the
+ *                                    compiler reloads it after every one.
+ * GXRUNTIME_NO_STORE_RESERVATION_CLEAR
+ *                                    Dolphin's interpreter does not clear the
+ *                                    lwarx reservation on a plain store, only
+ *                                    on stwcx, and the chassis mirrors Dolphin's
+ *                                    reserve flag directly. Matching Dolphin
+ *                                    drops two loads and a branch per store.
+ * GXRUNTIME_LAZY_FP_ALWAYS_ON        Nothing calls ppc_lazy_fp_set_enabled(false),
+ *                                    so the global it tests is a constant. The
+ *                                    MSR[FP] test itself stays: the SDK really
+ *                                    does lazy FP context switching.
+ *
+ * Measured on a 64-instruction Disney skate chunk compiled for wasm32: the
+ * three together are 9408 -> 8213 wasm instructions (-12.7%), 679 -> 530 loads,
+ * 170 -> 145 stores. */
+#if defined(GXRUNTIME_NO_WRITE_JOURNAL)
+#define GXRUNTIME_JOURNAL_WRITE(offset, size) ((void)0)
+#else
+#define GXRUNTIME_JOURNAL_WRITE(offset, size) \
+    do { if (g_mem_write_journal && (offset) != (u32)-1) \
+             g_mem_write_journal((offset), (size), g_mem_write_journal_user); } while (0)
+#endif
 
 static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size, u32* out_offset) {
     u32 masked_addr = addr & ~0x40000000u;
@@ -226,11 +273,36 @@ static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size
     return NULL;
 }
 
+/* A store to the write-gather pipe page (effective 0xCC008000; Dolphin's JITs
+   key on the same page) lands in Dolphin's gather buffer directly when the
+   chassis has offered it. Returns false when it has not, and the caller takes
+   the hook as before. */
+static GXRUNTIME_ALWAYS_INLINE bool ppc_gather_write(CPUState* cpu, u32 addr, u64 value, u32 size) {
+    if ((addr & 0xFFFFF000u) != 0xCC008000u || !cpu->gather_pipe_slot)
+        return false;
+    u8* p = *cpu->gather_pipe_slot;
+    switch (size) {
+    case 1: *p = (u8)value; break;
+    case 2: write_be16(p, (u16)value); break;
+    case 4: write_be32(p, (u32)value); break;
+    default: write_be64(p, value); break;
+    }
+    p += size;
+    *cpu->gather_pipe_slot = p;
+    if (p >= cpu->gather_pipe_limit)
+        cpu->gather_pipe_flush(cpu);
+    return true;
+}
+
 static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u32 addr) {
+#if defined(GXRUNTIME_NO_STORE_RESERVATION_CLEAR)
+    (void)cpu; (void)addr;
+#else
     u32 reserve_addr = cpu->reserve_addr & ~0x40000000u;
     u32 store_addr = addr & ~0x40000000u;
     if (cpu->reserve_valid && ((reserve_addr ^ store_addr) & ~31u) == 0)
         cpu->reserve_valid = false;
+#endif
 }
 
 static GXRUNTIME_ALWAYS_INLINE u64 mem_read64(CPUState* cpu, u32 addr) {
@@ -247,13 +319,15 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 val
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 8, &offset);
     if (ptr == NULL) {
+        if (ppc_gather_write(cpu, addr, value, 8))
+            return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 8);
         }
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 8, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 8);
     write_be64(ptr, value);
 }
 
@@ -271,13 +345,15 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 val
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 4, &offset);
     if (ptr == NULL) {
+        if (ppc_gather_write(cpu, addr, value, 4))
+            return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 4);
         }
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 4, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 4);
     write_be32(ptr, value);
 }
 
@@ -295,13 +371,15 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 val
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 2, &offset);
     if (ptr == NULL) {
+        if (ppc_gather_write(cpu, addr, value, 2))
+            return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 2);
         }
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 2, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 2);
     write_be16(ptr, value);
 }
 
@@ -319,14 +397,102 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 1, &offset);
     if (ptr == NULL) {
+        if (ppc_gather_write(cpu, addr, value, 1))
+            return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 1);
         }
         return;
     }
     clear_matching_reservation(cpu, addr);
-    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 1, g_mem_write_journal_user);
+    GXRUNTIME_JOURNAL_WRITE(offset, 1);
     *ptr = value;
+}
+
+/* Guest memory for homed-register generated code (DOLRECOMP_HOMED_REGS).
+ *
+ * The generated function loads cpu->ram and cpu->ram_size into locals once and
+ * hands them in, so neither is re-read after a store the compiler cannot prove
+ * left them alone; and it hands in the instruction's own address so the cold
+ * path can materialise cpu->pc for the chassis hooks, which read it (the
+ * external-read loop detector keys on it). That is the only reason generated
+ * code stored the pc before every instruction, and with these it stops.
+ *
+ * The cold path -- MEM2, the locked cache, MMIO -- is one out-of-line call so
+ * that seven thousand chunks do not each inline it at every access. */
+u64 ppc_mem_read_slow(CPUState* cpu, u32 cia, u32 addr, u32 size);
+void ppc_mem_write_slow(CPUState* cpu, u32 cia, u32 addr, u64 value, u32 size);
+
+#define GXRUNTIME_HMEM_OFFSET(addr) (((addr) & ~0x40000000u) - 0x80000000u)
+
+static GXRUNTIME_ALWAYS_INLINE u8 hmem_read8(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 1u) return ram[offset];
+    return (u8)ppc_mem_read_slow(cpu, cia, addr, 1u);
+}
+static GXRUNTIME_ALWAYS_INLINE u16 hmem_read16(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 2u) return read_be16(ram + offset);
+    return (u16)ppc_mem_read_slow(cpu, cia, addr, 2u);
+}
+static GXRUNTIME_ALWAYS_INLINE u32 hmem_read32(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 4u) return read_be32(ram + offset);
+    return (u32)ppc_mem_read_slow(cpu, cia, addr, 4u);
+}
+static GXRUNTIME_ALWAYS_INLINE u64 hmem_read64(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 8u) return read_be64(ram + offset);
+    return ppc_mem_read_slow(cpu, cia, addr, 8u);
+}
+static GXRUNTIME_ALWAYS_INLINE void hmem_write8(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr, u8 value) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 1u) {
+        clear_matching_reservation(cpu, addr);
+        GXRUNTIME_JOURNAL_WRITE(offset, 1);
+        ram[offset] = value;
+        return;
+    }
+    ppc_mem_write_slow(cpu, cia, addr, value, 1u);
+}
+static GXRUNTIME_ALWAYS_INLINE void hmem_write16(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr, u16 value) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 2u) {
+        clear_matching_reservation(cpu, addr);
+        GXRUNTIME_JOURNAL_WRITE(offset, 2);
+        write_be16(ram + offset, value);
+        return;
+    }
+    ppc_mem_write_slow(cpu, cia, addr, value, 2u);
+}
+static GXRUNTIME_ALWAYS_INLINE void hmem_write32(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr, u32 value) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 4u) {
+        clear_matching_reservation(cpu, addr);
+        GXRUNTIME_JOURNAL_WRITE(offset, 4);
+        write_be32(ram + offset, value);
+        return;
+    }
+    ppc_mem_write_slow(cpu, cia, addr, value, 4u);
+}
+static GXRUNTIME_ALWAYS_INLINE void hmem_write64(CPUState* cpu, u8* ram, u32 ram_size, u32 cia, u32 addr, u64 value) {
+    u32 offset = GXRUNTIME_HMEM_OFFSET(addr);
+    if (offset <= ram_size - 8u) {
+        clear_matching_reservation(cpu, addr);
+        GXRUNTIME_JOURNAL_WRITE(offset, 8);
+        write_be64(ram + offset, value);
+        return;
+    }
+    ppc_mem_write_slow(cpu, cia, addr, value, 8u);
+}
+
+/* The same, for helpers that hold a CPUState and an instruction address but
+   no hoisted locals: the paired-single load/store fast paths below. */
+static GXRUNTIME_ALWAYS_INLINE u32 mem_read32_cia(CPUState* cpu, u32 addr, u32 cia) {
+    return hmem_read32(cpu, cpu->ram, cpu->ram_size, cia, addr);
+}
+static GXRUNTIME_ALWAYS_INLINE void mem_write32_cia(CPUState* cpu, u32 addr, u32 value, u32 cia) {
+    hmem_write32(cpu, cpu->ram, cpu->ram_size, cia, addr, value);
 }
 
 #undef GXRUNTIME_ALWAYS_INLINE
@@ -365,6 +531,10 @@ void ppc_fres_op(CPUState* cpu, u8 d, u8 b);
 void ppc_frsqrte_op(CPUState* cpu, u8 d, u8 b);
 void ppc_fctiw_op(CPUState* cpu, u8 d, u8 b, bool toward_zero);
 void ppc_fcmp(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered);
+/* The same compare, but the CR value comes and goes by value, so generated
+   code that keeps CR in a local (DOLRECOMP_HOMED_REGS) does not have to spill
+   it around the call. FPSCR is still updated in place. */
+u32 ppc_fcmp_cr(CPUState* cpu, u32 cr, u8 crfd, f64 a, f64 b, bool ordered);
 void ppc_ps_add_op(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_ps_sub_op(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_ps_mul_op(CPUState* cpu, u8 d, u8 a, u8 c);
@@ -431,8 +601,13 @@ extern bool g_ppc_lazy_fp_enabled;
 bool ppc_fp_raise_unavailable(CPUState* cpu, u32 cia);
 
 static inline bool ppc_fp_available_inline(CPUState* cpu, u32 cia) {
+#if defined(GXRUNTIME_LAZY_FP_ALWAYS_ON)
+    if (cpu->msr & PPC_MSR_FP)
+        return true;
+#else
     if (!g_ppc_lazy_fp_enabled || (cpu->msr & PPC_MSR_FP))
         return true;
+#endif
     return ppc_fp_raise_unavailable(cpu, cia);
 }
 void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia);
@@ -462,8 +637,8 @@ static inline bool ppc_psq_load_inline(CPUState* cpu, u8 frD, u32 ea, bool w,
                                        u8 gqr_index, bool indexed, u32 cia) {
     const u32 gqr = cpu->gqr[gqr_index & 7u];
     if (((gqr >> 16) & 7u) == 0u && (indexed || (cpu->hid2 & PPC_HID2_LSQE) != 0u)) {
-        cpu->fpr[frD] = f64_value(convert_to_double(mem_read32(cpu, ea)));
-        cpu->ps1[frD] = w ? 1.0 : f64_value(convert_to_double(mem_read32(cpu, ea + 4u)));
+        cpu->fpr[frD] = f64_value(convert_to_double(mem_read32_cia(cpu, ea, cia)));
+        cpu->ps1[frD] = w ? 1.0 : f64_value(convert_to_double(mem_read32_cia(cpu, ea + 4u, cia)));
         return true;
     }
     return ppc_psq_load(cpu, frD, ea, w, gqr_index, indexed, cia);
@@ -473,9 +648,9 @@ static inline bool ppc_psq_store_inline(CPUState* cpu, u8 frS, u32 ea, bool w,
                                         u8 gqr_index, bool indexed, u32 cia) {
     const u32 gqr = cpu->gqr[gqr_index & 7u];
     if ((gqr & 7u) == 0u && (indexed || (cpu->hid2 & PPC_HID2_LSQE) != 0u)) {
-        mem_write32(cpu, ea, convert_to_single_ftz(f64_bits(cpu->fpr[frS])));
+        mem_write32_cia(cpu, ea, convert_to_single_ftz(f64_bits(cpu->fpr[frS])), cia);
         if (!w)
-            mem_write32(cpu, ea + 4u, convert_to_single_ftz(f64_bits(cpu->ps1[frS])));
+            mem_write32_cia(cpu, ea + 4u, convert_to_single_ftz(f64_bits(cpu->ps1[frS])), cia);
         return true;
     }
     return ppc_psq_store(cpu, frS, ea, w, gqr_index, indexed, cia);
@@ -485,6 +660,10 @@ void ppc_ecowx(CPUState* cpu, u32 ea, u32 value, u32 cia);
 void ppc_tlbie(CPUState* cpu, u32 ea, u32 cia);
 void ppc_fpscr_updated(CPUState* cpu);
 void ppc_memory_fence(void);
+
+/* Floating point by value, for homed-register generated code. Included last:
+   it needs CPUState and the hmem_* helpers above. */
+#include "core/cpu_fp_homed.h"
 
 #ifdef __cplusplus
 }

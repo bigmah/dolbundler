@@ -38,6 +38,13 @@ void emit_set_tail_calls(bool enabled);
 
 void emit_set_hle_outcalls(bool enabled);
 
+// Keep each function's guest registers in C locals, loading them at entry and
+// spilling at every exit; see the comment at the definition. Off by default:
+// the legacy output is byte-identical with it off.
+void emit_set_homed_registers(bool enabled);
+void emit_set_homed_fpr(bool enabled);
+void emit_set_homed_verify(bool enabled);
+
 // Give the host a chance to intercept a `bl` whose target sits inside the same
 // emitted chunk. Off by default: it costs one predictable branch per intra-chunk
 // call, and a runtime with no SDK intercepts (ctx->host_call == NULL) gains

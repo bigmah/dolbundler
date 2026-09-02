@@ -1359,6 +1359,134 @@ keystrokes are invisible to Dolphin's macOS keyboard device), `screencapture -R`
 over the window rect, and **activate the window first** or the grab photographs
 whatever is in front of it.
 
+## 0k. Olliewood on the phone, homed registers, and the day's instruments (2026-09-01, evening)
+
+The complaint is Olliewood -- the kid skaters' hub -- not Andy's Room, and it is a
+different problem. Measured from `build-wasm/gexe52/ollie.sav` (captured in headless
+Chrome with the route in `olliewood-on-the-phone` in the memory notes):
+
+| iPhone 15 Pro Max, Olliewood | speed | fps |
+|---|---|---|
+| shipping config (dual core, throttled), base module | 39% | 22.7 |
+| renderer off, single core, base module, after warmup | 61% | -- |
+| renderer off, single core, homed-GPR module, after warmup | 82% | -- |
+
+Two things the 90 s medians hide. **JavaScriptCore takes ~50 s to warm up on the
+phone** -- every run climbs from ~25% to 60-100% and the Mac's simulator warms in
+seconds, so its numbers are steady-state. And **the plaza has a heavy part** ~15-20
+guest seconds after the state, where speed halves; that is the target scene.
+
+**The CPU thread is the wall, not the renderer, and nothing else is saturated:**
+video thread ~40% busy (`gpu=`, now covering the whole payload including the
+present), browser main thread 9-13% (`[main]` mailbox and the `?glprobe=1` wrapper:
+146 k GL calls/s cost 4.5%), and the CPU thread's own accounting
+(`?env=DOLWEB_CPU_TIME=1`: `cputime: events/throttle/gpuwait` plus `hooks:` rates)
+reads 1% events, 0% GPU waits -- the game never reads the EFB back in this scene.
+Everything is the recompiled code and the chassis around it.
+
+**What moved it, measured in the simulator's JSC from the state, renderer off,
+interleaved two rounds (`./sim-ab.py A B --state ollie.sav`):**
+
+| module | M ticks/sample | |
+|---|---|---|
+| `gexe52-c64-tc` (base) | 711 | |
+| + `GXRUNTIME_NO_WRITE_JOURNAL`, `NO_STORE_RESERVATION_CLEAR`, `LAZY_FP_ALWAYS_ON` | 783 | the memory path's lockstep-only work |
+| + `DOLRECOMP_HOMED_REGS=1` (GPRs, CR/XER/LR/CTR in locals; `hmem_*`) | 822-862 | |
+| + FPRs homed too (`gexe52-c64-h2`/`h3`/`h4`) | 656 / 688 / 814 | **loses every way it was built** |
+| `gexe52-c64-g`: integer homing, per-site spill sets, MSR local, `GXRUNTIME_NO_FPRF`, gather fast path | **1005** | +16.6% over the row above, arms apart |
+| the same at 32 instructions per chunk | 1008 | a tie, 10 MB bigger |
+
+On the phone the homed-GPR module read +27-40% over the base in the renderer-off
+and single-core-renderer configurations; the dual-core figure could not be
+separated from the drift. The `g` module has not been on the phone yet: eight
+runs are queued in `next-url.txt` for the next time the lobby is open.
+
+**Why FPR homing loses under JSC** (three builds, each diagnosed by disassembling
+the hottest FP chunk): the first left the fast paths out of line returning structs
+through the stack; the second put the struct temporary on the fast path; the third
+was register-only on the fast path and still -17%, which leaves the spills (every
+exit stores every FPR the function assigns) and the prologue (every entry loads
+~50 doubles). Per-site spill sets halved the stores and it was still -5%. B3 has
+32 FP registers for ~50 live doubles, and the baseline tier keeps locals in stack
+slots regardless, which is the tier the phone runs for its first 50 s.
+
+**The gather pipe is 1.2 million hook calls a second and it does not matter.**
+`hooks: gather=` found it; `ppc_gather_write` (core/cpu.h, three CPUState tail
+fields) writes Dolphin's gather buffer directly and flushes per 32 bytes, cutting
+the hook rate to 9 k/s -- and the on/off A/B is 1.019 for *off*, arms overlapping.
+A hook call is far cheaper under JSC than the count suggested. Kept, unmeasured on
+the phone.
+
+**Instruments and harness that now exist:** `?build=<dir under build-wasm>` loads a
+build without touching the `web/` symlinks; `web/lobby.html` + `./queue-phone.sh`
++ `serve.py /next` run a queue of URLs on the phone with nobody holding it;
+`./phone-runs.py` summarises each run; `./sim-ab.py` is the interleaved simulator
+A/B (only a run whose id first appears after the arm started counts -- a stale tab
+re-posting forever made both arms read the same number to the decimal);
+`DOLRECOMP_HOMED_VERIFY=1` makes every spill site assert the registers it leaves
+out; `DOLWEB_GPU_IDLE_SPIN=N` lets the GPU thread sleep after N empty payloads
+instead of spinning until the frame's `GpuMaySleep` (a hypothesis for the phone's
+dual-core gap, untested).
+
+**Profiled on the Mac from the state (`snap-c64-gp`, names kept):** with the renderer
+on, the CPU thread's only cost the renderer-off run lacks is the *throttle's sleep*
+(9.5%) -- it has slack. The video thread is 36% idle sleep, 3% waiting for the present,
+4% proxy sends, and was **15% clock reads from this file's own `gpu=` instrument,
+taken on every idle spin** (fixed: read the clock only when there is work). What
+remains of the video thread's cost is the spin itself: Dolphin's GPU thread busy-loops
+between bursts until the frame's `GpuMaySleep`. `DOLWEB_GPU_IDLE_SPIN=N` lets it sleep
+after N empty payloads: **Chrome's renderer process goes from 163% to 137% of a core at
+the same 60 fps** on the Mac. On a phone with two performance cores that is the core
+next to the emulated CPU. Not the default until the phone has measured it.
+
+**The phone's verdict, 2026-09-02 morning (eight runs from the Olliewood state,
+second-half medians after the ~40 s warmup):**
+
+| iPhone 15 Pro Max | speed | fps |
+|---|---|---|
+| h, renderer on, dual core, first run (cold) | 44% | 26.1 |
+| g + `DOLWEB_GPU_IDLE_SPIN=20`, third run | 50% | 29.2 |
+| g plain, sixth / seventh run | 43% / 45% | 25.7 / 28.0 |
+| h, renderer on, eighth run (hot) | 34% | 20.1 |
+| g / h, renderer off, single core | 78% / 80% | -- |
+
+**The simulator's +16.6% for `g` is ~0 on the device**, renderer off or on; the heavy
+scene's troughs are 50-57% on both builds. **Thermal drift across a twenty-minute session
+is 25%** (h: 44% cold, 34% hot), larger than anything compared, so the spin-20 reading
+is inside it. `DOLWEB_GPU_IDLE_SPIN=0` **froze the game** at 44 s (guest polling the GP
+forever, GPU thread idle) after reaching 39 fps / 65%; 20 ran cleanly and is the only
+setting worth carrying. Two lobby tabs cost every other queued URL -- the page now skips
+polling when hidden.
+
+**So the day's CPU-side work, +41% on the simulator's JavaScriptCore, did not move the
+phone**, and that is the finding to take forward: the M4 simulator is not a proxy for
+the device's tiering. The hypothesis being tested next is that the phone never reaches
+OMG for this module -- iOS WebKit's executable-memory pool is small, a 57 MB module's
+baseline code may fill it, and a function that stays in BBQ keeps its locals in stack
+slots, where homing buys nothing and fewer instructions still do. It predicts that
+smaller code is faster on the phone: a `DOLWEB_MODULE_OPT=s` build of `g` is queued
+against `g`, renderer off, interleaved.
+
+**Resolved the same morning by a tiering probe (`web/tier.html`, source in
+`experiments/wasm/tier/`): the phone's JavaScriptCore never promotes wasm past its
+baseline tier.** A hot loop with 32 doubles and 16 integers in locals holds 53-58 M
+iterations/s for 90 s on the iPhone (774 calls) and the same work through memory 27-30;
+on the Mac's JSC and on V8 the locals kernel steps to 133 M/s within its first call,
+3.3x the memory kernel. Hardware accounts for 0.7x of the gap, the tier for the rest.
+That is the whole explanation for the day: the simulator optimises and the phone does
+not, so register-level work measures there and not here. What does pay in a baseline
+tier is instruction count: the `-Os` module beat `-O3` on the phone in three interleaved
+pairs (renderer off 95/84 and 81/76, renderer on 43/41 -- 25.9 vs 23.6 fps), where the
+Mac had rated it "no faster". `build.sh` defaults to `-Os` now.
+
+**Three traps that each cost a build.** A homed build's `static inline` fast paths
+were not inlined at -O3 (check the relocations, not the source). The per-site
+emission dropped the text before the first instruction's slice -- the entry
+`switch` -- and presented as a corrupted LR (diff the generated C against the
+previous module before building). And a conditional reload (the quantised
+load's slow path) treated as a kill hid every register dirtied before a `psq_l`
+(the verify build is what would have caught it in minutes).
+
 ## 0j. Real tail calls: chassis dispatches -90%, CPU +15.6% (2026-09-01, afternoon)
 
 The dispatch-site histogram (`?env=STATICRECOMP_DISPATCH_SAMPLES=1`, the top 16

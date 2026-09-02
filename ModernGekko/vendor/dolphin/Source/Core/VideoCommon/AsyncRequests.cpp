@@ -3,6 +3,8 @@
 
 #include "VideoCommon/AsyncRequests.h"
 
+#include "Core/CPUThreadClock.h"
+
 #include "Core/System.h"
 
 #include "VideoCommon/Fifo.h"
@@ -14,10 +16,10 @@ AsyncRequests AsyncRequests::s_singleton;
 
 AsyncRequests::AsyncRequests() = default;
 
-void AsyncRequests::PullEvents()
+bool AsyncRequests::PullEvents()
 {
   if (m_queue.Empty())
-    return;
+    return false;
 
   // This is only called if the queue isn't empty.
   // So just flush the pipeline to get accurate results.
@@ -28,6 +30,7 @@ void AsyncRequests::PullEvents()
     std::invoke(std::move(m_queue.Front()));
     m_queue.Pop();
   }
+  return true;
 }
 
 void AsyncRequests::QueueEvent(Event&& event)
@@ -40,6 +43,8 @@ void AsyncRequests::QueueEvent(Event&& event)
 
 void AsyncRequests::WaitForEmptyQueue()
 {
+  const Core::CPUThreadClock::Scope clock_scope(Core::CPUThreadClock::gpu_wait_ns,
+                                                &Core::CPUThreadClock::gpu_waits);
   m_queue.WaitForEmpty();
 }
 

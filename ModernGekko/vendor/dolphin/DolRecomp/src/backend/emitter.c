@@ -4,6 +4,9 @@
 #include "emitter.h"
 #include "backend/c_cfg.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 static u32 cr_field_shift(u8 crf) {
     return 4u * (7u - (u32)crf);
 }
@@ -84,7 +87,7 @@ static void emit_ps_merge(FILE* out, const PPCInst* inst,
 }
 
 static void emit_fcompare(FILE* out, const PPCInst* inst) {
-    fprintf(out, "    ppc_fcmp(ctx, %u, ctx->fpr[%u], ctx->fpr[%u], %s);\n",
+    fprintf(out, "    ctx->cr = ppc_fcmp_cr(ctx, ctx->cr, %u, ctx->fpr[%u], ctx->fpr[%u], %s);\n",
             inst->crfD, inst->rA, inst->rB,
             inst->op == PPC_OP_FCMPO ? "true" : "false");
 }
@@ -237,6 +240,11 @@ static void emit_fstorex(FILE* out, const PPCInst* inst, bool single,
     fprintf(out, "    }\n");
 }
 
+// Defined with the other emission knobs below; the quantised load/store
+// templates are the one place above them that needs them.
+static bool g_homed;
+static bool g_homed_fpr;
+
 static void emit_psq_load(FILE* out, const PPCInst* inst, bool indexed,
                           bool update) {
     fprintf(out, "    {\n");
@@ -247,10 +255,25 @@ static void emit_psq_load(FILE* out, const PPCInst* inst, bool indexed,
         emit_dform_ea(out, inst->rA, inst->simm, update);
     }
     fprintf(out, ";\n");
-    fprintf(out, "        ppc_psq_load_inline(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
-            inst->rD, inst->w ? "true" : "false", inst->i,
-            indexed ? "true" : "false", inst->address);
-    fprintf(out, "        if (ctx->exception) return;\n");
+    if (g_homed && g_homed_fpr) {
+        // The unquantised fast path by value; anything else is the
+        // interpreter's, which writes the register file by index, so the
+        // locals are spilled around it and reloaded after.
+        fprintf(out, "        f64 q0_, q1_;\n");
+        fprintf(out, "        if (hpsq_load_fast(ctx, ram_, ram_size_, cia_, ea, %s, %uu, %s, &q0_, &q1_)) {"
+                     " ctx->fpr[%u] = q0_; ctx->ps1[%u] = q1_; }\n",
+                inst->w ? "true" : "false", inst->i, indexed ? "true" : "false",
+                inst->rD, inst->rD);
+        fprintf(out, "        else { DOLRECOMP_SPILL(); ppc_psq_load(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);"
+                     " DOLRECOMP_RELOAD(); if (ctx->exception) return; }\n",
+                inst->rD, inst->w ? "true" : "false", inst->i,
+                indexed ? "true" : "false", inst->address);
+    } else {
+        fprintf(out, "        ppc_psq_load_inline(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
+                inst->rD, inst->w ? "true" : "false", inst->i,
+                indexed ? "true" : "false", inst->address);
+        fprintf(out, "        if (ctx->exception) return;\n");
+    }
     if (update) {
         fprintf(out, "        ctx->gpr[%u] = ea;\n", inst->rA);
     }
@@ -267,10 +290,20 @@ static void emit_psq_store(FILE* out, const PPCInst* inst, bool indexed,
         emit_dform_ea(out, inst->rA, inst->simm, update);
     }
     fprintf(out, ";\n");
-    fprintf(out, "        ppc_psq_store_inline(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
-            inst->rS, inst->w ? "true" : "false", inst->i,
-            indexed ? "true" : "false", inst->address);
-    fprintf(out, "        if (ctx->exception) return;\n");
+    if (g_homed && g_homed_fpr) {
+        fprintf(out, "        if (!hpsq_store_fast(ctx, ram_, ram_size_, cia_, ea, %s, %uu, %s, ctx->fpr[%u], ctx->ps1[%u]))"
+                     " { DOLRECOMP_SPILL(); ppc_psq_store(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);"
+                     " if (ctx->exception) return; }\n",
+                inst->w ? "true" : "false", inst->i, indexed ? "true" : "false",
+                inst->rS, inst->rS,
+                inst->rS, inst->w ? "true" : "false", inst->i,
+                indexed ? "true" : "false", inst->address);
+    } else {
+        fprintf(out, "        ppc_psq_store_inline(ctx, %uu, ea, %s, %uu, %s, 0x%08Xu);\n",
+                inst->rS, inst->w ? "true" : "false", inst->i,
+                indexed ? "true" : "false", inst->address);
+        fprintf(out, "        if (ctx->exception) return;\n");
+    }
     if (update) {
         fprintf(out, "        ctx->gpr[%u] = ea;\n", inst->rA);
     }
@@ -345,6 +378,50 @@ static bool g_hle_outcalls;
 
 void emit_set_hle_outcalls(bool enabled) {
     g_hle_outcalls = enabled;
+}
+
+// Homed registers. The generated code's register file is ctx->gpr[] in memory,
+// and on wasm every read of it is an i32.load from linear memory and every
+// write an i32.store -- and because the guest's own stores go through a u8*
+// that may alias anything, and every memory access has a cold path that calls
+// a hook, the C compiler cannot keep a register in a machine register across
+// two guest instructions. Measured on a 64-instruction Disney skate chunk: 679
+// loads and 170 stores for 64 guest instructions.
+//
+// With this on, each generated function keeps the GPRs it touches, plus CR,
+// XER, LR and CTR, in C locals (r_3, cr_ ...), loads them from ctx at entry and
+// writes them back at every exit; around every call that can read or write
+// guest registers -- a chunk call, a tail call, the interpreter fallback, an
+// HLE host call, lmw/stmw -- it spills before and reloads after. Guest memory
+// goes through hmem_* helpers that take the RAM base and size as locals hoisted
+// once per function, so they are never re-read either, and the helpers' cold
+// path materialises ctx->pc from the instruction address it is handed, which
+// is why the per-instruction `ctx->pc = ...` stores can go: nothing else
+// observes the pc between transfers. The rewrite is textual over the emitted
+// body (see homed_rewrite), so the instruction templates are untouched and the
+// legacy output is byte-identical with the knob off.
+static bool g_homed;
+// Whether the FPRs are homed too (DOLRECOMP_HOMED_FPR, default on). Off, the
+// floating-point templates are the index-based ones and fpr[]/ps1[] stay in
+// CPUState while the integer registers are still locals.
+static bool g_homed_fpr = true;
+// DOLRECOMP_HOMED_VERIFY=1: every per-site spill also checks that each homed
+// register the analysis left out really does equal its memory copy, and
+// reports the first mismatch per site through dolrecomp_homed_mismatch().
+// It turns a hole in the reach analysis from silent corruption into a line
+// naming the chunk, the instruction and the register.
+static bool g_homed_verify;
+
+void emit_set_homed_verify(bool enabled) {
+    g_homed_verify = enabled;
+}
+
+void emit_set_homed_registers(bool enabled) {
+    g_homed = enabled;
+}
+
+void emit_set_homed_fpr(bool enabled) {
+    g_homed_fpr = enabled;
 }
 
 // Chunked emission puts many guest functions in one C function, so a `bl` to a
@@ -517,6 +594,8 @@ static void emit_loop_guard(FILE* out, const char* indent, u32 resume_pc,
                             bool resume_is_return_dispatch) {
     fprintf(out, "%sif (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n", indent);
     if (g_gated_calls) {
+        if (g_homed && !resume_is_return_dispatch)
+            fprintf(out, "%s    ctx->pc = 0x%08Xu;\n", indent, resume_pc);
         fprintf(out, "%s    bool dolrecomp_loop_guard_continue(CPUState* ctx);\n", indent);
         fprintf(out, "%s    if (!dolrecomp_loop_guard_continue(ctx)) {\n", indent);
         if (!resume_is_return_dispatch)
@@ -541,16 +620,24 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         if (local_target) {
             if (g_hle_local_calls &&
                 branch_target_is_local(func_start, func_end, inst->address + 4u)) {
+                if (g_homed) {
+                    fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->address);
+                    fprintf(out, "            DOLRECOMP_SPILL();\n");
+                }
                 fprintf(out,
                         "            if (ctx->host_call && "
                         "ppc_host_call(ctx, 0x%08Xu)) {\n",
                         inst->branch_target);
+                if (g_homed)
+                    fprintf(out, "                DOLRECOMP_RELOAD();\n");
                 fprintf(out,
                         "                if (ctx->pc == 0x%08Xu && "
                         "!ctx->exception) goto label_%08X;\n",
                         inst->address + 4u, inst->address + 4u);
                 fprintf(out, "                return;\n");
                 fprintf(out, "            }\n");
+                if (g_homed)
+                    fprintf(out, "            DOLRECOMP_RELOAD();\n");
             }
             if (local_backward)
                 emit_loop_guard(out, "            ", inst->branch_target, false);
@@ -558,11 +645,15 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         } else if (g_hle_outcalls &&
                    branch_target_is_local(func_start, func_end,
                                           inst->address + 4u)) {
+            if (g_homed)
+                fprintf(out, "            DOLRECOMP_SPILL();\n");
             fprintf(out,
                     "            DOLRECOMP_OUTCALL(0x%08Xu, 0x%08Xu, "
                     "label_%08X);\n",
                     inst->branch_target, inst->address + 4u,
                     inst->address + 4u);
+            if (g_homed)
+                fprintf(out, "            DOLRECOMP_RELOAD();\n");
         } else if (!emit_cross_chunk_call(out, inst, func_start, func_end)) {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "            return;\n");
@@ -708,6 +799,10 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "    do { if (dolrecomp_call_enter()) { call; dolrecomp_call_leave(); } return; } while (0)\n"
         "#endif\n"
         "\n"
+        "/* DOLRECOMP_HOMED_VERIFY: a spill site found a register it does not\n"
+        "   store differing from memory. Defined by the module template. */\n"
+        "void dolrecomp_homed_mismatch(u32 func, u32 site, const char* reg);\n"
+        "\n"
         "static inline u32 dolrecomp_rotl32(u32 value, u32 sh) {\n"
         "    sh &= 31u;\n"
         "    return sh ? ((value << sh) | (value >> (32u - sh))) : value;\n"
@@ -796,6 +891,45 @@ void emit_footer(FILE* out) {
     fprintf(out, "\n#endif /* RECOMP_GENERATED_H */\n\n// end\n");
 }
 
+// The homed floating-point templates. Each op is a value-based helper from
+// core/cpu_fp_homed.h: operands in, a struct out, and the destination written
+// here from it -- so the register file never has to be in memory for a helper
+// to find it. The register references are emitted in the ctx->fpr[N] spelling
+// and the rewrite pass turns them into the locals. `both` says the result goes
+// to both lanes (single precision, frsp, fres).
+// `call` is the helper invocation up to and including its closing paren; the
+// result temporaries are appended as out-pointers. They are plain locals whose
+// address only an always-inline function sees, so the compiler scalarises
+// them away on the fast path.
+static void emit_fp1(FILE* out, u8 d, bool both, const char* call) {
+    size_t n = strlen(call);
+    fprintf(out, "    { f64 t_; if (%.*s, &t_)) { ctx->fpr[%u] = t_;", (int)(n - 1), call, d);
+    if (both)
+        fprintf(out, " ctx->ps1[%u] = t_;", d);
+    fprintf(out, " } }\n");
+}
+
+static void emit_fp2(FILE* out, u8 d, const char* call) {
+    size_t n = strlen(call);
+    fprintf(out, "    { f64 t0_, t1_; %.*s, &t0_, &t1_); ctx->fpr[%u] = t0_; ctx->ps1[%u] = t1_; }\n",
+            (int)(n - 1), call, d, d);
+}
+
+// The interpreter fallback reads and writes any guest register, and the
+// chassis's fallback reads ctx->pc: with homed registers both have to be in
+// memory around it.
+static void emit_fallback_instruction(FILE* out, const PPCInst* inst) {
+    if (g_homed) {
+        fprintf(out, "    ctx->pc = 0x%08Xu;\n", inst->address);
+        fprintf(out, "    DOLRECOMP_SPILL();\n");
+    }
+    fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
+            inst->raw, inst->address);
+    if (g_homed)
+        fprintf(out, "    DOLRECOMP_RELOAD();\n");
+    fprintf(out, "    return;\n");
+}
+
 static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                         u32 func_start, u32 func_end,
                                         bool direct_backedge,
@@ -809,8 +943,17 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         return;
     }
 
-    if (ppc_op_uses_fpu(inst->op))
-        fprintf(out, "    if (!ppc_fp_available_inline(ctx, 0x%08Xu)) return;\n", inst->address);
+    if (ppc_op_uses_fpu(inst->op)) {
+        if (g_homed) {
+            // MSR is read through a local the rewrite keeps current (msr_):
+            // one test per instruction and no load, and the compiler folds the
+            // repeats between calls. The raise always returns false.
+            fprintf(out, "    if (!(ctx->msr & PPC_MSR_FP)) { ppc_fp_raise_unavailable(ctx, 0x%08Xu); return; }\n",
+                    inst->address);
+        } else {
+            fprintf(out, "    if (!ppc_fp_available_inline(ctx, 0x%08Xu)) return;\n", inst->address);
+        }
+    }
 
     switch (inst->op) {
     case PPC_OP_MULLI:
@@ -1282,28 +1425,62 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_FADDS:
-        fprintf(out, "    ppc_fadds(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fadds_h(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB);
+            emit_fp1(out, inst->rD, true, call);
+        } else {
+            fprintf(out, "    ppc_fadds(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FSUBS:
-        fprintf(out, "    ppc_fsubs(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fsubs_h(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB);
+            emit_fp1(out, inst->rD, true, call);
+        } else {
+            fprintf(out, "    ppc_fsubs(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FMULS:
-        fprintf(out, "    ppc_fmuls(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rC);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fmuls_h(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rC);
+            emit_fp1(out, inst->rD, true, call);
+        } else {
+            fprintf(out, "    ppc_fmuls(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rC);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FDIVS:
-        fprintf(out, "    ppc_fdivs(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fdivs_hi(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB);
+            emit_fp1(out, inst->rD, true, call);
+        } else {
+            fprintf(out, "    ppc_fdivs(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FRES:
-        fprintf(out, "    { f64 result; if (ppc_fres(ctx, ctx->fpr[%u], &result)) ctx->fpr[%u] = ctx->ps1[%u] = result; }\n",
-                inst->rB, inst->rD, inst->rD);
+        if (g_homed && g_homed_fpr) {
+            char call[64];
+            snprintf(call, sizeof(call), "ppc_fres_hi(ctx, ctx->fpr[%u])", inst->rB);
+            emit_fp1(out, inst->rD, true, call);
+        } else {
+            fprintf(out, "    { f64 result; if (ppc_fres(ctx, ctx->fpr[%u], &result)) ctx->fpr[%u] = ctx->ps1[%u] = result; }\n",
+                    inst->rB, inst->rD, inst->rD);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1313,6 +1490,15 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_FNMSUBS: {
         const bool sub = inst->op == PPC_OP_FMSUBS || inst->op == PPC_OP_FNMSUBS;
         const bool neg = inst->op == PPC_OP_FNMADDS || inst->op == PPC_OP_FNMSUBS;
+        if (g_homed && g_homed_fpr) {
+            char call[128];
+            snprintf(call, sizeof(call),
+                     "ppc_fmadd_h(ctx, ctx->fpr[%u], ctx->fpr[%u], ctx->fpr[%u], true, %s, %s)",
+                     inst->rA, inst->rC, inst->rB, sub ? "true" : "false", neg ? "true" : "false");
+            emit_fp1(out, inst->rD, true, call);
+            if (inst->rc) emit_set_cr1_from_fpscr(out);
+            break;
+        }
         fprintf(out, "    {\n");
         fprintf(out, "        f64 result;\n");
         fprintf(out, "        if (ppc_fma(ctx, ctx->fpr[%u], ctx->fpr[%u], ctx->fpr[%u], true, %s, %s, &result))\n",
@@ -1324,28 +1510,62 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     }
 
     case PPC_OP_FADD:
-        fprintf(out, "    ppc_fadd(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fadd_h(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB);
+            emit_fp1(out, inst->rD, false, call);
+        } else {
+            fprintf(out, "    ppc_fadd(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FSUB:
-        fprintf(out, "    ppc_fsub(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fsub_h(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB);
+            emit_fp1(out, inst->rD, false, call);
+        } else {
+            fprintf(out, "    ppc_fsub(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FMUL:
-        fprintf(out, "    ppc_fmul(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rC);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fmul_h(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rC);
+            emit_fp1(out, inst->rD, false, call);
+        } else {
+            fprintf(out, "    ppc_fmul(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rC);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FDIV:
-        fprintf(out, "    ppc_fdiv(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_fdiv_hi(ctx, ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB);
+            emit_fp1(out, inst->rD, false, call);
+        } else {
+            fprintf(out, "    ppc_fdiv(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FRSQRTE:
-        fprintf(out, "    { f64 result; if (ppc_frsqrte(ctx, ctx->fpr[%u], &result)) ctx->fpr[%u] = result; }\n",
-                inst->rB, inst->rD);
+        if (g_homed && g_homed_fpr) {
+            char call[64];
+            snprintf(call, sizeof(call), "ppc_frsqrte_hi(ctx, ctx->fpr[%u])", inst->rB);
+            emit_fp1(out, inst->rD, false, call);
+        } else {
+            fprintf(out, "    { f64 result; if (ppc_frsqrte(ctx, ctx->fpr[%u], &result)) ctx->fpr[%u] = result; }\n",
+                    inst->rB, inst->rD);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1355,6 +1575,15 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_FNMSUB: {
         const bool sub = inst->op == PPC_OP_FMSUB || inst->op == PPC_OP_FNMSUB;
         const bool neg = inst->op == PPC_OP_FNMADD || inst->op == PPC_OP_FNMSUB;
+        if (g_homed && g_homed_fpr) {
+            char call[128];
+            snprintf(call, sizeof(call),
+                     "ppc_fmadd_h(ctx, ctx->fpr[%u], ctx->fpr[%u], ctx->fpr[%u], false, %s, %s)",
+                     inst->rA, inst->rC, inst->rB, sub ? "true" : "false", neg ? "true" : "false");
+            emit_fp1(out, inst->rD, false, call);
+            if (inst->rc) emit_set_cr1_from_fpscr(out);
+            break;
+        }
         fprintf(out, "    {\n");
         fprintf(out, "        f64 result;\n");
         fprintf(out, "        if (ppc_fma(ctx, ctx->fpr[%u], ctx->fpr[%u], ctx->fpr[%u], false, %s, %s, &result))\n",
@@ -1367,8 +1596,15 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_FCTIW:
     case PPC_OP_FCTIWZ:
-        fprintf(out, "    { u64 result; if (ppc_fctiw(ctx, ctx->fpr[%u], %s, &result)) ctx->fpr[%u] = dolrecomp_f64_from_bits(result); }\n",
-                inst->rB, inst->op == PPC_OP_FCTIWZ ? "true" : "false", inst->rD);
+        if (g_homed && g_homed_fpr) {
+            char call[80];
+            snprintf(call, sizeof(call), "ppc_fctiw_hi(ctx, ctx->fpr[%u], %s)", inst->rB,
+                     inst->op == PPC_OP_FCTIWZ ? "true" : "false");
+            emit_fp1(out, inst->rD, false, call);
+        } else {
+            fprintf(out, "    { u64 result; if (ppc_fctiw(ctx, ctx->fpr[%u], %s, &result)) ctx->fpr[%u] = dolrecomp_f64_from_bits(result); }\n",
+                    inst->rB, inst->op == PPC_OP_FCTIWZ ? "true" : "false", inst->rD);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1396,7 +1632,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_FRSP:
-        fprintf(out, "    ppc_frsp(ctx, %u, %u);\n", inst->rD, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[64];
+            snprintf(call, sizeof(call), "ppc_frsp_hi(ctx, ctx->fpr[%u])", inst->rB);
+            emit_fp1(out, inst->rD, true, call);
+        } else {
+            fprintf(out, "    ppc_frsp(ctx, %u, %u);\n", inst->rD, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1465,36 +1707,79 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_PS_ADD:
-        fprintf(out, "    ppc_ps_add_op(ctx, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[160];
+            snprintf(call, sizeof(call), "ppc_ps_add_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->ps1[%u])",
+                     inst->rA, inst->rA, inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_add_op(ctx, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_SUB:
-        fprintf(out, "    ppc_ps_sub_op(ctx, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[160];
+            snprintf(call, sizeof(call), "ppc_ps_sub_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->ps1[%u])",
+                     inst->rA, inst->rA, inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_sub_op(ctx, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_MUL:
-        fprintf(out, "    ppc_ps_mul_op(ctx, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC);
+        if (g_homed && g_homed_fpr) {
+            char call[160];
+            snprintf(call, sizeof(call), "ppc_ps_mul_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->ps1[%u])",
+                     inst->rA, inst->rA, inst->rC, inst->rC);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_mul_op(ctx, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_DIV:
-        fprintf(out, "    ppc_ps_div_op(ctx, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[160];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_div_hi(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->ps1[%u])",
+                     inst->rA, inst->rA, inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_div_op(ctx, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_RES:
-        fprintf(out, "    ppc_ps_res_op(ctx, %u, %u);\n", inst->rD, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_ps_res_hi(ctx, ctx->fpr[%u], ctx->ps1[%u])",
+                     inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_res_op(ctx, %u, %u);\n", inst->rD, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_RSQRTE:
-        fprintf(out, "    ppc_ps_rsqrte_op(ctx, %u, %u);\n", inst->rD, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[96];
+            snprintf(call, sizeof(call), "ppc_ps_rsqrte_hi(ctx, ctx->fpr[%u], ctx->ps1[%u])",
+                     inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_rsqrte_op(ctx, %u, %u);\n", inst->rD, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1502,6 +1787,20 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_PS_MSUB:
     case PPC_OP_PS_NMADD:
     case PPC_OP_PS_NMSUB:
+        if (g_homed && g_homed_fpr) {
+            char call[200];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_madd_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->ps1[%u], "
+                     "ctx->fpr[%u], ctx->ps1[%u], %s, %s)",
+                     inst->rA, inst->rA, inst->rC, inst->rC, inst->rB, inst->rB,
+                     (inst->op == PPC_OP_PS_MSUB || inst->op == PPC_OP_PS_NMSUB) ?
+                         "true" : "false",
+                     (inst->op == PPC_OP_PS_NMADD || inst->op == PPC_OP_PS_NMSUB) ?
+                         "true" : "false");
+            emit_fp2(out, inst->rD, call);
+            if (inst->rc) emit_set_cr1_from_fpscr(out);
+            break;
+        }
         fprintf(out, "    ppc_ps_madd_op(ctx, %u, %u, %u, %u, %s, %s);\n",
                 inst->rD, inst->rA, inst->rC, inst->rB,
                 (inst->op == PPC_OP_PS_MSUB || inst->op == PPC_OP_PS_NMSUB) ?
@@ -1542,38 +1841,88 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_PS_SUM0:
-        fprintf(out, "    ppc_ps_sum0(ctx, %u, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[128];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_sum0_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->ps1[%u])",
+                     inst->rA, inst->rB, inst->rC);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_sum0(ctx, %u, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_SUM1:
-        fprintf(out, "    ppc_ps_sum1(ctx, %u, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[128];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_sum1_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rB, inst->rC);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_sum1(ctx, %u, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_MULS0:
-        fprintf(out, "    ppc_ps_muls0(ctx, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC);
+        if (g_homed && g_homed_fpr) {
+            char call[160];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_mul_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->fpr[%u])",
+                     inst->rA, inst->rA, inst->rC, inst->rC);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_muls0(ctx, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_MULS1:
-        fprintf(out, "    ppc_ps_muls1(ctx, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC);
+        if (g_homed && g_homed_fpr) {
+            char call[160];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_mul_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->ps1[%u], ctx->ps1[%u])",
+                     inst->rA, inst->rA, inst->rC, inst->rC);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_muls1(ctx, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_MADDS0:
-        fprintf(out, "    ppc_ps_madds0(ctx, %u, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[200];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_madd_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->fpr[%u], ctx->fpr[%u], "
+                     "ctx->fpr[%u], ctx->ps1[%u], false, false)",
+                     inst->rA, inst->rA, inst->rC, inst->rC, inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_madds0(ctx, %u, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_PS_MADDS1:
-        fprintf(out, "    ppc_ps_madds1(ctx, %u, %u, %u, %u);\n",
-                inst->rD, inst->rA, inst->rC, inst->rB);
+        if (g_homed && g_homed_fpr) {
+            char call[200];
+            snprintf(call, sizeof(call),
+                     "ppc_ps_madd_h(ctx, ctx->fpr[%u], ctx->ps1[%u], ctx->ps1[%u], ctx->ps1[%u], "
+                     "ctx->fpr[%u], ctx->ps1[%u], false, false)",
+                     inst->rA, inst->rA, inst->rC, inst->rC, inst->rB, inst->rB);
+            emit_fp2(out, inst->rD, call);
+        } else {
+            fprintf(out, "    ppc_ps_madds1(ctx, %u, %u, %u, %u);\n",
+                    inst->rD, inst->rA, inst->rC, inst->rB);
+        }
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1604,7 +1953,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         bool lane1 = inst->op == PPC_OP_PS_CMPU1 || inst->op == PPC_OP_PS_CMPO1;
         bool ordered = inst->op == PPC_OP_PS_CMPO0 || inst->op == PPC_OP_PS_CMPO1;
         const char* bank = lane1 ? "ps1" : "fpr";
-        fprintf(out, "    ppc_fcmp(ctx, %u, ctx->%s[%u], ctx->%s[%u], %s);\n",
+        fprintf(out, "    ctx->cr = ppc_fcmp_cr(ctx, ctx->cr, %u, ctx->%s[%u], ctx->%s[%u], %s);\n",
                 inst->crfD, bank, inst->rA, bank, inst->rB,
                 ordered ? "true" : "false");
         break;
@@ -1728,11 +2077,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
             else fprintf(out, "        u32 ea = 0u;\n");
             fprintf(out, "        u32 count = %uu;\n", count);
         }
+        if (g_homed) fprintf(out, "        DOLRECOMP_SPILL();\n");
         fprintf(out, "        for (u32 n = 0; n < count; n++) {\n");
         fprintf(out, "            u32 reg = (%uu + n / 4u) & 31u;\n", inst->rD);
         fprintf(out, "            if ((n & 3u) == 0) ctx->gpr[reg] = 0;\n");
         fprintf(out, "            ctx->gpr[reg] |= (u32)mem_read8(ctx, ea + n) << (24u - 8u * (n & 3u));\n");
         fprintf(out, "        }\n");
+        if (g_homed) fprintf(out, "        DOLRECOMP_RELOAD();\n");
         fprintf(out, "    }\n");
         break;
     }
@@ -1750,11 +2101,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
             else fprintf(out, "        u32 ea = 0u;\n");
             fprintf(out, "        u32 count = %uu;\n", count);
         }
+        if (g_homed) fprintf(out, "        DOLRECOMP_SPILL();\n");
         fprintf(out, "        for (u32 n = 0; n < count; n++) {\n");
         fprintf(out, "            u32 reg = (%uu + n / 4u) & 31u;\n", inst->rS);
         fprintf(out, "            u8 value = (u8)(ctx->gpr[reg] >> (24u - 8u * (n & 3u)));\n");
         fprintf(out, "            mem_write8(ctx, ea + n, value);\n");
         fprintf(out, "        }\n");
+        if (g_homed) fprintf(out, "        DOLRECOMP_RELOAD();\n");
         fprintf(out, "    }\n");
         break;
     }
@@ -1833,8 +2186,10 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 ea = ");
         emit_dform_ea(out, inst->rA, inst->simm, false);
         fprintf(out, ";\n");
+        if (g_homed) fprintf(out, "        DOLRECOMP_SPILL();\n");
         fprintf(out, "        for (u32 r = %u; r < 32; r++, ea += 4) ctx->gpr[r] = mem_read32(ctx, ea);\n",
                 inst->rD);
+        if (g_homed) fprintf(out, "        DOLRECOMP_RELOAD();\n");
         fprintf(out, "    }\n");
         break;
 
@@ -1843,8 +2198,10 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 ea = ");
         emit_dform_ea(out, inst->rA, inst->simm, false);
         fprintf(out, ";\n");
+        if (g_homed) fprintf(out, "        DOLRECOMP_SPILL();\n");
         fprintf(out, "        for (u32 r = %u; r < 32; r++, ea += 4) mem_write32(ctx, ea, ctx->gpr[r]);\n",
                 inst->rS);
+        if (g_homed) fprintf(out, "        DOLRECOMP_RELOAD();\n");
         fprintf(out, "    }\n");
         break;
 
@@ -1963,6 +2320,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MTMSR:
         fprintf(out, "    ctx->msr = ctx->gpr[%u];\n", inst->rS);
+        if (g_homed)
+            fprintf(out, "    msr_ = ctx->gpr[%u];\n", inst->rS);
         break;
 
     case PPC_OP_MFSR:
@@ -2013,9 +2372,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 282: fprintf(out, "    ctx->gpr[%u] = ctx->ear;\n", inst->rD); break;
         case 920: fprintf(out, "    ctx->gpr[%u] = ctx->hid2;\n", inst->rD); break;
         default:
-            fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
-                    inst->raw, inst->address);
-            fprintf(out, "    return;\n");
+            emit_fallback_instruction(out, inst);
             break;
         }
         break;
@@ -2038,9 +2395,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 919: fprintf(out, "    ctx->gqr[7] = ctx->gpr[%u];\n", inst->rS); break;
         case 920: fprintf(out, "    ctx->hid2 = ctx->gpr[%u];\n", inst->rS); break;
         default:
-            fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
-                    inst->raw, inst->address);
-            fprintf(out, "    return;\n");
+            emit_fallback_instruction(out, inst);
             break;
         }
         break;
@@ -2080,9 +2435,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     default:
-        fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
-                inst->raw, inst->address);
-        fprintf(out, "    return;\n");
+        emit_fallback_instruction(out, inst);
         break;
     }
 
@@ -2093,23 +2446,541 @@ void emit_instruction(FILE* out, const PPCInst* inst) {
     emit_instruction_with_range(out, inst, 0, (u32)-1, false, false);
 }
 
+// --- homed registers: the textual rewrite ----------------------------------
+//
+// The body of a function is emitted into a memory buffer first; this pass
+// then rewrites it and, from the result, learns which registers the function
+// touches so the prologue, the spill and the reload can be exact.
+
+typedef struct {
+    char* data;
+    size_t len, cap;
+} StrBuf;
+
+static void sb_put(StrBuf* b, const char* s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 4096;
+        while (cap < b->len + n + 1) cap *= 2;
+        b->data = (char*)realloc(b->data, cap);
+        b->cap = cap;
+    }
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+}
+
+static void sb_puts(StrBuf* b, const char* s) { sb_put(b, s, strlen(s)); }
+
+static bool ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool starts(const char* p, const char* end, const char* lit) {
+    size_t n = strlen(lit);
+    return (size_t)(end - p) >= n && memcmp(p, lit, n) == 0;
+}
+
+// Registers the rewritten body names, and whether each is assigned.
+typedef struct {
+    bool used[32], dirty[32];
+    bool fused[32], fdirty[32];   /* fpr */
+    bool pused[32], pdirty[32];   /* ps1 */
+    bool cr_used, cr_dirty, xer_used, xer_dirty;
+    bool lr_used, lr_dirty, ctr_used, ctr_dirty;
+    bool msr_used;   /* read through a local, written through to ctx */
+} HomedSet;
+
+// Whether the text after a register token assigns to it.
+static bool assigns_after(const char* p, const char* end) {
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    if (p >= end) return false;
+    if (p[0] == '=' && (p + 1 >= end || p[1] != '=')) return true;
+    if (p + 1 < end && p[1] == '=' &&
+        (p[0] == '+' || p[0] == '-' || p[0] == '&' || p[0] == '|' || p[0] == '^'))
+        return true;
+    if (p + 2 < end && p[2] == '=' &&
+        ((p[0] == '<' && p[1] == '<') || (p[0] == '>' && p[1] == '>')))
+        return true;
+    if (p + 1 < end && ((p[0] == '+' && p[1] == '+') || (p[0] == '-' && p[1] == '-')))
+        return true;
+    return false;
+}
+
+static void homed_rewrite(const char* in, size_t len, StrBuf* out, HomedSet* set,
+                          bool reset, const char* spill) {
+    const char* p = in;
+    const char* end = in + len;
+    if (reset)
+        memset(set, 0, sizeof(*set));
+    while (p < end) {
+        bool boundary = (p == in) || !ident_char(p[-1]);
+        if (boundary && (starts(p, end, "ctx->gpr[") ||
+                         (g_homed_fpr && (starts(p, end, "ctx->fpr[") || starts(p, end, "ctx->ps1["))))) {
+            const char bank = p[5];  /* g, f or p */
+            const char* q = p + 9;
+            u32 n = 0;
+            int digits = 0;
+            while (q < end && *q >= '0' && *q <= '9') { n = n * 10 + (u32)(*q - '0'); q++; digits++; }
+            if (digits && q < end && *q == ']' && n < 32) {
+                char tmp[16];
+                bool d = assigns_after(q + 1, end);
+                if (bank == 'g') {
+                    snprintf(tmp, sizeof(tmp), "r_%u", n);
+                    set->used[n] = true;
+                    if (d) set->dirty[n] = true;
+                } else if (bank == 'f') {
+                    snprintf(tmp, sizeof(tmp), "f_%u", n);
+                    set->fused[n] = true;
+                    if (d) set->fdirty[n] = true;
+                } else {
+                    snprintf(tmp, sizeof(tmp), "p_%u", n);
+                    set->pused[n] = true;
+                    if (d) set->pdirty[n] = true;
+                }
+                sb_puts(out, tmp);
+                p = q + 1;
+                continue;
+            }
+            // ctx->gpr[reg] with a run-time index stays an array access; the
+            // emitter has spilled and will reload around it.
+        }
+        if (boundary && starts(p, end, "ctx->msr") && (p + 8 >= end || !ident_char(p[8])) &&
+            !assigns_after(p + 8, end)) {
+            sb_puts(out, "msr_");
+            set->msr_used = true;
+            p += 8;
+            continue;
+        }
+        // The emitter's own refresh after mtmsr (`msr_ = ...`) is a use too:
+        // a chunk whose only MSR traffic is an mtmsr otherwise gets the
+        // assignment and no declaration (found by the 32-instruction layout).
+        if (boundary && starts(p, end, "msr_") && (p + 4 >= end || !ident_char(p[4]))) {
+            sb_puts(out, "msr_");
+            set->msr_used = true;
+            p += 4;
+            continue;
+        }
+        if (boundary && starts(p, end, "ctx->")) {
+            static const struct { const char* field; const char* local; int which; } fields[] = {
+                {"ctr", "ctr_", 3}, {"cr", "cr_", 0}, {"xer", "xer_", 1}, {"lr", "lr_", 2},
+            };
+            bool done = false;
+            for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+                size_t fl = strlen(fields[i].field);
+                const char* q = p + 5;
+                if ((size_t)(end - q) >= fl && memcmp(q, fields[i].field, fl) == 0 &&
+                    (q + fl >= end || !ident_char(q[fl]))) {
+                    sb_puts(out, fields[i].local);
+                    bool d = assigns_after(q + fl, end);
+                    switch (fields[i].which) {
+                    case 0: set->cr_used = true; if (d) set->cr_dirty = true; break;
+                    case 1: set->xer_used = true; if (d) set->xer_dirty = true; break;
+                    case 2: set->lr_used = true; if (d) set->lr_dirty = true; break;
+                    default: set->ctr_used = true; if (d) set->ctr_dirty = true; break;
+                    }
+                    p = q + fl;
+                    done = true;
+                    break;
+                }
+            }
+            if (done) continue;
+        }
+        if (boundary && (starts(p, end, "mem_read") || starts(p, end, "mem_write"))) {
+            // mem_read32(ctx,  ->  hmem_read32(ctx, ram_, ram_size_, cia_,
+            const char* q = p;
+            while (q < end && ident_char(*q)) q++;
+            if (starts(q, end, "(ctx, ")) {
+                sb_puts(out, "h");
+                sb_put(out, p, (size_t)(q - p));
+                sb_puts(out, "(ctx, ram_, ram_size_, cia_, ");
+                p = q + 6;
+                continue;
+            }
+        }
+        if (boundary && starts(p, end, "return;")) {
+            sb_puts(out, "{ ");
+            sb_puts(out, spill);
+            sb_puts(out, "(); return; }");
+            p += 7;
+            continue;
+        }
+        if (boundary && starts(p, end, "DOLRECOMP_TAIL_CALL(")) {
+            sb_puts(out, spill);
+            sb_puts(out, "(); DOLRECOMP_TAIL_CALL(");
+            p += 20;
+            continue;
+        }
+        // A spill the emitter placed by name (around a helper that reads the
+        // register file) takes this site's set too.
+        if (boundary && starts(p, end, "DOLRECOMP_SPILL()")) {
+            sb_puts(out, spill);
+            sb_puts(out, "()");
+            p += 17;
+            continue;
+        }
+        // A call into another chunk, a loop helper or the chunk table: the
+        // callee reads ctx and leaves its result there.
+        if (boundary && (starts(p, end, "func_") || starts(p, end, "loop_") ||
+                         starts(p, end, "dolrecomp_chunk_table[chunk]"))) {
+            const char* q = p;
+            if (starts(p, end, "dolrecomp_chunk_table[chunk]")) {
+                q = p + strlen("dolrecomp_chunk_table[chunk]");
+            } else {
+                q = p + 5;
+                int hex = 0;
+                while (q < end && ((*q >= '0' && *q <= '9') || (*q >= 'A' && *q <= 'F'))) { q++; hex++; }
+                if (hex != 8) q = NULL;
+            }
+            if (q && starts(q, end, "(ctx);")) {
+                sb_puts(out, spill);
+                sb_puts(out, "(); ");
+                sb_put(out, p, (size_t)(q + 6 - p));
+                sb_puts(out, " DOLRECOMP_RELOAD();");
+                p = q + 6;
+                continue;
+            }
+        }
+        sb_put(out, p, 1);
+        p++;
+    }
+}
+
+// --- per-site spill sets ------------------------------------------------------
+//
+// A spill site only has to store the registers that may have been assigned
+// since the last point the register file was known to be in memory: function
+// entry, or a reload after a call. The chunk enters through a switch at any
+// instruction, so "since entry" means: assigned by some instruction that can
+// reach this one along the chunk's own edges without passing a reload. That
+// is a reachability fixpoint over a 64-instruction graph, computed from the
+// emitted text of each instruction rather than from the decoder so it sees
+// every `goto` the emitter actually wrote. Over-approximate on anything
+// unclear; a missing store is silent guest corruption.
+//
+// (Leaving it to the C compiler was tried first, as a compare against the
+// entry value -- `if (f != f_in) store` -- hoping it folds where nothing
+// reaches: it does not, the phis defeat it, and the hot FP chunk went from
+// 9009 to 28355 wasm ops with every spill site unique and unmerged.)
+typedef struct {
+    u32 gpr, fpr, ps1;
+    u8 misc;  /* 1 cr, 2 xer, 4 lr, 8 ctr */
+} RegSet;
+
+static RegSet regset_of(const HomedSet* set) {
+    RegSet r = {0, 0, 0, 0};
+    for (u32 n = 0; n < 32; ++n) {
+        if (set->dirty[n]) r.gpr |= 1u << n;
+        if (set->fdirty[n]) r.fpr |= 1u << n;
+        if (set->pdirty[n]) r.ps1 |= 1u << n;
+    }
+    if (set->cr_dirty) r.misc |= 1;
+    if (set->xer_dirty) r.misc |= 2;
+    if (set->lr_dirty) r.misc |= 4;
+    if (set->ctr_dirty) r.misc |= 8;
+    return r;
+}
+
+static bool regset_union_into(RegSet* dst, const RegSet* src) {
+    RegSet before = *dst;
+    dst->gpr |= src->gpr;
+    dst->fpr |= src->fpr;
+    dst->ps1 |= src->ps1;
+    dst->misc |= src->misc;
+    return dst->gpr != before.gpr || dst->fpr != before.fpr || dst->ps1 != before.ps1 ||
+           dst->misc != before.misc;
+}
+
+static void emit_spill_macro(FILE* out, const char* name, const RegSet* r,
+                             const HomedSet* all, u32 func_addr, u32 site) {
+    fprintf(out, "#define %s() do { ", name);
+    for (u32 n = 0; n < 32; ++n)
+        if (r->gpr & (1u << n)) fprintf(out, "ctx->gpr[%u] = r_%u; ", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (r->fpr & (1u << n)) fprintf(out, "ctx->fpr[%u] = f_%u; ", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (r->ps1 & (1u << n)) fprintf(out, "ctx->ps1[%u] = p_%u; ", n, n);
+    if (r->misc & 1) fprintf(out, "ctx->cr = cr_; ");
+    if (r->misc & 2) fprintf(out, "ctx->xer = xer_; ");
+    if (r->misc & 4) fprintf(out, "ctx->lr = lr_; ");
+    if (r->misc & 8) fprintf(out, "ctx->ctr = ctr_; ");
+    if (g_homed_verify && all) {
+        // The complement: what this site does not store must already match.
+        for (u32 n = 0; n < 32; ++n)
+            if (all->dirty[n] && !(r->gpr & (1u << n)))
+                fprintf(out, "if (ctx->gpr[%u] != r_%u) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"r%u\"); ",
+                        n, n, func_addr, site, n);
+        for (u32 n = 0; n < 32; ++n)
+            if (all->fdirty[n] && !(r->fpr & (1u << n)))
+                fprintf(out, "if (dolrecomp_f64_to_bits(ctx->fpr[%u]) != dolrecomp_f64_to_bits(f_%u)) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"f%u\"); ",
+                        n, n, func_addr, site, n);
+        for (u32 n = 0; n < 32; ++n)
+            if (all->pdirty[n] && !(r->ps1 & (1u << n)))
+                fprintf(out, "if (dolrecomp_f64_to_bits(ctx->ps1[%u]) != dolrecomp_f64_to_bits(p_%u)) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"p%u\"); ",
+                        n, n, func_addr, site, n);
+        if (all->cr_dirty && !(r->misc & 1))
+            fprintf(out, "if (ctx->cr != cr_) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"cr\"); ", func_addr, site);
+        if (all->xer_dirty && !(r->misc & 2))
+            fprintf(out, "if (ctx->xer != xer_) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"xer\"); ", func_addr, site);
+        if (all->lr_dirty && !(r->misc & 4))
+            fprintf(out, "if (ctx->lr != lr_) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"lr\"); ", func_addr, site);
+        if (all->ctr_dirty && !(r->misc & 8))
+            fprintf(out, "if (ctx->ctr != ctr_) dolrecomp_homed_mismatch(0x%08Xu, %uu, \"ctr\"); ", func_addr, site);
+    }
+    fprintf(out, "} while (0)\n");
+}
+
+// Whether the emitted text of an instruction can fall through into the next.
+static bool inst_falls_through(const PPCInst* inst) {
+    switch (inst->op) {
+    case PPC_OP_B:
+        return inst->lk;
+    case PPC_OP_BCLR:
+    case PPC_OP_BCCTR:
+        return inst->lk || (inst->bo & 0x14u) != 0x14u;
+    case PPC_OP_RFI:
+    case PPC_OP_SC:
+        return false;
+    default:
+        return true;
+    }
+}
+
+// The per-function macros and the prologue that go with a rewritten body.
+// DOLRECOMP_SPILL() stores every register the function assigns anywhere; the
+// per-site DOLRECOMP_SPILL_<i>() macros below store the reach set instead.
+static void emit_homed_macros(FILE* out, const HomedSet* set) {
+    fprintf(out, "#define DOLRECOMP_SPILL() do { ");
+    for (u32 n = 0; n < 32; ++n)
+        if (set->dirty[n]) fprintf(out, "ctx->gpr[%u] = r_%u; ", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (set->fdirty[n]) fprintf(out, "ctx->fpr[%u] = f_%u; ", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (set->pdirty[n]) fprintf(out, "ctx->ps1[%u] = p_%u; ", n, n);
+    if (set->cr_dirty) fprintf(out, "ctx->cr = cr_; ");
+    if (set->xer_dirty) fprintf(out, "ctx->xer = xer_; ");
+    if (set->lr_dirty) fprintf(out, "ctx->lr = lr_; ");
+    if (set->ctr_dirty) fprintf(out, "ctx->ctr = ctr_; ");
+    fprintf(out, "} while (0)\n");
+    fprintf(out, "#define DOLRECOMP_RELOAD() do { ");
+    for (u32 n = 0; n < 32; ++n)
+        if (set->used[n]) fprintf(out, "r_%u = ctx->gpr[%u]; ", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (set->fused[n]) fprintf(out, "f_%u = ctx->fpr[%u]; ", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (set->pused[n]) fprintf(out, "p_%u = ctx->ps1[%u]; ", n, n);
+    if (set->cr_used) fprintf(out, "cr_ = ctx->cr; ");
+    if (set->xer_used) fprintf(out, "xer_ = ctx->xer; ");
+    if (set->lr_used) fprintf(out, "lr_ = ctx->lr; ");
+    if (set->ctr_used) fprintf(out, "ctr_ = ctx->ctr; ");
+    if (set->msr_used) fprintf(out, "msr_ = ctx->msr; ");
+    fprintf(out, "} while (0)\n");
+}
+
+static void emit_homed_prologue(FILE* out, const HomedSet* set, u32 address) {
+    fprintf(out, "    u8* const ram_ = ctx->ram;\n");
+    fprintf(out, "    const u32 ram_size_ = ctx->ram_size;\n");
+    fprintf(out, "    u32 cia_ = 0x%08Xu;\n", address);
+    fprintf(out, "    (void)ram_; (void)ram_size_; (void)cia_;\n");
+    for (u32 n = 0; n < 32; ++n)
+        if (set->used[n]) fprintf(out, "    u32 r_%u = ctx->gpr[%u];\n", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (set->fused[n]) fprintf(out, "    f64 f_%u = ctx->fpr[%u];\n", n, n);
+    for (u32 n = 0; n < 32; ++n)
+        if (set->pused[n]) fprintf(out, "    f64 p_%u = ctx->ps1[%u];\n", n, n);
+    if (set->cr_used) fprintf(out, "    u32 cr_ = ctx->cr;\n");
+    if (set->xer_used) fprintf(out, "    u32 xer_ = ctx->xer;\n");
+    if (set->lr_used) fprintf(out, "    u32 lr_ = ctx->lr;\n");
+    if (set->ctr_used) fprintf(out, "    u32 ctr_ = ctx->ctr;\n");
+    if (set->msr_used) fprintf(out, "    u32 msr_ = ctx->msr;\n");
+}
+
+static void emit_homed_epilogue(FILE* out) {
+    fprintf(out, "#undef DOLRECOMP_SPILL\n#undef DOLRECOMP_RELOAD\n\n");
+}
+
+// Emit a body through the rewrite: `body` is the text between the function's
+// opening brace and its closing one. With `offsets` (one per instruction plus
+// the start of the epilogue) the spill sites inside instruction i store the
+// per-site set; without, every site stores the function's whole dirty set.
+static void emit_homed_function(FILE* out, const char* signature, u32 address,
+                                const char* body, size_t body_len,
+                                const u32* offsets, u32 count,
+                                const PPCInst* insts, const CFunctionCFG* cfg) {
+    HomedSet set;
+    if (!offsets) {
+        StrBuf rewritten = {0};
+        homed_rewrite(body, body_len, &rewritten, &set, true, "DOLRECOMP_SPILL");
+        emit_homed_macros(out, &set);
+        fprintf(out, "%s {\n", signature);
+        emit_homed_prologue(out, &set, address);
+        fwrite(rewritten.data, 1, rewritten.len, out);
+        fprintf(out, "}\n");
+        emit_homed_epilogue(out);
+        free(rewritten.data);
+        return;
+    }
+
+    RegSet* assigned = (RegSet*)calloc(count, sizeof(RegSet));
+    RegSet* reach = (RegSet*)calloc(count, sizeof(RegSet));   // dirty on exit, for successors
+    RegSet* site = (RegSet*)calloc(count, sizeof(RegSet));    // dirty at the sites inside i
+    bool* kills = (bool*)calloc(count, sizeof(bool));
+    StrBuf* slices = (StrBuf*)calloc(count + 1, sizeof(StrBuf));
+    u8* has_site = (u8*)calloc(count, 1);
+    memset(&set, 0, sizeof(set));
+
+    // Rewrite each instruction on its own, naming its spill sites, and learn
+    // what it assigns and whether it reloads.
+    for (u32 i = 0; i < count; ++i) {
+        char name[32];
+        snprintf(name, sizeof(name), "DOLRECOMP_SPILL_%u", i);
+        HomedSet local;
+        StrBuf scratch = {0};
+        homed_rewrite(body + offsets[i], offsets[i + 1] - offsets[i], &scratch, &local, true, name);
+        assigned[i] = regset_of(&local);
+        // A reload makes the register file clean for whatever follows -- but
+        // only if every path to the successors passes it. A cross-chunk call
+        // reaches its continuation through the reload alone, and the lmw
+        // family and the fallback reload unconditionally; the quantised
+        // load/store reloads only on its slow path, so it is not a kill.
+        const bool conditional_reload =
+            insts[i].op == PPC_OP_PSQ_L || insts[i].op == PPC_OP_PSQ_LU ||
+            insts[i].op == PPC_OP_PSQ_LX || insts[i].op == PPC_OP_PSQ_LUX ||
+            insts[i].op == PPC_OP_PSQ_ST || insts[i].op == PPC_OP_PSQ_STU ||
+            insts[i].op == PPC_OP_PSQ_STX || insts[i].op == PPC_OP_PSQ_STUX;
+        kills[i] = !conditional_reload && scratch.data &&
+                   strstr(scratch.data, "DOLRECOMP_RELOAD()") != NULL;
+        has_site[i] = scratch.data && strstr(scratch.data, name) != NULL;
+        free(scratch.data);
+        // The function-wide set, accumulated: the prologue and the reload
+        // want everything the function touches.
+        homed_rewrite(body + offsets[i], offsets[i + 1] - offsets[i], &slices[i], &set, false, name);
+    }
+    // The epilogue -- the fallthrough into the next chunk, the return
+    // dispatch -- is reachable from every blr, so it spills the whole set.
+    homed_rewrite(body + offsets[count], body_len - offsets[count], &slices[count], &set, false,
+                  "DOLRECOMP_SPILL");
+
+    // Successors: the gotos the emitter wrote, the fallthrough, and for a
+    // return routed through the dispatch switch, every return target.
+    // reach[i] is what may be dirty on exit from i. A 64-instruction chunk
+    // makes the quadratic predecessor walk cheap.
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (u32 i = 0; i < count; ++i) {
+            RegSet in = {0, 0, 0, 0};
+            for (u32 p = 0; p < count; ++p) {
+                bool edge = false;
+                if (p + 1 == i && inst_falls_through(&insts[p]))
+                    edge = true;
+                const char* t = body + offsets[p];
+                const char* tend = body + offsets[p + 1];
+                for (const char* q = t; !edge && q < tend;) {
+                    const char* g = strstr(q, "goto label_");
+                    if (!g || g >= tend)
+                        break;
+                    u32 target = (u32)strtoul(g + 11, NULL, 16);
+                    if (target >= address && (target - address) / 4u == i)
+                        edge = true;
+                    q = g + 11;
+                }
+                if (!edge && cfg->return_targets[i]) {
+                    const char* g = strstr(t, "goto return_dispatch_");
+                    if (g && g < tend)
+                        edge = true;
+                }
+                if (edge)
+                    regset_union_into(&in, &reach[p]);
+            }
+            // What a spill site inside i must store: everything dirty on
+            // entry plus i's own assignments. An instruction that reloads
+            // spills before the call and reloads after it, so its sites need
+            // the full set even though what it passes on to its successors
+            // is only what it assigned itself.
+            RegSet at_site = in;
+            regset_union_into(&at_site, &assigned[i]);
+            if (regset_union_into(&site[i], &at_site))
+                changed = true;
+            RegSet outset = kills[i] ? assigned[i] : at_site;
+            if (regset_union_into(&reach[i], &outset))
+                changed = true;
+        }
+    }
+
+    emit_homed_macros(out, &set);
+    for (u32 i = 0; i < count; ++i) {
+        if (!has_site[i])
+            continue;
+        char name[32];
+        snprintf(name, sizeof(name), "DOLRECOMP_SPILL_%u", i);
+        emit_spill_macro(out, name, &site[i], &set, address, i);
+    }
+    // The entry switch sits before the first instruction's slice. Nothing in
+    // it touches a register, but it goes through the rewrite like the rest so
+    // its `default: return` spills nothing rather than everything.
+    StrBuf prefix = {0};
+    {
+        HomedSet unused;
+        homed_rewrite(body, offsets[0], &prefix, &unused, true, "DOLRECOMP_SPILL");
+    }
+    fprintf(out, "%s {\n", signature);
+    emit_homed_prologue(out, &set, address);
+    if (prefix.data)
+        fwrite(prefix.data, 1, prefix.len, out);
+    free(prefix.data);
+    for (u32 i = 0; i <= count; ++i) {
+        if (slices[i].data)
+            fwrite(slices[i].data, 1, slices[i].len, out);
+        free(slices[i].data);
+    }
+    fprintf(out, "}\n");
+    for (u32 i = 0; i < count; ++i)
+        if (has_site[i])
+            fprintf(out, "#undef DOLRECOMP_SPILL_%u\n", i);
+    emit_homed_epilogue(out);
+    free(assigned);
+    free(reach);
+    free(site);
+    free(kills);
+    free(slices);
+    free(has_site);
+}
+
 static void emit_counted_loop(FILE* out, const PPCInst* insts,
                               const CFunctionCFG* cfg, u32 function_address,
                               u32 function_end, u32 first, u32 last) {
     u32 loop_address = insts[first].address;
     u32 continuation = insts[last].address + 4u;
-
-    fprintf(out, "static void loop_%08X(CPUState* ctx) {\n", loop_address);
-    fprintf(out, "label_%08X:\n", loop_address);
-    fprintf(out, "    ctx->downcount -= %u;\n", cfg->block_cycles[first]);
+    FILE* body = out;
+    char* buf = NULL;
+    size_t buf_len = 0;
+    if (g_homed) {
+        body = open_memstream(&buf, &buf_len);
+    } else {
+        fprintf(out, "static void loop_%08X(CPUState* ctx) {\n", loop_address);
+    }
+    fprintf(body, "label_%08X:\n", loop_address);
+    fprintf(body, "    ctx->downcount -= %u;\n", cfg->block_cycles[first]);
     for (u32 i = first; i <= last; ++i) {
-        if (cfg->materialize_pc[i])
-            fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
-        emit_instruction_with_range(out, &insts[i], function_address,
+        if (g_homed)
+            fprintf(body, "    cia_ = 0x%08Xu;\n", insts[i].address);
+        else if (cfg->materialize_pc[i])
+            fprintf(body, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
+        emit_instruction_with_range(body, &insts[i], function_address,
                                     function_end, i == last, false);
     }
-    fprintf(out, "    ctx->pc = 0x%08Xu;\n", continuation);
-    fprintf(out, "}\n\n");
+    fprintf(body, "    ctx->pc = 0x%08Xu;\n", continuation);
+    if (g_homed) {
+        fprintf(body, "    DOLRECOMP_SPILL();\n");
+        fclose(body);
+        char signature[64];
+        snprintf(signature, sizeof(signature), "static void loop_%08X(CPUState* ctx)",
+                 loop_address);
+        emit_homed_function(out, signature, loop_address, buf, buf_len, NULL, 0, NULL, NULL);
+        free(buf);
+    } else {
+        fprintf(out, "}\n\n");
+    }
 }
 
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
@@ -2132,61 +3003,91 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
                               cfg.loop_ends[i]);
     }
 
-    fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
-    fprintf(out, "    switch (ctx->pc) {\n");
+    FILE* body = out;
+    char* buf = NULL;
+    size_t buf_len = 0;
+    u32* offsets = NULL;
+    if (g_homed) {
+        body = open_memstream(&buf, &buf_len);
+        offsets = (u32*)calloc(count + 1, sizeof(u32));
+    } else {
+        fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    }
+    fprintf(body, "    switch (ctx->pc) {\n");
     for (u32 i = 0; i < count; i++) {
-        fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+        fprintf(body, "    case 0x%08Xu: goto label_%08X;\n",
                 insts[i].address, insts[i].address);
     }
-    fprintf(out, "    default: return;\n");
-    fprintf(out, "    }\n");
+    // Nothing has been changed yet, so this exit needs no spill; the rewrite
+    // would add one to a plain `return;`.
+    fprintf(body, g_homed ? "    default: { return; }\n" : "    default: return;\n");
+    fprintf(body, "    }\n");
 
     for (u32 i = 0; i < count; i++) {
-        fprintf(out, "label_%08X:\n", insts[i].address);
+        if (offsets) {
+            fflush(body);
+            offsets[i] = (u32)buf_len;
+        }
+        fprintf(body, "label_%08X:\n", insts[i].address);
         if (cfg.loop_ends[i] != UINT32_MAX) {
             u32 continuation = insts[cfg.loop_ends[i]].address + 4u;
-            fprintf(out, "    loop_%08X(ctx);\n", insts[i].address);
+            fprintf(body, "    loop_%08X(ctx);\n", insts[i].address);
             if (continuation < func_end) {
-                fprintf(out, "    if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
+                fprintf(body, "    if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
                         continuation, continuation);
             }
-            fprintf(out, "    return;\n");
+            fprintf(body, "    return;\n");
             continue;
         }
-        if (cfg.materialize_pc[i])
-            fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
+        if (g_homed)
+            fprintf(body, "    cia_ = 0x%08Xu;\n", insts[i].address);
+        else if (cfg.materialize_pc[i])
+            fprintf(body, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
         if (cfg.leaders[i] && cfg.block_cycles[i] != 0)
-            fprintf(out, "    ctx->downcount -= %u;\n", cfg.block_cycles[i]);
+            fprintf(body, "    ctx->downcount -= %u;\n", cfg.block_cycles[i]);
         emit_instruction_with_range(
-            out, &insts[i], func_addr, func_end,
+            body, &insts[i], func_addr, func_end,
             c_function_cfg_can_loop_directly(&cfg, insts, func_addr, i),
             has_local_returns);
     }
 
+    if (offsets) {
+        fflush(body);
+        offsets[count] = (u32)buf_len;
+    }
     // Falling off the end of a chunk is a transfer into the next one, and on a
     // title chunked at a fixed stride it is a hot one: a loop that straddles
     // the boundary crosses it every iteration. Tail into the neighbour rather
     // than hand every crossing to the chassis.
-    fprintf(out, "    {\n");
-    if (!emit_cross_chunk_tail_to(out, func_end)) {
-        fprintf(out, "            ctx->pc = 0x%08Xu;\n", func_end);
-        fprintf(out, "            return;\n");
+    fprintf(body, "    {\n");
+    if (!emit_cross_chunk_tail_to(body, func_end)) {
+        fprintf(body, "            ctx->pc = 0x%08Xu;\n", func_end);
+        fprintf(body, "            return;\n");
     }
-    fprintf(out, "    }\n");
+    fprintf(body, "    }\n");
     if (has_local_returns) {
-        fprintf(out, "return_dispatch_%08X:\n", func_addr);
-        emit_loop_guard(out, "    ", 0, true);
-        fprintf(out, "    switch (ctx->pc) {\n");
+        fprintf(body, "return_dispatch_%08X:\n", func_addr);
+        emit_loop_guard(body, "    ", 0, true);
+        fprintf(body, "    switch (ctx->pc) {\n");
         for (u32 i = 0; i < count; ++i) {
             if (cfg.return_targets[i]) {
-                fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+                fprintf(body, "    case 0x%08Xu: goto label_%08X;\n",
                         insts[i].address, insts[i].address);
             }
         }
-        fprintf(out, "    default: return;\n");
-        fprintf(out, "    }\n");
+        fprintf(body, "    default: return;\n");
+        fprintf(body, "    }\n");
     }
-    fprintf(out, "}\n\n");
+    if (g_homed) {
+        fclose(body);
+        char signature[64];
+        snprintf(signature, sizeof(signature), "void func_%08X(CPUState* ctx)", func_addr);
+        emit_homed_function(out, signature, func_addr, buf, buf_len, offsets, count, insts, &cfg);
+        free(buf);
+        free(offsets);
+    } else {
+        fprintf(out, "}\n\n");
+    }
     c_function_cfg_destroy(&cfg);
     return true;
 }

@@ -53,6 +53,36 @@ def make_handler(root, iso_path=None):
             super().__init__(*a, directory=root, **k)
 
         def do_GET(self):
+            # The phone lobby. lobby.html polls this; a URL queued from the Mac
+            # (queue-phone.sh writes next-url.txt) is handed over once and the
+            # page navigates to it. The poll time is kept so the Mac can tell
+            # whether anyone is listening before it waits for a result.
+            if self.path.split("?")[0] == "/next":
+                # One URL per line; the first is handed out and the rest wait
+                # for the run to come back to the lobby.
+                queued = os.path.join(HERE, "next-url.txt")
+                url = ""
+                try:
+                    with open(queued) as f:
+                        lines = [l.strip() for l in f if l.strip()]
+                    if lines:
+                        url = lines[0]
+                        with open(queued, "w") as f:
+                            f.write("\n".join(lines[1:]) + ("\n" if lines[1:] else ""))
+                except OSError:
+                    pass
+                with open(os.path.join(HERE, "lobby-seen.txt"), "w") as f:
+                    f.write(f"{time.time():.0f} {self.headers.get('User-Agent', '')}\n")
+                if url:
+                    print(f"lobby: handing out {url}", flush=True)
+                body = json.dumps({"url": url}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if iso_path and self.path.split("?")[0] == "/disc.iso":
                 return self.serve_iso()
             if self.headers.get("Range"):

@@ -1279,6 +1279,10 @@ bool ppc_fctiw(CPUState* cpu, f64 value, bool toward_zero, u64* output) {
 }
 
 void ppc_fcmp(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered) {
+    cpu->cr = ppc_fcmp_cr(cpu, cpu->cr, crfd, a, b, ordered);
+}
+
+u32 ppc_fcmp_cr(CPUState* cpu, u32 cr, u8 crfd, f64 a, f64 b, bool ordered) {
     u32 compare;
     if (isnan(a) || isnan(b)) {
         compare = 1u;
@@ -1301,7 +1305,7 @@ void ppc_fcmp(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered) {
     // less-than followed by an equal reads back as 0xA instead of 0x2.
     cpu->fpscr = (cpu->fpscr & ~(0xFu << 12)) | (compare << 12);
     u32 shift = 4u * (7u - crfd);
-    cpu->cr = (cpu->cr & ~(0xFu << shift)) | (compare << shift);
+    return (cr & ~(0xFu << shift)) | (compare << shift);
 }
 
 enum {

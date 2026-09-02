@@ -54,6 +54,26 @@ bool MODULE_SYMBOL(dolrecomp_native_gate_allows)(CPUState* ctx, u32 chunk_index)
     return true;
 }
 
+// DOLRECOMP_HOMED_VERIFY: a spill site found a homed register it does not
+// store differing from its memory copy -- the reach analysis in the emitter
+// left it out. Once per (function, site): the first mismatch is the one that
+// matters and a loop would print forever.
+void dolrecomp_homed_mismatch(u32 func, u32 site, const char* reg)
+{
+    static u32 seen_func[64];
+    static u32 seen_site[64];
+    static u32 seen_count;
+    for (u32 i = 0; i < seen_count; ++i)
+        if (seen_func[i] == func && seen_site[i] == site)
+            return;
+    if (seen_count < 64) {
+        seen_func[seen_count] = func;
+        seen_site[seen_count] = site;
+        ++seen_count;
+    }
+    fprintf(stderr, "[homed-verify] func_%08X site %u: %s differs from memory\n", func, site, reg);
+}
+
 // A loop guard that tripped asks here whether to keep looping. The guard tests
 // the module's own charge accumulator against a fixed budget, and only a flush
 // resets that accumulator -- so once a dispatch has run past the budget, every

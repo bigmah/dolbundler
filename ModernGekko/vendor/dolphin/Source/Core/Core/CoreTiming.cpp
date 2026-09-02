@@ -3,6 +3,8 @@
 
 #include "Core/CoreTiming.h"
 
+#include "Core/CPUThreadClock.h"
+
 #include <algorithm>
 #include <mutex>
 #include <string>
@@ -435,6 +437,7 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
 
 void CoreTimingManager::Throttle(const s64 target_cycle)
 {
+  const Core::CPUThreadClock::Scope clock_scope(Core::CPUThreadClock::throttle_ns);
   const TimePoint time = Clock::now();
 
   const bool already_throttled =

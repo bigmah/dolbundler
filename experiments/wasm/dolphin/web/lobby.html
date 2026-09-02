@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DolWeb lobby</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #d7dbe0;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 24px; text-align: center; }
+  #dot { width: 14px; height: 14px; border-radius: 7px; background: #4a90d9; animation: p 1.6s infinite; }
+  @keyframes p { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+  #log { font-size: 12px; opacity: .7; max-width: 90vw; white-space: pre-wrap; }
+  button { font: inherit; background: #1d232b; color: #d7dbe0; border: 1px solid #2c343f;
+    border-radius: 6px; padding: 10px 18px; }
+</style>
+<div id="dot"></div>
+<div id="status">Waiting for the Mac to queue a run.</div>
+<div>Leave this page open. Runs start by themselves and come back here when they finish.</div>
+<button id="wake">Keep the screen on</button>
+<pre id="log"></pre>
+<script>
+// The phone cannot be driven from the Mac (Safari has no remote control without
+// Web Inspector on), so the page drives itself: poll /next, navigate to what
+// comes back, and every run queued with ?lobby=1 returns here when its budget
+// is spent. One tap on the phone, then every measurement is a file on the Mac.
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const lines = [];
+function log(t) { lines.push(new Date().toLocaleTimeString() + ' ' + t); logEl.textContent = lines.slice(-6).join('\n'); }
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    log('screen wake lock held');
+    wakeLock.addEventListener('release', () => log('wake lock released'));
+  } catch (e) { log('wake lock: ' + e); }
+}
+document.getElementById('wake').onclick = keepAwake;
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !wakeLock) keepAwake(); });
+keepAwake();
+let polls = 0;
+async function poll() {
+  // A background tab must not take a run: Safari keeps its timers ticking but
+  // the page it navigates to never starts the emulator, and the URL is lost.
+  // Two lobby tabs cost every other queued run on 2026-09-02.
+  if (document.hidden) { setTimeout(poll, 2000); return; }
+  try {
+    const r = await fetch('/next', { cache: 'no-store' });
+    const { url } = await r.json();
+    polls++;
+    if (url) {
+      statusEl.textContent = 'starting: ' + url;
+      log('run: ' + url);
+      setTimeout(() => location.replace(url), 800);
+      return;
+    }
+    statusEl.textContent = `Waiting for the Mac to queue a run (${polls} polls).`;
+  } catch (e) {
+    statusEl.textContent = 'server unreachable: ' + e;
+  }
+  setTimeout(poll, 2000);
+}
+poll();
+</script>

@@ -83,9 +83,37 @@ NODE=OFF
 # INSTRUCTIONS=64 -- the floor is 16 now) measured +2.0% in headless Chrome
 # (993.4 -> 1013.3 M ticks/sample, two interleaved rounds, arms not overlapping)
 # and +1.3%/+3.4% in the iOS Simulator's JSC, 90.4 -> 90.0 MB. 32 is untried.
-MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c64-tc/generated}"
+#
+# 2026-09-01, evening: homed registers. DOLRECOMP_HOMED_REGS=1 keeps each
+# chunk's integer registers, CR/XER/LR/CTR and a read-cached MSR in C locals,
+# spilled at every exit with a per-site set computed by a reachability pass in
+# the emitter, and reads guest memory through hmem_* with the RAM base hoisted.
+# DOLRECOMP_HOMED_FPR=0 keeps the FPRs in CPUState: homing them too was built
+# three ways and lost 5-22% under JavaScriptCore every time (32 FP registers
+# for ~50 live doubles, and the baseline tier keeps locals in stack slots
+# anyway). With GXRUNTIME_NO_FPRF and the gather-pipe fast path
+# (CMakeLists.txt, core/cpu.h) the gameplay rate from the Olliewood savestate
+# in the simulator's JSC went 711 -> 1005 M ticks/sample over the day, the
+# last step (gexe52-c64-h -> gexe52-c64-g) being +16.6% with arms apart.
+# DOLRECOMP_HOMED_VERIFY=1 builds a module whose spill sites assert what they
+# leave out; it reported nothing over a 250 s boot into Olliewood.
+#
+#   DOLRECOMP_C_CHUNK_INSTRUCTIONS=64 DOLRECOMP_DIRECT_CALLS=1 DOLRECOMP_TAIL_CALLS=1 \
+#   DOLRECOMP_HOMED_REGS=1 DOLRECOMP_HOMED_FPR=0 \
+#     dolrecomp --gamecube --backend c -j10 build-wasm/gexe52/sys/main.dol build-wasm/gexe52-c64-g
+#
+# 32-instruction chunks tie with 64 on this layout (1.010, arms overlapping)
+# and cost 10 MB more, so 64 stays.
+MODULES="${DOLWEB_MODULES:-GEXE52=$ROOT/build-wasm/gexe52-c64-g/generated}"
 BUILD=""
-OPT="${DOLWEB_MODULE_OPT:-3}"
+# -Os, not -O3, since 2026-09-02: the phone's JavaScriptCore never promotes
+# this module past its baseline tier (a tiering probe, web/tier.html, holds a
+# hot register-heavy loop at ~55 M iterations/s for 90 s where the Mac's JSC
+# reaches 133 M/s within one call), and in a baseline tier fewer instructions
+# is what pays. Measured on the iPhone from the Olliewood state, interleaved:
+# renderer off 95% vs 84% and 81% vs 76%, renderer on 43% vs 41%. On the Mac
+# -Os had measured "no faster" -- the Mac's tier hides it.
+OPT="${DOLWEB_MODULE_OPT:-s}"
 # Cross-translation-unit inlining over a whole game is 65 MB of bitcode through
 # one wasm-ld invocation, and it is OFF because it does not pay.
 #

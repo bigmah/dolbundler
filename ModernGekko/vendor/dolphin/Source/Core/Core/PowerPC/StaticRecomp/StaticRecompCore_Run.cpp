@@ -1,6 +1,8 @@
 // RecompCore: StaticRecomp CPU core - Main execution loop.
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "Core/CPUThreadClock.h"
+#include "Core/HW/GPFifo.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 
 #include <algorithm>
@@ -253,6 +255,21 @@ void StaticRecompCore::Run()
   // page split, an address translation, a gather-pipe test and an MMIO test.
   m_guest.l1cache = getenv("MODERNGEKKO_NO_L1") ? nullptr : memory.GetL1Cache();
   m_guest.l1cache_size = memory.GetL1CacheSize();
+  // The write-gather pipe: let the module write Dolphin's gather buffer
+  // itself and call back once per 32-byte burst, instead of a hook per
+  // component (see the field's comment in core/cpu.h). Off under lockstep,
+  // which journals every hardware write through the hook, and with
+  // MODERNGEKKO_NO_GATHER_FAST for the A/B.
+  m_guest.gather_pipe_slot = nullptr;
+  m_guest.gather_pipe_limit = nullptr;
+  m_guest.gather_pipe_flush = nullptr;
+  if (!m_lockstep_verifier->IsEnabled() && !getenv("MODERNGEKKO_NO_GATHER_FAST") &&
+      ppc.gather_pipe_base_ptr)
+  {
+    m_guest.gather_pipe_slot = &ppc.gather_pipe_ptr;
+    m_guest.gather_pipe_limit = ppc.gather_pipe_base_ptr + GPFifo::GATHER_PIPE_SIZE;
+    m_guest.gather_pipe_flush = &StaticRecompCore::HookGatherFlush;
+  }
   InitLookupTable(m_guest.ram_size, m_guest.exram_size);
   const bool lockstep_enabled = m_lockstep_verifier->IsEnabled();
   const auto fast_dispatchable_at = [this](u32 address) {
@@ -287,7 +304,10 @@ void StaticRecompCore::Run()
 
   while (*state_ptr == CPU::State::Running)
   {
-    core_timing.Advance();
+    {
+      const Core::CPUThreadClock::Scope clock_scope(Core::CPUThreadClock::events_ns);
+      core_timing.Advance();
+    }
     const std::string current_game_id = SConfig::GetInstance().GetGameID();
     m_module_active = m_module && (current_game_id.empty() || current_game_id == m_module->game_id);
 

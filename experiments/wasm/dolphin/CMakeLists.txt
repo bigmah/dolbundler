@@ -41,6 +41,20 @@ if(DOLWEB_OFFSCREEN_CANVAS)
   add_compile_definitions(DOLWEB_OFFSCREEN_CANVAS=1)
 endif()
 
+# The guest memory path's shipping shape. Each of these removes work from every
+# recompiled load or store that only a lockstep or debugging build needs -- the
+# write journal, the reservation clear on plain stores (Dolphin does not do it
+# either), and the global that says whether lazy FP is enabled (nothing ever
+# turns it off). Declared before ModernGekko so they reach GXRuntime's own
+# compilation units as well as the module: the chassis and the generated code
+# have to agree about what a store does. core/cpu.h documents each one, with the
+# instruction counts they are worth.
+add_compile_definitions(
+  GXRUNTIME_NO_WRITE_JOURNAL=1
+  GXRUNTIME_NO_STORE_RESERVATION_CLEAR=1
+  GXRUNTIME_LAZY_FP_ALWAYS_ON=1
+  GXRUNTIME_NO_FPRF=1)
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../ModernGekko
                  ${CMAKE_BINARY_DIR}/moderngekko EXCLUDE_FROM_ALL)
 

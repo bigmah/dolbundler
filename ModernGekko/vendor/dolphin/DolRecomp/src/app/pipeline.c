@@ -1083,6 +1083,23 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
     // below its second text section, every text-section call asked the gate
     // about the chunk four below its target.
     {
+        const char* homed = getenv("DOLRECOMP_HOMED_REGS");
+        if (homed && strcmp(homed, "1") == 0) {
+            printf("  homed registers enabled\n");
+            emit_set_homed_registers(true);
+            const char* fpr = getenv("DOLRECOMP_HOMED_FPR");
+            if (fpr && strcmp(fpr, "0") == 0) {
+                printf("  (integer registers only; FPRs stay in CPUState)\n");
+                emit_set_homed_fpr(false);
+            }
+            const char* verify = getenv("DOLRECOMP_HOMED_VERIFY");
+            if (verify && strcmp(verify, "1") == 0) {
+                printf("  (spill sites verify the registers they leave out)\n");
+                emit_set_homed_verify(true);
+            }
+        }
+    }
+    {
         const char* hle_local = getenv("DOLRECOMP_HLE_LOCAL_CALLS");
         if (hle_local && strcmp(hle_local, "1") == 0) {
             printf("  HLE-visible intra-chunk calls enabled\n");

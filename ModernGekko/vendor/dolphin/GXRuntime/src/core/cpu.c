@@ -272,7 +272,49 @@ static bool psq_check_enabled(CPUState* cpu, bool indexed, u32 cia) {
     return true;
 }
 
+u64 ppc_mem_read_slow(CPUState* cpu, u32 cia, u32 addr, u32 size) {
+    u8* ptr = get_ram_ptr(cpu, addr, size, NULL);
+    if (ptr) {
+        switch (size) {
+        case 1: return *ptr;
+        case 2: return read_be16(ptr);
+        case 4: return read_be32(ptr);
+        default: return read_be64(ptr);
+        }
+    }
+    /* The hooks read the pc: the external-read loop detector keys on it. */
+    cpu->pc = cia;
+    if (cpu->external_read)
+        return cpu->external_read(cpu, addr, (u8)size);
+    return 0;
+}
+
+void ppc_mem_write_slow(CPUState* cpu, u32 cia, u32 addr, u64 value, u32 size) {
+    /* The gather pipe first: in a busy scene it is most of what arrives here. */
+    if (ppc_gather_write(cpu, addr, value, size))
+        return;
+    u32 offset;
+    u8* ptr = get_ram_ptr(cpu, addr, size, &offset);
+    if (ptr) {
+        clear_matching_reservation(cpu, addr);
+        GXRUNTIME_JOURNAL_WRITE(offset, size);
+        switch (size) {
+        case 1: *ptr = (u8)value; break;
+        case 2: write_be16(ptr, (u16)value); break;
+        case 4: write_be32(ptr, (u32)value); break;
+        default: write_be64(ptr, value); break;
+        }
+        return;
+    }
+    cpu->pc = cia;
+    if (cpu->external_write)
+        cpu->external_write(cpu, addr, value, (u8)size);
+}
+
 bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+    /* Homed-register generated code does not keep cpu->pc current; the memory
+       hooks below want it. Harmless where it already is. */
+    cpu->pc = cia;
     if (!psq_check_enabled(cpu, indexed, cia))
         return false;
 
@@ -292,6 +334,7 @@ bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr_index, bool inde
 }
 
 bool ppc_psq_store(CPUState* cpu, u8 frS, u32 ea, bool w, u8 gqr_index, bool indexed, u32 cia) {
+    cpu->pc = cia;
     if (!psq_check_enabled(cpu, indexed, cia))
         return false;
 

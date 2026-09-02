@@ -1,6 +1,7 @@
 // RecompCore: StaticRecomp CPU core - Memory and instruction fallback HLE hooks.
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "Core/CPUThreadClock.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 #include "Core/System.h"
 #include "Core/PowerPC/MMU.h"
@@ -170,6 +171,7 @@ void StaticRecompCore::TrackExternalRead(u32 pc, u32 address, u64 value)
 
 u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 {
+  Core::CPUThreadClock::ext_reads.fetch_add(1, std::memory_order_relaxed);
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
   core->FlushGuestCharge();
   ea = core->TranslateRelAddress(ea);
@@ -206,6 +208,19 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
   return value;
 }
 
+// The gather buffer has a full burst in it. What the per-write hook used to do
+// once per component happens here once per 32 bytes: the poll-run reset (the
+// guest is plainly making progress), the charge flush so the FIFO's timing
+// stays honest, and Dolphin's own burst handling.
+void StaticRecompCore::HookGatherFlush(CPUState* cpu)
+{
+  auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  core->ResetExternalPollRun();
+  core->FlushGuestCharge();
+  Core::CPUThreadClock::gather_writes.fetch_add(1, std::memory_order_relaxed);
+  core->m_system.GetGPFifo().FastCheckGatherPipe();
+}
+
 void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
@@ -221,8 +236,10 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
   // special case without an MMU round trip. Keying on the effective page is
   // the same shortcut Dolphin's JITs take (optimizeGatherPipe). GPFifo
   // maintains ppc_state.gather_pipe_ptr internally.
+  Core::CPUThreadClock::ext_writes.fetch_add(1, std::memory_order_relaxed);
   if ((ea & 0xFFFFF000) == 0xCC008000u)
   {
+    Core::CPUThreadClock::gather_writes.fetch_add(1, std::memory_order_relaxed);
     if (core->m_lockstep_verifier->m_ls_journaling)
       core->m_lockstep_verifier->m_journal.native_mmio.push_back({ea, static_cast<u32>(value), size});
     auto& gpfifo = core->m_system.GetGPFifo();

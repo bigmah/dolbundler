@@ -101,6 +101,19 @@ let lines = [];
 // only account there is: the tail has scrolled past them by the time anything
 // goes wrong, and there is no console to scroll back through.
 const head = [];
+// ?lobby=1: a run queued from the Mac through lobby.html goes back there when
+// its budget is spent, so the next queued run needs nobody at the phone.
+const LOBBY = params.get('lobby') === '1';
+let lobbyReturning = false;
+function lobbyWatch(text) {
+  if (!LOBBY || lobbyReturning) return;
+  if (!text.includes('[dolweb] budget reached') && !text.includes('Run() returned')) return;
+  lobbyReturning = true;
+  status('returning to the lobby');
+  // A beat for the last reports to leave.
+  setTimeout(() => location.replace('/lobby.html'), 6000);
+}
+
 function log(text) {
   if (head.length < 140) head.push(text);
   lines.push(text);
@@ -110,6 +123,7 @@ function log(text) {
   logEl.textContent = lines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
   console.log(text);
+  lobbyWatch(text);
   if (ACTS.length) actsWatch(text);
   if (AB) abWatch(text);
   bootWatch(text);
@@ -210,9 +224,26 @@ const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
 // progress bar. A TransformStream counts the bytes on their way through, so the
 // download reports real progress and is still handed straight to
 // WebAssembly.instantiateStreaming.
+// ?build=<name> loads build-wasm/<name>/ (served as builds/<name>/) instead of
+// the dolweb.{js,wasm,data} symlinks in web/. Two browsers -- the phone and the
+// simulator -- can then run two builds at once, and a queued phone run names
+// its build in its URL rather than depending on what use-build.sh last
+// pointed the symlinks at; an A/B that shared them was measuring whichever
+// build the other harness had switched to.
+const BUILD_DIR = params.get('build') ? `builds/${params.get('build')}/` : '';
+function loadModuleScript() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = `${BUILD_DIR}dolweb.js`;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`could not load ${s.src}`));
+    document.head.appendChild(s);
+  });
+}
+
 function instantiateCounted(imports, receive) {
   (async () => {
-    const url = 'dolweb.wasm';
+    const url = `${BUILD_DIR}dolweb.wasm`;
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -237,7 +268,7 @@ function instantiateCounted(imports, receive) {
       loading('Downloading emulator', total ? `${mb(total)}` : '', total ? 1 : undefined);
       const { instance, module } = await WebAssembly.instantiateStreaming(counted, imports);
       loading('Linking module', 'this takes a moment on a phone');
-      receive(instance, module);
+      receive(wrapMainExports(instance), module);
     } catch (err) {
       // Any failure here falls back to letting emscripten load it the ordinary
       // way. A progress bar must never be the reason the emulator will not run.
@@ -247,7 +278,7 @@ function instantiateCounted(imports, receive) {
         const res = await fetch(url);
         const bytes = await res.arrayBuffer();
         const { instance, module } = await WebAssembly.instantiate(bytes, imports);
-        receive(instance, module);
+        receive(wrapMainExports(instance), module);
       } catch (err2) {
         log(`[page] module load failed: ${err2}`);
         loading('Failed to load', String(err2));
@@ -264,6 +295,82 @@ function instantiateCounted(imports, receive) {
 // one. Reconstructing runs without this was tried and produced a confidently
 // wrong answer (a renderer cost of 0.62x against a measured 1.24x).
 const RUN_ID = Math.random().toString(36).slice(2, 10);
+
+// --- the main thread, measured ---------------------------------------------
+//
+// In the shipping configuration the WebGL context lives on the browser's main
+// thread and the video thread proxies every GL call to it, so the renderer's
+// real cost on a phone is main-thread time -- and nothing inside the emulator
+// can see that thread. Three probes, all from here:
+//
+//   mailbox  time inside the wasm export that runs proxied work on this thread
+//            (`_emscripten_check_mailbox`), wrapped when the module is
+//            instantiated. Two clock reads per batch, so it is free enough to
+//            leave on.
+//   gl       ?glprobe=1 wraps every WebGL2RenderingContext method to count and
+//            time the calls themselves. Two clock reads per call, so it is not
+//            free and is only for finding out what a call costs on a device.
+//   lag      a MessageChannel ping that measures how long a task waits for
+//            this thread: the delay every proxied GL batch pays before it runs.
+//
+// Each is a delta per report interval; the [main] line is the same figures as
+// percentages of wall time.
+const mainStats = { mailboxMs: 0, mailboxCalls: 0, glMs: 0, glCalls: 0, lagMs: 0,
+                    since: performance.now() };
+const GL_PROBE = params.get('glprobe') === '1';
+if (GL_PROBE && window.WebGL2RenderingContext) {
+  const proto = WebGL2RenderingContext.prototype;
+  for (const name of Object.getOwnPropertyNames(proto)) {
+    const d = Object.getOwnPropertyDescriptor(proto, name);
+    if (!d || typeof d.value !== 'function' || name === 'constructor') continue;
+    const orig = d.value;
+    proto[name] = function () {
+      const t = performance.now();
+      try { return orig.apply(this, arguments); }
+      finally { mainStats.glMs += performance.now() - t; mainStats.glCalls++; }
+    };
+  }
+}
+function wrapMainExports(instance) {
+  const src = instance.exports;
+  const orig = src['_emscripten_check_mailbox'];
+  if (typeof orig !== 'function') return instance;
+  const exports = {};
+  for (const k of Object.keys(src)) exports[k] = src[k];
+  exports['_emscripten_check_mailbox'] = function () {
+    const t = performance.now();
+    try { return orig.apply(this, arguments); }
+    finally { mainStats.mailboxMs += performance.now() - t; mainStats.mailboxCalls++; }
+  };
+  return { exports };
+}
+(function pingLoop() {
+  const ch = new MessageChannel();
+  let sent = 0;
+  let floor = Infinity;
+  ch.port1.onmessage = () => {
+    const wait = performance.now() - sent;
+    if (wait < floor) floor = wait;
+    mainStats.lagMs += Math.max(0, wait - floor);
+    setTimeout(() => { sent = performance.now(); ch.port2.postMessage(0); }, 4);
+  };
+  sent = performance.now();
+  ch.port2.postMessage(0);
+})();
+function mainSnapshot() {
+  const now = performance.now();
+  const wall = now - mainStats.since;
+  const out = { wallMs: +wall.toFixed(0), mailboxMs: +mainStats.mailboxMs.toFixed(1),
+                mailboxCalls: mainStats.mailboxCalls, lagMs: +mainStats.lagMs.toFixed(1),
+                ...(GL_PROBE ? { glMs: +mainStats.glMs.toFixed(1), glCalls: mainStats.glCalls } : {}) };
+  mainStats.mailboxMs = 0; mainStats.mailboxCalls = 0; mainStats.lagMs = 0;
+  mainStats.glMs = 0; mainStats.glCalls = 0; mainStats.since = now;
+  const pct = (ms) => (wall > 0 ? (100 * ms / wall).toFixed(0) : '0');
+  log(`[main] mailbox ${pct(out.mailboxMs)}% (${(out.mailboxCalls * 1000 / wall).toFixed(0)}/s)` +
+      `  lag ${pct(out.lagMs)}%` +
+      (GL_PROBE ? `  gl ${pct(out.glMs)}% (${(out.glCalls * 1000 / wall).toFixed(0)} calls/s)` : ''));
+  return out;
+}
 
 function report(payload) {
   if (!REPORT) return;
@@ -294,7 +401,7 @@ if (REPORT) {
     // The head goes with the first few reports only; after that it has been
     // seen and the tail is what is changing.
     report({ tick: ++ticks, perf, heapMB: +(heapBytes() / 1048576).toFixed(1),
-             backend: BACKEND, tail: lines.slice(-8),
+             backend: BACKEND, main: mainSnapshot(), tail: lines.slice(-8),
              ...(ticks <= 6 ? { head } : {}) });
   }, 5000);
 }
@@ -731,6 +838,13 @@ async function boot() {
   startBtn.disabled = true;
   status('loading module');
   loading('Downloading emulator', 'connecting');
+  try {
+    await loadModuleScript();
+  } catch (e) {
+    log(`[page] ${e}`);
+    loading('Failed to load', String(e));
+    return;
+  }
 
   if (!crossOriginIsolated) {
     log('[page] crossOriginIsolated is false: SharedArrayBuffer is unavailable ' +

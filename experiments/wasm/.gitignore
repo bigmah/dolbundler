@@ -39,3 +39,7 @@ ios/build/
 
 # Cached gzip of the build outputs, made on demand by serve.py.
 .gzcache/
+
+# The lobby queue and its heartbeat (serve.py /next, queue-phone.sh).
+next-url.txt
+lobby-seen.txt

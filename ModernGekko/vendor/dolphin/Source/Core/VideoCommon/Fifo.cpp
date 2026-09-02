@@ -3,6 +3,10 @@
 
 #include "VideoCommon/Fifo.h"
 
+#include <cstdlib>
+
+#include "Core/CPUThreadClock.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -311,10 +315,27 @@ void FifoManager::ResetVideoBuffer()
 // Purpose: Keep the Core HW updated about the CPU-GPU distance
 void FifoManager::RunGpuLoop()
 {
+  if (const char* spin = std::getenv("DOLWEB_GPU_IDLE_SPIN"))
+    m_idle_spin_limit = std::atoi(spin);
+
   m_gpu_mainloop.Run(
       [this] {
+        // The busy clock covers the whole payload whenever it did anything:
+        // the events (which is how the present and the XFB copy reach this
+        // thread), the FIFO, the flush and the peek cache. It used to cover
+        // the FIFO loop alone, and on the phone that read 40% while the frame
+        // rate said this thread was the wall -- the present was outside it.
+        // Only read the clock when there is something to time: this payload
+        // runs in a tight loop while the thread has nothing to do, and a clock
+        // read on every spin was 22% of the video thread in a profile.
+        const bool may_have_work =
+            !AsyncRequests::GetInstance()->IsQueueEmpty() ||
+            (m_system.GetCommandProcessor().GetFifo().bFF_GPReadEnable.load(std::memory_order_relaxed) &&
+             m_system.GetCommandProcessor().GetFifo().CPReadWriteDistance.load(std::memory_order_relaxed) != 0);
+        const auto payload_start = may_have_work ? std::chrono::steady_clock::now() :
+                                                   std::chrono::steady_clock::time_point{};
         // Run events from the CPU thread.
-        AsyncRequests::GetInstance()->PullEvents();
+        bool did_work = AsyncRequests::GetInstance()->PullEvents();
 
         // Do nothing while paused
         if (!m_emu_running_state.IsSet())
@@ -343,8 +364,7 @@ void FifoManager::RunGpuLoop()
           // not count as work. One clock read per wakeup, not per block.
           const bool has_work = fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
                                 fifo.CPReadWriteDistance.load(std::memory_order_relaxed) != 0;
-          const auto busy_start = has_work ? std::chrono::steady_clock::now() :
-                                             std::chrono::steady_clock::time_point{};
+          did_work |= has_work;
 
           // check if we are able to run this buffer
           while (!command_processor.IsInterruptWaiting() &&
@@ -407,15 +427,6 @@ void FifoManager::RunGpuLoop()
             AsyncRequests::GetInstance()->PullEvents();
           }
 
-          if (has_work)
-          {
-            m_gpu_busy_ns.fetch_add(
-                static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                     std::chrono::steady_clock::now() - busy_start)
-                                     .count()),
-                std::memory_order_relaxed);
-          }
-
           // fast skip remaining GPU time if fifo is empty
           if (m_sync_ticks.load() > 0)
           {
@@ -429,6 +440,27 @@ void FifoManager::RunGpuLoop()
           g_vertex_manager->Flush();
           g_framebuffer_manager->RefreshPeekCache();
         }
+        if (did_work && may_have_work)
+        {
+          m_gpu_busy_ns.fetch_add(
+              static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - payload_start)
+                                   .count()),
+              std::memory_order_relaxed);
+          m_idle_payloads = 0;
+        }
+        else if (m_idle_spin_limit >= 0 && ++m_idle_payloads > m_idle_spin_limit)
+        {
+          // Dolphin's GPU thread spins between bursts and only sleeps once a
+          // frame, when the CPU thread says it may (GpuMaySleep). On a desktop
+          // that is the right trade: a wakeup costs more than the spin. On a
+          // phone the spin is a whole performance core burning next to the
+          // one the emulated CPU needs, and the thermal budget is shared.
+          // DOLWEB_GPU_IDLE_SPIN=N lets the thread sleep after N empty
+          // payloads instead; RunGpu()'s Wakeup brings it back.
+          m_idle_payloads = 0;
+          m_gpu_mainloop.AllowSleep();
+        }
       },
       100);
 }
@@ -438,6 +470,8 @@ void FifoManager::FlushGpu()
   if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
     return;
 
+  const Core::CPUThreadClock::Scope clock_scope(Core::CPUThreadClock::gpu_wait_ns,
+                                                &Core::CPUThreadClock::gpu_waits);
   m_gpu_mainloop.Wait();
 }
 

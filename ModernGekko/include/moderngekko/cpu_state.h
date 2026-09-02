@@ -83,6 +83,11 @@ struct CPUState
      * disagrees about that size, so the two have to be edited together. */
     uint8_t* l1cache;
     uint32_t l1cache_size;
+
+    /* The write-gather pipe fast path; mirrors GXRuntime's fields, see there. */
+    uint8_t** gather_pipe_slot;
+    uint8_t* gather_pipe_limit;
+    void (*gather_pipe_flush)(CPUState* cpu);
 };
 
 #ifdef __cplusplus

@@ -96,6 +96,10 @@ private:
 
   Common::BlockingLoop m_gpu_mainloop;
   std::atomic<u64> m_gpu_busy_ns{0};
+  // How many empty payloads the GPU thread spins through before it lets
+  // itself sleep (DOLWEB_GPU_IDLE_SPIN); negative keeps Dolphin's behaviour.
+  int m_idle_spin_limit = -1;
+  int m_idle_payloads = 0;
 
   Common::Flag m_emu_running_state;
 

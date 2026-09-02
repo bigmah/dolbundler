@@ -12,3 +12,6 @@ sim-shots*/
 # builds can be measured on a phone without toggling a symlink between runs.
 # Local absolute paths; serve-dolphin.sh does not create it.
 web/old/
+
+# ?build=<name> serves build-wasm/ as builds/; the link is local.
+web/builds

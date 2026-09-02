@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tiering probe</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: #000; color: #d7dbe0; font: 13px/1.5 ui-monospace, Menlo, monospace; }
+  pre { margin: 0; padding: 10px; white-space: pre-wrap; }
+</style>
+<pre id="log">tiering probe</pre>
+<script src="tier.js"></script>
+<script>
+// Runs tier_kernel (state in wasm locals) and tier_kernel_mem (state in
+// linear memory) alternately for ?seconds= and posts one line per call:
+// mega-iterations per second for each. A baseline JIT keeps locals in stack
+// slots, so the two read alike until the function is promoted; the promotion
+// is a step in the first line and nothing in the second. ?report=1 posts to
+// serve.py; ?lobby=1 returns to the lobby afterwards, so the phone queue can
+// run it like any other URL.
+const params = new URLSearchParams(location.search);
+const SECONDS = +(params.get('seconds') || 60);
+const REPORT = params.get('report') === '1';
+const RUN_ID = Math.random().toString(36).slice(2, 10);
+const logEl = document.getElementById('log');
+const lines = [];
+function log(t) { lines.push(t); if (lines.length > 40) lines.shift(); logEl.textContent = lines.join('\n'); }
+function report(payload) {
+  if (!REPORT) return;
+  try {
+    fetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ua: navigator.userAgent, run: RUN_ID, tier: true, screen: `${screen.width}x${screen.height}`, ...payload }) });
+  } catch (e) {}
+}
+(async () => {
+  const t0 = performance.now();
+  const m = await createTier();
+  log(`module ready in ${(performance.now() - t0).toFixed(0)} ms`);
+  const ITERS = 2000000;
+  const end = performance.now() + SECONDS * 1000;
+  const rows = [];
+  let n = 0;
+  while (performance.now() < end) {
+    let t = performance.now();
+    m.ccall('tier_kernel', 'number', ['number'], [ITERS]);
+    const localsMs = performance.now() - t;
+    t = performance.now();
+    m.ccall('tier_kernel_mem', 'number', ['number'], [ITERS]);
+    const memMs = performance.now() - t;
+    const row = { n: ++n, at: +((performance.now() - t0) / 1000).toFixed(1),
+                  locals: +(ITERS / localsMs / 1000).toFixed(1), mem: +(ITERS / memMs / 1000).toFixed(1) };
+    rows.push(row);
+    log(`${row.at}s  locals ${row.locals} M/s   memory ${row.mem} M/s`);
+    if (n % 5 === 0) report({ rows: rows.slice(-5) });
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  report({ rows: rows.slice(-5), done: true });
+  log('done');
+  if (params.get('lobby') === '1') setTimeout(() => location.replace('/lobby.html'), 3000);
+})();
+</script>

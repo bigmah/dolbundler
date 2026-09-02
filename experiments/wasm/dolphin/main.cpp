@@ -27,6 +27,7 @@
 #include "Common/Logging/LogManager.h"
 #include "Common/Config/Config.h"
 #include "Core/Config/GraphicsSettings.h"
+#include "Core/CPUThreadClock.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/GCPad.h"
@@ -248,6 +249,8 @@ void StartPerfLog(double interval_seconds)
     }
     auto last_perf = std::chrono::steady_clock::now();
     u64 last_busy_ns = 0;
+    u64 last_ev = 0, last_th = 0, last_gw = 0, last_gn = 0;
+    u64 last_er = 0, last_ew = 0, last_gp = 0;
     while (s_running.load())
     {
       std::this_thread::sleep_for(
@@ -274,11 +277,43 @@ void StartPerfLog(double interval_seconds)
       const double gpu_busy = wall_ns > 0 ? 100.0 * (busy_ns - last_busy_ns) / wall_ns : 0.0;
       last_perf = now;
       last_busy_ns = busy_ns;
-      std::printf("[perf] %.1f fps  %.0f%% speed  pc=0x%08x lr=0x%08x cpu=%d ticks=%llu gpu=%.0f%%\n",
+      std::printf("[perf] %.1f fps  %.0f%% speed  pc=0x%08x lr=0x%08x cpu=%d ticks=%llu gpu=%.0f%%",
                   metrics.GetFPS(), metrics.GetSpeed() * 100.0,
                   system.GetPPCState().pc, system.GetPPCState().spr[SPR_LR],
                   static_cast<int>(system.GetCPU().GetState()),
                   static_cast<unsigned long long>(system.GetCoreTiming().GetTicks()), gpu_busy);
+      // The CPU thread's own accounting (DOLWEB_CPU_TIME=1): events are
+      // CoreTiming's scheduled work minus the throttle sleep inside it, gw
+      // the blocking waits on the GPU thread. What is left of the thread's
+      // wall time is the recompiled code and the chassis around it.
+      if (Core::CPUThreadClock::enabled)
+      {
+        const u64 ev = Core::CPUThreadClock::events_ns.load(std::memory_order_relaxed);
+        const u64 th = Core::CPUThreadClock::throttle_ns.load(std::memory_order_relaxed);
+        const u64 gw = Core::CPUThreadClock::gpu_wait_ns.load(std::memory_order_relaxed);
+        const u64 gn = Core::CPUThreadClock::gpu_waits.load(std::memory_order_relaxed);
+        const auto share = [&](u64 delta) { return wall_ns > 0 ? 100.0 * delta / wall_ns : 0.0; };
+        const u64 er = Core::CPUThreadClock::ext_reads.load(std::memory_order_relaxed);
+        const u64 ew = Core::CPUThreadClock::ext_writes.load(std::memory_order_relaxed);
+        const u64 gp = Core::CPUThreadClock::gather_writes.load(std::memory_order_relaxed);
+        const auto per_s = [&](u64 delta) {
+          return static_cast<unsigned long long>(
+              delta * 1000000000ull / static_cast<u64>(wall_ns > 0 ? wall_ns : 1));
+        };
+        std::printf(" cputime: events=%.0f%% throttle=%.0f%% gpuwait=%.0f%% (%llu/s)"
+                    " hooks: reads=%llu/s writes=%llu/s gather=%llu/s",
+                    share((ev - last_ev) - (th - last_th)), share(th - last_th), share(gw - last_gw),
+                    per_s(gn - last_gn), per_s(er - last_er), per_s(ew - last_ew),
+                    per_s(gp - last_gp));
+        last_ev = ev;
+        last_th = th;
+        last_gw = gw;
+        last_gn = gn;
+        last_er = er;
+        last_ew = ew;
+        last_gp = gp;
+      }
+      std::printf("\n");
       std::fflush(stdout);
     }
   }).detach();
@@ -459,6 +494,9 @@ int main(int argc, char** argv)
   //
   // DOLWEB_CPU_THREAD=0 turns it off.
   config.cpu_thread = true;
+  Core::CPUThreadClock::enabled = std::getenv("DOLWEB_CPU_TIME") != nullptr;
+  if (Core::CPUThreadClock::enabled)
+    std::printf("[dolweb] CPU thread time accounting on\n");
   if (const char* cpu_thread = std::getenv("DOLWEB_CPU_THREAD"))
     config.cpu_thread = (cpu_thread[0] != '0' && cpu_thread[0] != '\0');
   // Two builds only line up if they are measured in the same scene, and a boot

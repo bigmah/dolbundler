@@ -119,6 +119,11 @@ struct CPUState {
      * Mirrors GXRuntime's field of the same name; see the comment there. */
     u8* l1cache;
     u32 l1cache_size;
+
+    /* The write-gather pipe fast path; mirrors GXRuntime's fields, see there. */
+    u8** gather_pipe_slot;
+    u8* gather_pipe_limit;
+    void (*gather_pipe_flush)(CPUState* cpu);
 };
 
 typedef void (*PPCMemWriteJournal)(u32 offset, u32 size, void* user);
@@ -150,6 +155,7 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
              bool subtract, bool negative, f64* output);
 bool ppc_fctiw(CPUState* cpu, f64 value, bool toward_zero, u64* result);
 void ppc_fcmp(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered);
+u32 ppc_fcmp_cr(CPUState* cpu, u32 cr, u8 crfd, f64 a, f64 b, bool ordered);
 void ppc_fadds(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_fsubs(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_fmuls(CPUState* cpu, u8 d, u8 a, u8 c);

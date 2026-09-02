@@ -9,6 +9,7 @@
 
 #include "Common/Functional.h"
 #include "Common/SPSCQueue.h"
+#include "Core/CPUThreadClock.h"
 
 struct EfbPokeData;
 class PointerWrap;
@@ -19,7 +20,10 @@ public:
   AsyncRequests();
 
   // Called from the Video thread.
-  void PullEvents();
+  // Returns whether anything was pulled: the GPU thread's busy accounting
+  // wants to know, because the present arrives this way.
+  bool PullEvents();
+  bool IsQueueEmpty() const { return m_queue.Empty(); }
 
   // The following are called from the CPU thread.
   void WaitForEmptyQueue();
@@ -45,6 +49,12 @@ public:
     std::packaged_task task{std::forward<F>(callback)};
     QueueEvent(Event{[&] { task(); }});
 
+    // An EFB peek from the CPU thread stops here until the GPU thread has
+    // flushed its draws and read the pixel back, which on a phone is a
+    // proxied readback through the browser's GPU process. Accounted as a
+    // GPU wait so the perf line can say how much of the CPU thread it costs.
+    const Core::CPUThreadClock::Scope clock_scope(Core::CPUThreadClock::gpu_wait_ns,
+                                                  &Core::CPUThreadClock::gpu_waits);
     return task.get_future().get();
   }
 
