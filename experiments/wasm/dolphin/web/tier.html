@@ -15,7 +15,9 @@
 // slots, so the two read alike until the function is promoted; the promotion
 // is a step in the first line and nothing in the second. ?report=1 posts to
 // serve.py; ?lobby=1 returns to the lobby afterwards, so the phone queue can
-// run it like any other URL.
+// run it like any other URL. ?worker=1 runs the kernels in a Worker
+// (tierw.js) instead, and ?both=1 runs the main thread and then a Worker,
+// each for ?seconds=; the worker's rows report with worker: true.
 const params = new URLSearchParams(location.search);
 const SECONDS = +(params.get('seconds') || 60);
 const REPORT = params.get('report') === '1';
@@ -30,11 +32,28 @@ function report(payload) {
       body: JSON.stringify({ ua: navigator.userAgent, run: RUN_ID, tier: true, screen: `${screen.width}x${screen.height}`, ...payload }) });
   } catch (e) {}
 }
-(async () => {
+const ITERS = 2000000;
+async function runWorker() {
+  const rows = [];
+  await new Promise((resolve) => {
+    const w = new Worker('tierw.js');
+    w.onmessage = (e) => {
+      if (e.data.ready !== undefined) log(`worker module ready in ${e.data.ready.toFixed(0)} ms`);
+      if (e.data.row) {
+        const row = e.data.row; rows.push(row);
+        log(`worker ${row.at}s  locals ${row.locals} M/s   memory ${row.mem} M/s`);
+        if (row.n % 5 === 0) report({ worker: true, rows: rows.slice(-5) });
+      }
+      if (e.data.done) { report({ worker: true, rows: rows.slice(-5), done: true }); w.terminate(); resolve(); }
+    };
+    w.onerror = (err) => { log(`worker error: ${err.message}`); resolve(); };
+    w.postMessage({ seconds: SECONDS, iters: ITERS });
+  });
+}
+async function runMain() {
   const t0 = performance.now();
   const m = await createTier();
   log(`module ready in ${(performance.now() - t0).toFixed(0)} ms`);
-  const ITERS = 2000000;
   const end = performance.now() + SECONDS * 1000;
   const rows = [];
   let n = 0;
@@ -53,6 +72,11 @@ function report(payload) {
     await new Promise((r) => setTimeout(r, 0));
   }
   report({ rows: rows.slice(-5), done: true });
+}
+(async () => {
+  const both = params.get('both') === '1';
+  if (both || params.get('worker') !== '1') await runMain();
+  if (both || params.get('worker') === '1') await runWorker();
   log('done');
   if (params.get('lobby') === '1') setTimeout(() => location.replace('/lobby.html'), 3000);
 })();
