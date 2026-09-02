@@ -31,6 +31,19 @@ for tool in cmake ninja git python3 cargo; do
   command -v "$tool" >/dev/null || { echo "$tool is required but not installed" >&2; exit 1; }
 done
 
+# Where cmake and ninja live, deduplicated and absolute. toolchain.conf carries
+# it to the app, whose PATH when launched from Finder is launchd's four system
+# directories - no Homebrew - which is where recompgc's "cmake is required" came
+# from even on a machine that has it.
+TOOLCHAIN_PATH=''
+for tool in cmake ninja; do
+  d="$(cd "$(dirname "$(command -v "$tool")")" && pwd)"
+  case ":$TOOLCHAIN_PATH:" in
+    *":$d:"*) ;;
+    *) TOOLCHAIN_PATH="${TOOLCHAIN_PATH:+$TOOLCHAIN_PATH:}$d" ;;
+  esac
+done
+
 # ModernGekko, RecompCore (vendor/dolphin) and DolRecomp all live directly in
 # this repo, so a plain `git clone` already has them. Check anyway: a truncated
 # or half-copied tree fails later, in CMake, with a much less obvious message.
@@ -97,13 +110,17 @@ for tool in ModernGekko moderngekko-run moderngekko-port dolrecomp; do
   [ -x "$MG_BUILD/$tool" ] || { echo "expected $MG_BUILD/$tool to exist" >&2; exit 1; }
 done
 
-# gc_controller is an optional, separate project: a driver for the Nintendo
-# Switch Online GameCube controller, which SDL enumerates but cannot drive. It
-# feeds Dolphin's Pipe input backend instead. Nothing here depends on it, so a
-# missing or unbuildable checkout is a note rather than a failure.
-step "Looking for the GameCube controller driver"
+# gc_controller is the driver for the Nintendo Switch Online GameCube
+# controller, which SDL enumerates but cannot drive - it feeds Dolphin's Pipe
+# input backend instead. It is vendored at DolBundler/vendor/gc_controller
+# (see the PROVENANCE.md there); it used to be a checkout you had to have
+# sitting beside this repo, which meant a clone that built cleanly still could
+# not drive the one pad this project most wants to support. GC_CONTROLLER_DIR
+# still points the build at a checkout of your own instead. Nothing here
+# depends on the driver, so an unbuildable tree is a note, not a failure.
+step "Building the GameCube controller driver"
 GC_CONTROLLER=""
-for candidate in "${GC_CONTROLLER_DIR:-}" "$(dirname "$ROOT")/gc_controller"; do
+for candidate in "${GC_CONTROLLER_DIR:-}" "$HERE/vendor/gc_controller"; do
   [ -n "$candidate" ] || continue
   if grep -q '^name = "gc_controller"' "$candidate/Cargo.toml" 2>/dev/null; then
     GC_CONTROLLER="$(cd "$candidate" && pwd)"
@@ -111,7 +128,7 @@ for candidate in "${GC_CONTROLLER_DIR:-}" "$(dirname "$ROOT")/gc_controller"; do
   fi
 done
 if [ -z "$GC_CONTROLLER" ]; then
-  echo "    none found; set GC_CONTROLLER_DIR=<path> and re-run to use one"
+  echo "    no driver source at $HERE/vendor/gc_controller; the pipe controller option will not work" >&2
 elif cargo build --release --manifest-path "$GC_CONTROLLER/Cargo.toml" 2>&1 | tail -3; then
   echo "    $GC_CONTROLLER"
 else
@@ -146,6 +163,9 @@ MG_BUILD=$(printf '%q' "$MG_BUILD")
 APPS_DIR=$(printf '%q' "$INSTALL_DIR")
 GRAPHICS_BACKEND=Metal
 GC_CONTROLLER=$(printf '%q' "$GC_CONTROLLER")
+# Where cmake and ninja were found. A Finder-launched app gets launchd's
+# PATH, which has no Homebrew on it, so recompgc puts these back itself.
+TOOLCHAIN_PATH=$(printf '%q' "$TOOLCHAIN_PATH")
 CONF
 
 # Written whole rather than patched: PlistBuddy has no upsert and the key set

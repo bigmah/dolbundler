@@ -93,12 +93,12 @@ initialises them on the first run.
 Edit the runtime or the recompiler directly in this tree and commit like any
 other change. There is no second repo to push to and nothing to re-pin.
 
-One further project is **optional** and not pinned at all:
-[`gc_controller`](https://github.com/bigmah/nso_gc_macos), a driver for the
-Nintendo Switch Online GameCube controller. `build.sh` picks up a checkout
-sitting beside this one, or wherever `GC_CONTROLLER_DIR` points, and DolBundler
-then offers that pad as a controller. Nothing here needs it; without one the
-controller picker just offers SDL gamepads. See
+One further project is vendored the same way, at
+`DolBundler/vendor/gc_controller`: [`gc_controller`](https://github.com/bigmah/nso_gc_macos),
+a driver for the Nintendo Switch Online GameCube controller. `build.sh` builds
+it in place and DolBundler then offers that pad as a controller. Point
+`GC_CONTROLLER_DIR` at a checkout of your own to build that instead. Nothing
+here needs it; the controller picker offers SDL gamepads either way. See
 [`DolBundler/README.md`](DolBundler/README.md#gamecube-controllers).
 
 **DolRecomp lives at `ModernGekko/vendor/dolphin/DolRecomp`.** It is built

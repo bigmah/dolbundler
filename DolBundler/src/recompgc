@@ -121,6 +121,11 @@ esac
 # shellcheck source=/dev/null
 source "$CONF"
 
+# A window launched from Finder inherits launchd's PATH - /usr/bin:/bin and the
+# two sbins - so Homebrew's cmake and ninja are invisible exactly when the app
+# is how you started this, and only then. build.sh records where it found them.
+[ -n "${TOOLCHAIN_PATH-}" ] && export PATH="$TOOLCHAIN_PATH:$PATH"
+
 : "${MG_BUILD:?toolchain.conf did not set MG_BUILD}"
 : "${APPS_DIR:=$HOME/Applications}"
 : "${GRAPHICS_BACKEND:=Metal}"
@@ -145,6 +150,7 @@ done
 PIPE_DIR="$USER_DIR/Pipes"
 DRIVER_BIN="${GC_CONTROLLER:+$GC_CONTROLLER/target/release/gc_controller}"
 DRIVER_PID_FILE="$USER_DIR/gc_controller.pid"
+DRIVER_PIPE_FILE="$USER_DIR/gc_controller.pipe"
 DRIVER_LOG="$USER_DIR/Logs/gc_controller.log"
 DEFAULT_PIPE=gcc1
 
@@ -162,7 +168,7 @@ driver_pid() {
 
 driver_start() {
   local name="$1"
-  [ -n "$DRIVER_BIN" ] || die "no gc_controller checkout was found when DolBundler was built; re-run build.sh with GC_CONTROLLER_DIR=<path>"
+  [ -n "$DRIVER_BIN" ] || die "the GameCube controller driver did not build when DolBundler was built; re-run DolBundler/build.sh and read what it says under \"Building the GameCube controller driver\""
   [ -x "$DRIVER_BIN" ] || die "$DRIVER_BIN is missing; build it with: cargo build --release --manifest-path $GC_CONTROLLER/Cargo.toml"
   mkdir -p "$PIPE_DIR" "$USER_DIR/Logs"
 
@@ -170,7 +176,12 @@ driver_start() {
   # its pipe landed here anyway there is nothing to do; if not, say so rather
   # than starting a second one that cannot claim the device.
   if pgrep -x gc_controller >/dev/null 2>&1; then
-    [ -p "$PIPE_DIR/$name" ] && { note "using the gc_controller already running"; return 0; }
+    # A FIFO left behind by a driver that has since exited outlives it, so its
+    # existence proves nothing; ask whether that driver is pointed at this name.
+    if [ -p "$PIPE_DIR/$name" ] && pgrep -f -- "--pipe-name $name" >/dev/null 2>&1; then
+      note "using the gc_controller already running"
+      return 0
+    fi
     die "gc_controller is already running, but its pipe is not in $PIPE_DIR. Stop it ($GC_CONTROLLER/stop.sh) and let DolBundler start it, or run it with --pipe-dir $PIPE_DIR"
   fi
 
@@ -180,6 +191,9 @@ driver_start() {
   nohup "$DRIVER_BIN" --pipe-dir "$PIPE_DIR" --pipe-name "$name" --reconnect \
     >>"$DRIVER_LOG" 2>&1 &
   echo $! > "$DRIVER_PID_FILE"
+  # Which FIFO it was pointed at. A driver feeds exactly one, and the next game
+  # to want a pipe device may want a different one; see driver_ensure.
+  printf '%s' "$name" > "$DRIVER_PIPE_FILE"
 
   # The FIFO is only created once the controller answers, so waiting for it is
   # waiting for the controller. 15s covers a Bluetooth scan.
@@ -201,7 +215,7 @@ driver_stop() {
   # A pid file left behind by a driver that exited on its own is stale, not a
   # process to signal, so clear it either way.
   pid="$(driver_pid)" || {
-    rm -f "$DRIVER_PID_FILE"
+    rm -f "$DRIVER_PID_FILE" "$DRIVER_PIPE_FILE"
     note "no gc_controller of ours is running"
     return 0
   }
@@ -212,14 +226,30 @@ driver_stop() {
     waited=$((waited + 1))
   done
   kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null
-  rm -f "$DRIVER_PID_FILE"
+  rm -f "$DRIVER_PID_FILE" "$DRIVER_PIPE_FILE"
   ok "gc_controller stopped"
 }
 
-# Makes sure something is feeding the pipe a port has been set to.
+# Makes sure something is feeding the pipe a port has been set to. "A driver is
+# running" is not that question: a driver feeds exactly one FIFO, so one started
+# for gcc1 leaves a game bound to pad1 reading a pipe with no writer. That is
+# silent -- the FIFO exists, Dolphin opens it, the game starts, and no button
+# ever arrives -- so it is worth the restart to get it right.
 driver_ensure() {
-  local name="$1"
-  driver_pid >/dev/null && { note "gc_controller is already running"; return 0; }
+  local name="$1" pid current
+  if pid="$(driver_pid)"; then
+    current="$(cat "$DRIVER_PIPE_FILE" 2>/dev/null)" || current=''
+    # A driver started by a build that predates that file still says on its own
+    # command line which FIFO it was pointed at.
+    [ -n "$current" ] || current="$(ps -p "$pid" -o command= 2>/dev/null \
+      | sed -n 's/.*--pipe-name \([^ ][^ ]*\).*/\1/p')"
+    if [ -z "$current" ] || [ "$current" = "$name" ]; then
+      note "gc_controller is already running"
+      return 0
+    fi
+    note "gc_controller is feeding $current, but this port reads $name; restarting it"
+    driver_stop >/dev/null 2>&1
+  fi
   driver_start "$name"
 }
 
@@ -261,7 +291,7 @@ if [ "$MODE" = driver ]; then
       if [ -n "$running" ]; then
         ok "gc_controller is running (pid $running), pipe $PIPE_DIR/$pipe"
       elif [ -z "$DRIVER_BIN" ]; then
-        note "no gc_controller checkout is configured"
+        note "the GameCube controller driver was not built; re-run DolBundler/build.sh"
         exit 1
       else
         note "gc_controller is not running"

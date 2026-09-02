@@ -266,15 +266,18 @@ the pad needs a proprietary handshake before it sends anything, and the
 bundled SDL does not perform it. That is a worse failure than not appearing at
 all, because it reads as a binding problem.
 
-[`gc_controller`](https://github.com/bigmah/nso_gc_macos) is a separate
-project that does the handshake and feeds Dolphin's Pipe input backend instead.
-DolBundler drives it for you when it can find one:
+[`gc_controller`](https://github.com/bigmah/nso_gc_macos) does the handshake
+and feeds Dolphin's Pipe input backend instead. It is vendored at
+`vendor/gc_controller` — it used to be a checkout you had to keep beside this
+repo, which meant a clone that built cleanly still could not drive the one pad
+this project most wants to support, and only said so at the moment a game
+refused to start. DolBundler drives it for you:
 
-- `build.sh` looks for a checkout beside this repo (`../gc_controller`), or
-  wherever `GC_CONTROLLER_DIR` points, builds it, and records the path in
-  `toolchain.conf`. None found is a note, not an error — nothing here needs it.
-- With one, the controller picker offers **GameCube controller
-  (gc_controller)** on every port.
+- `build.sh` builds `vendor/gc_controller` in place and records the path in
+  `toolchain.conf`. `GC_CONTROLLER_DIR` points it at a checkout of your own
+  instead, which is how you hack on the driver.
+- The controller picker offers **GameCube controller (gc_controller)** on every
+  port.
 - Pressing **Play** on a game whose port is set to it starts the driver first,
   pointed at ModernGekko's own `Pipes` directory, and waits for the controller
   to answer. Dolphin only scans for pipes once at startup, so this ordering is
