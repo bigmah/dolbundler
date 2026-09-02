@@ -121,6 +121,11 @@ esac
 # shellcheck source=/dev/null
 source "$CONF"
 
+# A window launched from Finder inherits launchd's PATH - /usr/bin:/bin and the
+# two sbins - so Homebrew's cmake and ninja are invisible exactly when the app
+# is how you started this, and only then. build.sh records where it found them.
+[ -n "${TOOLCHAIN_PATH-}" ] && export PATH="$TOOLCHAIN_PATH:$PATH"
+
 : "${MG_BUILD:?toolchain.conf did not set MG_BUILD}"
 : "${APPS_DIR:=$HOME/Applications}"
 : "${GRAPHICS_BACKEND:=Metal}"

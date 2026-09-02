@@ -108,6 +108,11 @@ strip_colour() { sed $'s/\033\\[[0-9;]*m//g'; }
 [ -f "$CONF" ] || die "missing $CONF; re-run DolBundler/build.sh"
 # shellcheck source=/dev/null
 source "$CONF"
+
+# A window launched from Finder inherits launchd's PATH - /usr/bin:/bin and the
+# two sbins - so Homebrew's cmake and ninja are invisible exactly when the app
+# is how you started this, and only then. build.sh records where it found them.
+[ -n "${TOOLCHAIN_PATH-}" ] && export PATH="$TOOLCHAIN_PATH:$PATH"
 : "${MG_SRC:?toolchain.conf did not set MG_SRC}"
 # REPO_ROOT was added to toolchain.conf after this script; a conf written by an
 # older build.sh still has MG_SRC, which sits one level down from the root.

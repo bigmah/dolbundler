@@ -31,6 +31,19 @@ for tool in cmake ninja git python3 cargo; do
   command -v "$tool" >/dev/null || { echo "$tool is required but not installed" >&2; exit 1; }
 done
 
+# Where cmake and ninja live, deduplicated and absolute. toolchain.conf carries
+# it to the app, whose PATH when launched from Finder is launchd's four system
+# directories - no Homebrew - which is where recompgc's "cmake is required" came
+# from even on a machine that has it.
+TOOLCHAIN_PATH=''
+for tool in cmake ninja; do
+  d="$(cd "$(dirname "$(command -v "$tool")")" && pwd)"
+  case ":$TOOLCHAIN_PATH:" in
+    *":$d:"*) ;;
+    *) TOOLCHAIN_PATH="${TOOLCHAIN_PATH:+$TOOLCHAIN_PATH:}$d" ;;
+  esac
+done
+
 # ModernGekko, RecompCore (vendor/dolphin) and DolRecomp all live directly in
 # this repo, so a plain `git clone` already has them. Check anyway: a truncated
 # or half-copied tree fails later, in CMake, with a much less obvious message.
@@ -146,6 +159,9 @@ MG_BUILD=$(printf '%q' "$MG_BUILD")
 APPS_DIR=$(printf '%q' "$INSTALL_DIR")
 GRAPHICS_BACKEND=Metal
 GC_CONTROLLER=$(printf '%q' "$GC_CONTROLLER")
+# Where cmake and ninja were found. A Finder-launched app gets launchd's
+# PATH, which has no Homebrew on it, so recompgc puts these back itself.
+TOOLCHAIN_PATH=$(printf '%q' "$TOOLCHAIN_PATH")
 CONF
 
 # Written whole rather than patched: PlistBuddy has no upsert and the key set
