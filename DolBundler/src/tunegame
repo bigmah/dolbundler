@@ -1,0 +1,2102 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""tunegame - the deep dive on one title, on this Mac, saved for everyone.
+
+    tunegame run    --disc-id <id> [--level 1|2] [--budget-minutes <n>]
+                    [--play-seconds <n>] [--variants a,b,..] [--fresh] [--no-record]
+    tunegame all    [--level 1|2] [--budget-minutes <n>] [--hours <n>]
+                    [--only-untuned] [--target-speed <x>] [--agent]
+    tunegame status
+    tunegame report --disc-id <id>
+    tunegame bench  --disc-id <id> --module <dylib> [--state <sav>] [--seconds <n>]
+                    [--env K=V]...
+    tunegame ab     --disc-id <id> --a <dylib> --b <dylib> [--state <sav>]
+                    [--pairs <n>] [--seconds <n>] [--env K=V]...
+    tunegame build  --disc-id <id> --out <dir> [--chunk <n>]
+                    [--pgo none|gen|scene|<.profdata>] [--env K=V]...
+    tunegame add    --iso <image>...
+    tunegame clean  [--disc-id <id>]... [--keep-tuned]
+
+`recompios send` already profiles every game for four minutes with a generic
+button-masher before it is recompiled for the phone. That is the floor. This
+is the ceiling: what a developer did by hand for the first title that ran
+well on an iPhone, made repeatable, so the result can be written into the
+repository and every later send of that title -- on any Mac -- starts from
+it. Everything happens on this Mac, headless, with the same runtime the
+desktop app uses standing in for the phone (no fallback JIT, limiter off).
+The phone is never touched.
+
+`run` on one title:
+
+  level 1 (about 20 minutes a game)
+    1. recompile the DOL instrumented, for this Mac
+    2. play it from boot with scripted input, writing a savestate every 20 s
+       and the speed every 2 s
+    3. rank the states by the speed around them and bench the slowest three;
+       the heaviest healthy one becomes the title's bench scene
+    4. play from that scene for two more minutes, instrumented, and merge
+       both runs into one profile weighted toward the scene
+    5. recompile against that profile, then run the scene with the sampler
+       on: where host time goes, where the module returns to the chassis,
+       which guest functions dominate, what the chassis had to skip or lose
+    6. write the record and a report with the leads a person or an agent
+       should look at next
+
+  level 2 (each variant is a recompile and an interleaved A/B, minutes to a
+  quarter of an hour, until --budget-minutes runs out)
+    generic   the profile recompios would have collected on its own
+    plain     no profile at all
+    chunk128, chunk32   other function sizes, each with its own profile
+  A variant that beats the tuned module with arms that do not overlap is
+  adopted into the record.
+
+What goes where:
+
+  DolBundler/tuning/<ID>/      the record, committed: tuning.conf (what to
+                               build with), profile.profdata.xz, report.md
+  ~/Library/Application Support/DolBundler/tuning/<ID>/
+                               the working store: the bench scene savestate,
+                               the tuned module, every log, results.json
+  DolBundler/tuning/SUMMARY.md the library at a glance, rewritten by `all`
+                               and `status`
+
+`recompios send` reads the record: a title with one is recompiled for the
+phone against the committed profile and settings instead of a fresh
+four-minute collection, and says so. `all` is the overnight loop: every
+library game in turn, untuned first, then stale, then slowest, until --hours
+is up; with --agent, a `claude -p /tune-games <ID>` pass follows each title
+the report marks as needing attention. `bench`, `ab` and `build` are the
+same measurements on their own, for a person or an agent chasing a lead.
+
+Measurement rules this script keeps so you do not have to (all learned the
+hard way; see DolBundler/tuning/README.md): never bench with another
+moderngekko-run alive; A/B interleaved and back to back, never against a
+number from earlier; a scene that reads far faster than the rest of the run
+is a guest that has crashed, not a fast scene; a savestate has to be re-benched
+for faults before it is trusted; a profile with a total count of zero is worse
+than none.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import errno
+import hashlib
+import json
+import lzma
+import os
+import random
+import re
+import shlex
+import shutil
+import statistics
+import struct
+import subprocess
+import sys
+import time
+
+SELF_DIR = os.path.dirname(os.path.realpath(__file__))
+GEKKO_HZ = 486_000_000.0
+
+# --- where things are ------------------------------------------------------
+
+
+def read_toolchain_conf() -> dict:
+    """DolBundler/build.sh writes toolchain.conf beside the scripts it installs.
+    In a checkout it does not exist; everything it says can be derived from
+    where this file sits, so a developer can run this without building the
+    app."""
+    conf = {}
+    path = os.path.join(SELF_DIR, "toolchain.conf")
+    if os.path.isfile(path):
+        for line in open(path):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            conf[key.strip()] = value.strip()
+    return conf
+
+
+CONF = read_toolchain_conf()
+REPO_ROOT = CONF.get("REPO_ROOT") or os.path.realpath(os.path.join(SELF_DIR, "..", ".."))
+MG_SRC = CONF.get("MG_SRC") or os.path.join(REPO_ROOT, "ModernGekko")
+MG_BUILD = CONF.get("MG_BUILD") or os.path.join(MG_SRC, "build")
+if CONF.get("TOOLCHAIN_PATH"):
+    os.environ["PATH"] = CONF["TOOLCHAIN_PATH"] + ":" + os.environ.get("PATH", "")
+for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
+    if os.path.isdir(extra) and extra not in os.environ.get("PATH", "").split(":"):
+        os.environ["PATH"] = os.environ["PATH"] + ":" + extra
+
+SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/DolBundler")
+LIBRARY = os.path.join(SUPPORT_DIR, "library.json")
+STORE_ROOT = os.path.join(SUPPORT_DIR, "tuning")
+RECORD_ROOT = os.path.join(REPO_ROOT, "DolBundler", "tuning")
+LLVM_CACHE_ROOT = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/Library/Caches"),
+    "DolBundler", "iphone-llvm")
+
+DOLRECOMP = os.path.join(REPO_ROOT, "build-dolrecomp-llvm20", "dolrecomp")
+RUNNER = os.path.join(MG_BUILD, "moderngekko-run")
+MODULE_TEMPLATE = os.path.join(MG_SRC, "vendor", "dolphin", "module-template")
+GXRUNTIME_DIR = os.path.join(MG_SRC, "vendor", "dolphin", "GXRuntime")
+CHASSIS_ABI_DIR = os.path.join(MG_SRC, "vendor", "dolphin", "Source", "Core", "Core",
+                               "PowerPC", "StaticRecomp")
+TOTALDB = os.path.join(MG_SRC, "vendor", "dolphin", "Data", "Sys", "totaldb.dsy")
+LLVM20_ROOT = os.environ.get("DOLRECOMP_LLVM20_ROOT", "/opt/homebrew/opt/llvm@20")
+LLVM_PROFDATA = os.path.join(LLVM20_ROOT, "bin", "llvm-profdata")
+LLVM_MC = os.path.join(LLVM20_ROOT, "bin", "llvm-mc")
+if not os.path.isfile(LLVM_MC):
+    LLVM_MC = "/opt/homebrew/opt/llvm/bin/llvm-mc"
+
+# The same target, CPU and symbol prefix recompios uses for the instrumented
+# Mac copy, so the profile this writes matches the phone module function for
+# function (the profile is keyed on the emitter's IR, which does not depend
+# on the triple, but there is no reason to let anything else differ).
+MAC_TARGET = os.environ.get("DOLRECOMP_LLVM_MAC_TARGET", "arm64-apple-macos14.0")
+LLVM_CPU = os.environ.get("DOLRECOMP_LLVM_CPU", "apple-a16")
+JOBS = int(os.environ.get("DOLBUNDLER_IOS_JOBS") or os.cpu_count() or 4)
+
+# Defaults a run can override. STATE_EVERY is the spacing of the states the
+# boot run leaves; MIN_SCENE_T keeps logos and the first menu out of the
+# candidates; BENCH_WARMUP drops the state load and the first frames.
+STATE_EVERY = 20
+MIN_SCENE_T = 45.0
+BENCH_WARMUP = 12.0
+BENCH_SECONDS = 40
+SCENE_PROFILE_SECONDS = 120
+SCENE_WEIGHT = 2
+DEFAULT_CHUNK = 64
+# A speed this far above the run's median is a guest that has died: a crashed
+# game sits in a wait the chassis skips, and retires cycles for free.
+CORPSE_FACTOR = 6.0
+# Adopt a variant only past this, with arms that do not overlap. The machine
+# drifts by a few percent under sustained load; interleaving takes care of
+# most of it and this takes care of the rest.
+ADOPT_MARGIN = 1.03
+
+
+# --- small utilities -------------------------------------------------------
+
+
+def now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def human_size(path: str) -> str:
+    total = 0
+    if os.path.isdir(path):
+        for root, _, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+    elif os.path.isfile(path):
+        total = os.path.getsize(path)
+    for unit in ("B", "KB", "MB", "GB"):
+        if total < 1024 or unit == "GB":
+            return "%.0f %s" % (total, unit) if unit == "B" else "%.1f %s" % (total, unit)
+        total /= 1024.0
+    return "?"
+
+
+class Log:
+    """Progress to the terminal and, verbatim, to the store's tunegame.log."""
+
+    def __init__(self):
+        self.file = None
+        self.started = time.monotonic()
+
+    def attach(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if self.file:
+            self.file.close()
+        self.file = open(path, "a")
+        self.file.write("\n==== %s ====\n" % now_iso())
+
+    def __call__(self, message: str):
+        stamp = "[%6.0fs] " % (time.monotonic() - self.started)
+        line = stamp + message
+        print(line, flush=True)
+        if self.file:
+            self.file.write(line + "\n")
+            self.file.flush()
+
+
+log = Log()
+
+
+def die(message: str, code: int = 1):
+    print("error: " + message, file=sys.stderr, flush=True)
+    if log.file:
+        log.file.write("error: " + message + "\n")
+        log.file.flush()
+    sys.exit(code)
+
+
+def git(*args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", REPO_ROOT] + list(args), capture_output=True,
+                              text=True, check=False).stdout.strip()
+    except OSError:
+        return ""
+
+
+def recompiler_commit() -> str:
+    """The last commit that touched the recompiler. A record made against an
+    older one is stale in the one way that matters: its profile may no longer
+    describe the functions the emitter produces."""
+    commit = git("log", "-1", "--format=%h", "--",
+                 "ModernGekko/vendor/dolphin/DolRecomp", "ModernGekko/vendor/dolphin/GXRuntime")
+    dirty = git("status", "--porcelain", "--",
+                "ModernGekko/vendor/dolphin/DolRecomp", "ModernGekko/vendor/dolphin/GXRuntime")
+    return (commit or "unknown") + ("+dirty" if dirty else "")
+
+
+def running_runners() -> list:
+    out = subprocess.run(["pgrep", "-fl", "moderngekko-run"], capture_output=True, text=True).stdout
+    return [line for line in out.splitlines() if "pgrep" not in line]
+
+
+# --- the library -----------------------------------------------------------
+
+
+def library_games(wanted=None) -> list:
+    """(disc id, name, game root) for games whose extracted disc is present."""
+    try:
+        games = json.load(open(LIBRARY)).get("games", [])
+    except Exception:
+        games = []
+    by_id = {g.get("disc_id", ""): g for g in games if g.get("disc_id")}
+    result = []
+    for disc_id in (wanted or sorted(by_id)):
+        game = by_id.get(disc_id)
+        if game is None:
+            continue
+        root = game.get("game_root", "")
+        if not os.path.isfile(os.path.join(root, "sys", "main.dol")):
+            continue
+        result.append((disc_id, game.get("name") or disc_id, root))
+    return result
+
+
+def recompgc_path() -> str:
+    for candidate in (os.path.join(SELF_DIR, "recompgc"),
+                      os.path.expanduser("~/Applications/DolBundler.app/Contents/Resources/recompgc")):
+        if os.access(candidate, os.X_OK) and os.path.isfile(
+                os.path.join(os.path.dirname(candidate), "toolchain.conf")):
+            return candidate
+    return ""
+
+
+# --- the store and the record ---------------------------------------------
+
+
+class Store:
+    """Everything a deep dive leaves behind for one title, big things
+    included, under Application Support. results.json is the memory across
+    runs: a stage whose inputs have not changed is not repeated."""
+
+    def __init__(self, disc_id: str):
+        self.disc_id = disc_id
+        self.dir = os.path.join(STORE_ROOT, disc_id)
+        # A dive writes gigabytes here; Spotlight indexing them is one more
+        # thing running beside a bench.
+        os.makedirs(STORE_ROOT, exist_ok=True)
+        open(os.path.join(STORE_ROOT, ".metadata_never_index"), "a").close()
+        os.makedirs(os.path.join(self.dir, "runs"), exist_ok=True)
+        os.makedirs(os.path.join(self.dir, "profiles"), exist_ok=True)
+        os.makedirs(os.path.join(self.dir, "modules"), exist_ok=True)
+        self.results_path = os.path.join(self.dir, "results.json")
+        self.results = {}
+        if os.path.isfile(self.results_path):
+            try:
+                self.results = json.load(open(self.results_path))
+            except Exception:
+                self.results = {}
+
+    def path(self, *parts: str) -> str:
+        return os.path.join(self.dir, *parts)
+
+    def save(self):
+        tmp = self.results_path + ".tmp"
+        json.dump(self.results, open(tmp, "w"), indent=2, sort_keys=True)
+        os.replace(tmp, self.results_path)
+
+    @property
+    def scene(self) -> str:
+        return self.path("scene.sav")
+
+
+def record_dir(disc_id: str) -> str:
+    return os.path.join(RECORD_ROOT, disc_id)
+
+
+def tuned_dylib_path(store: Store) -> str:
+    chunk = store.results.get("chunk", DEFAULT_CHUNK)
+    return store.path("modules", "tuned-c%d" % chunk, "module-build", "g%s_recomp.dylib" % store.disc_id)
+
+
+def resolve_module(game, store: Store, spec: str) -> str:
+    """`tuned` names the store's tuned module, rebuilt from the merged profile
+    if `clean` took it away; anything else is a path."""
+    if spec != "tuned":
+        if not os.path.isfile(spec):
+            die("no module at " + spec)
+        return spec
+    path = tuned_dylib_path(store)
+    if os.path.isfile(path):
+        return path
+    merged = store.path("profiles", "merged.profdata")
+    if not os.path.isfile(merged):
+        die("no tuned module and no merged profile in the store; run the deep dive first")
+    ensure_tools()
+    log("rebuilding the tuned module from the store's profile")
+    b = build_module(store.disc_id, game.dol, os.path.dirname(os.path.dirname(path)), pgo=merged,
+                     chunk=store.results.get("chunk", DEFAULT_CHUNK))
+    return b.dylib
+
+
+def clean_store(store: Store, keep_tuned: bool):
+    """Drop what a finished dive no longer needs. The scene, the merged
+    profile, the logs and results.json stay, so `bench`, `ab` and a resumed
+    run still work; the tuned module is a 145 s rebuild from the profile."""
+    freed = 0
+    modules = store.path("modules")
+    tuned_dir = os.path.dirname(os.path.dirname(tuned_dylib_path(store)))
+    for name in sorted(os.listdir(modules)) if os.path.isdir(modules) else []:
+        path = os.path.join(modules, name)
+        if keep_tuned and os.path.realpath(path) == os.path.realpath(tuned_dir):
+            continue
+        freed += sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
+        shutil.rmtree(path, ignore_errors=True)
+    profiles = store.path("profiles")
+    for name in sorted(os.listdir(profiles)) if os.path.isdir(profiles) else []:
+        path = os.path.join(profiles, name)
+        if os.path.isdir(path):
+            freed += sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
+            shutil.rmtree(path, ignore_errors=True)
+    candidates = store.path("candidates")
+    if os.path.isdir(candidates):
+        freed += sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(candidates) for f in fs)
+        shutil.rmtree(candidates, ignore_errors=True)
+    log("cleaned %s: %.0f MB freed" % (store.dir, freed / 1e6))
+
+
+def read_record(disc_id: str) -> dict:
+    path = os.path.join(record_dir(disc_id), "tuning.conf")
+    record = {}
+    if os.path.isfile(path):
+        for line in open(path):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            record[key.strip()] = value.strip().strip('"')
+    return record
+
+
+# --- the recompiler --------------------------------------------------------
+
+
+def ensure_tools():
+    if not os.access(DOLRECOMP, os.X_OK):
+        script = os.path.join(REPO_ROOT, "ios", "build-dolrecomp-llvm20.sh")
+        if not os.access(script, os.X_OK):
+            die("no %s and no %s to build it" % (DOLRECOMP, script))
+        log("building the pinned LLVM 20 recompiler; the first one takes a few minutes")
+        if subprocess.run([script]).returncode != 0 or not os.access(DOLRECOMP, os.X_OK):
+            die("could not build the recompiler")
+    if not os.access(RUNNER, os.X_OK):
+        die("no %s; build ModernGekko first (DolBundler/build.sh)" % RUNNER)
+    for tool in ("cmake", "ninja", "clang"):
+        if not shutil.which(tool):
+            die("%s is not on PATH; brew install %s" % (tool, tool))
+    if not os.access(LLVM_PROFDATA, os.X_OK):
+        die("no %s; brew install llvm@20" % LLVM_PROFDATA)
+
+
+class BuildResult:
+    def __init__(self, dylib, generated, recompile_log, link_log, seconds, stale, chunks, metadata):
+        self.dylib = dylib
+        self.generated = generated
+        self.recompile_log = recompile_log
+        self.link_log = link_log
+        self.seconds = seconds
+        self.stale = stale
+        self.chunks = chunks
+        self.metadata = metadata
+
+
+def parse_llvm_metadata(text: str) -> dict:
+    m = re.search(r"LLVM metadata: (.*)", text)
+    if not m:
+        return {}
+    return dict(re.findall(r"(\w+)=(\S+)", m.group(1)))
+
+
+def build_module(disc_id: str, dol: str, out: str, pgo: str = "", chunk: int = 0,
+                 extra_env: dict = None, keep_objects: bool = False) -> BuildResult:
+    """One Mac module: DOL -> DolIR -> arm64 objects -> g<ID>_recomp.dylib.
+    pgo is '' (plain), 'gen' (instrumented), or a .profdata path (guided).
+    Mirrors recompios's collect_profile / recompile_game exactly, on purpose:
+    a module measured here has to be built the way the phone's will be."""
+    generated = os.path.join(out, "generated")
+    module_build = os.path.join(out, "module-build")
+    dylib = os.path.join(module_build, "g%s_recomp.dylib" % disc_id)
+    recompile_log = os.path.join(out, "recompile.log")
+    link_log = os.path.join(out, "link.log")
+    if os.path.isfile(dylib) and os.path.isfile(recompile_log):
+        text = open(recompile_log, errors="replace").read()
+        stale = text.count("PGO profile stale")
+        m = re.search(r"objects: .*\((\d+) files\)", text)
+        return BuildResult(dylib, generated, recompile_log, link_log, 0.0, stale,
+                           int(m.group(1)) if m else 0, parse_llvm_metadata(text))
+
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    # The object cache is keyed on the codegen fingerprint, and a guided
+    # build folds the profile's hash into that -- so guided objects are never
+    # reused (every dive makes a new profile) and would sit at ~600 MB a
+    # build, a variant, a title. The instrumented build shares recompios's
+    # cache, which is the reuse worth having: 11 s instead of three minutes.
+    if pgo == "gen":
+        cache = os.path.join(LLVM_CACHE_ROOT, disc_id + "-profile")
+    elif pgo:
+        cache = "off"
+    else:
+        cache = os.path.join(LLVM_CACHE_ROOT, disc_id + "-mac")
+    if cache != "off":
+        os.makedirs(cache, exist_ok=True)
+    env = dict(os.environ)
+    env.update({
+        "DOLRECOMP_LLVM_TARGET": MAC_TARGET,
+        "DOLRECOMP_LLVM_CPU": LLVM_CPU,
+        "DOLRECOMP_LLVM_CACHE": cache,
+        "DOLRECOMP_LLVM_SYMBOL_PREFIX": "g%s_" % disc_id,
+        "DOLRECOMP_LLVM_PGO_STALE": "warn",
+    })
+    env.pop("DOLRECOMP_LLVM_PGO", None)
+    env.pop("DOLRECOMP_LLVM_PROFILE", None)
+    env.pop("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", None)
+    if pgo == "gen":
+        env["DOLRECOMP_LLVM_PGO"] = "gen"
+    elif pgo:
+        env["DOLRECOMP_LLVM_PGO"] = "use"
+        env["DOLRECOMP_LLVM_PROFILE"] = pgo
+    if chunk:
+        env["DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS"] = str(chunk)
+    env.update(extra_env or {})
+
+    started = time.monotonic()
+    with open(recompile_log, "w") as f:
+        rc = subprocess.run([DOLRECOMP, "-j%d" % JOBS, "--gamecube", "--backend", "llvm", dol, out],
+                            stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, env=env).returncode
+    if rc != 0 or not os.path.isfile(os.path.join(generated, "generated.h")):
+        tail = "".join(open(recompile_log, errors="replace").readlines()[-15:])
+        raise RuntimeError("recompile failed (exit %d):\n%s" % (rc, tail))
+    shutil.copyfile(dol, os.path.join(generated, "main.dol"))
+
+    cmake_env = dict(os.environ, CMAKE_NINJA_FORCE_RESPONSE_FILE="1")
+    with open(link_log, "w") as f:
+        configure = subprocess.run(
+            ["cmake", "-S", MODULE_TEMPLATE, "-B", module_build, "-G", "Ninja",
+             "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=clang",
+             "-DGAME_ID=%s" % disc_id, "-DGENERATED_DIR=%s" % generated,
+             "-DGXRUNTIME_DIR=%s" % GXRUNTIME_DIR, "-DCHASSIS_ABI_DIR=%s" % CHASSIS_ABI_DIR],
+            stdout=f, stderr=subprocess.STDOUT, env=cmake_env).returncode
+        if configure == 0:
+            configure = subprocess.run(["cmake", "--build", module_build, "-j%d" % JOBS],
+                                       stdout=f, stderr=subprocess.STDOUT, env=cmake_env).returncode
+    if configure != 0 or not os.path.isfile(dylib):
+        tail = "".join(open(link_log, errors="replace").readlines()[-15:])
+        raise RuntimeError("module link failed:\n%s" % tail)
+
+    text = open(recompile_log, errors="replace").read()
+    stale = text.count("PGO profile stale")
+    m = re.search(r"objects: .*\((\d+) files\)", text)
+    chunks = int(m.group(1)) if m else 0
+    if not keep_objects:
+        # A quarter of a gigabyte of objects per variant, and the dylib is
+        # what gets run; the object cache keeps the next build quick.
+        shutil.rmtree(os.path.join(generated, "chunks"), ignore_errors=True)
+        shutil.rmtree(os.path.join(module_build, "CMakeFiles"), ignore_errors=True)
+    return BuildResult(dylib, generated, recompile_log, link_log, time.monotonic() - started,
+                       stale, chunks, parse_llvm_metadata(text))
+
+
+# --- playing a game without hands ------------------------------------------
+
+PAD_INI = """[GCPad1]
+Device = Pipe/0/pad1
+Buttons/A = `Button A`
+Buttons/B = `Button B`
+Buttons/X = `Button X`
+Buttons/Y = `Button Y`
+Buttons/Z = `Button Z`
+Buttons/Start = `Button START`
+Main Stick/Up = `Axis MAIN Y +`
+Main Stick/Down = `Axis MAIN Y -`
+Main Stick/Left = `Axis MAIN X -`
+Main Stick/Right = `Axis MAIN X +`
+Main Stick/Calibration = 100.00
+C-Stick/Up = `Axis C Y +`
+C-Stick/Down = `Axis C Y -`
+C-Stick/Left = `Axis C X -`
+C-Stick/Right = `Axis C X +`
+C-Stick/Calibration = 100.00
+Triggers/L = `Button L`
+Triggers/R = `Button R`
+Triggers/L-Analog = `Axis L +`
+Triggers/R-Analog = `Axis R +`
+D-Pad/Up = `Button D_UP`
+D-Pad/Down = `Button D_DOWN`
+D-Pad/Left = `Button D_LEFT`
+D-Pad/Right = `Button D_RIGHT`
+[GCPad2]
+[GCPad3]
+[GCPad4]
+"""
+
+# The same walk recompios makes -- START and A through whatever menus there
+# are, then the stick and A -- with two differences a scene run needs: a
+# `play` mode that skips the menu phase, because the state it starts from is
+# already in play, and no START at all in that mode, because pausing a bench
+# scene measures a pause screen. `route` mode reads a hand-written timeline
+# (DolBundler/tuning/<ID>/play.txt) for the title whose menus the masher
+# cannot get through.
+PUMP = r'''
+import errno, os, random, sys, time
+
+fifo, seconds, mode, seed = sys.argv[1], float(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+route = sys.argv[5] if len(sys.argv) > 5 else ""
+deadline = time.monotonic() + seconds
+random.seed(seed)
+
+fd = None
+while fd is None and time.monotonic() < deadline:
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno not in (errno.ENXIO, errno.ENOENT):
+            raise
+        time.sleep(0.5)
+if fd is None:
+    sys.exit(0)
+
+
+def send(line):
+    try:
+        os.write(fd, (line + "\n").encode())
+    except BlockingIOError:
+        pass
+    except BrokenPipeError:
+        sys.exit(0)
+
+
+def wait(t):
+    end = time.monotonic() + t
+    while time.monotonic() < end:
+        if time.monotonic() >= deadline:
+            send("SET MAIN 0.5 0.5")
+            sys.exit(0)
+        time.sleep(min(0.1, end - time.monotonic()))
+
+
+def tap(button, hold=0.25):
+    send("PRESS " + button)
+    wait(hold)
+    send("RELEASE " + button)
+
+
+if mode == "route" and route:
+    # One action per line: "<seconds> PRESS A" / "RELEASE A" / "TAP A [hold]" /
+    # "SET MAIN x y" / "WAIT <seconds>". Seconds are wall time from the start.
+    start = time.monotonic()
+    for raw in open(route):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        at = float(parts[0]); parts = parts[1:]
+        while time.monotonic() - start < at:
+            wait(0.05)
+        if not parts:
+            continue
+        if parts[0] == "TAP":
+            tap(parts[1], float(parts[2]) if len(parts) > 2 else 0.25)
+        elif parts[0] == "WAIT":
+            wait(float(parts[1]))
+        else:
+            send(" ".join(parts))
+    mode = "play"
+
+if mode == "boot":
+    menu_end = time.monotonic() + min(90.0, seconds * 0.5)
+    turn = 0
+    while time.monotonic() < menu_end:
+        tap("START" if turn % 3 == 0 else "A")
+        wait(2.0)
+        if turn % 4 == 3:
+            tap("D_DOWN")
+            wait(0.5)
+        turn += 1
+
+last_start = time.monotonic()
+while True:
+    x = random.choice([0.0, 0.25, 0.5, 0.75, 1.0])
+    y = random.choice([0.0, 0.25, 0.5, 0.75, 1.0])
+    send("SET MAIN %.2f %.2f" % (x, y))
+    wait(random.uniform(0.8, 1.8))
+    if random.random() < 0.5:
+        tap("A")
+    if random.random() < 0.15:
+        tap(random.choice(["X", "Y", "R", "L"]))
+    if mode == "boot" and time.monotonic() - last_start > 30.0:
+        tap("START")
+        wait(1.0)
+        tap("START")
+        last_start = time.monotonic()
+'''
+
+
+class RunResult:
+    def __init__(self):
+        self.log_path = ""
+        self.wall = 0.0
+        self.exit = 0
+        self.samples = []      # (t, fps, speed x real time)
+        self.counters = {}     # the shutdown line
+        self.faults = 0
+        self.states = []       # (index, path, t)
+        self.categories = {}   # native sampler, by category, percent
+        self.symbols = []      # native sampler, (symbol, percent)
+        self.dispatch_sites = []  # (pc, samples)
+        self.smc_lines = []
+        self.timed_out = False
+        self.rejected = ""
+
+    @property
+    def cycles(self) -> int:
+        return int(self.counters.get("cycles", 0))
+
+    def steady(self, warmup: float = BENCH_WARMUP) -> list:
+        return [s for t, _, s in self.samples if t >= warmup and s > 0]
+
+    def median_speed(self, warmup: float = BENCH_WARMUP) -> float:
+        steady = self.steady(warmup)
+        return statistics.median(steady) if steady else 0.0
+
+    def healthy(self, median_reference: float = 0.0) -> tuple:
+        """(ok, why). A crashed guest is the classic false speedup."""
+        if self.rejected:
+            return False, "module rejected: " + self.rejected
+        if self.faults:
+            return False, "%d guest faults" % self.faults
+        if not self.samples or not self.steady():
+            return False, "no speed samples"
+        speed = self.median_speed()
+        if median_reference and speed > median_reference * CORPSE_FACTOR:
+            return False, "%.2fx is %.0fx the run's median: a crashed guest" % (
+                speed, speed / median_reference)
+        return True, ""
+
+
+def parse_run_log(path: str, result: RunResult):
+    text = open(path, errors="replace").read()
+    for m in re.finditer(r"\[perf\] t=([\d.]+) fps=([\d.]+) speed=(-?[\d.]+)%", text):
+        result.samples.append((float(m.group(1)), float(m.group(2)), float(m.group(3)) / 100.0))
+    shutdown = [l for l in text.splitlines() if "[staticrecomp] shutdown:" in l]
+    if shutdown:
+        result.counters = {k: (int(v) if v.isdigit() else v)
+                           for k, v in re.findall(r"(\w+)=(\d+)B?", shutdown[-1])}
+    result.faults = len(re.findall(r"Invalid (?:read from|write to) 0x", text))
+    for m in re.finditer(r"\[state\] savestate written to (.+?) at t=([\d.]+)\s*$", text, re.M):
+        p = m.group(1)
+        idx = re.search(r"state-(\d+)\.sav", p)
+        result.states.append((int(idx.group(1)) if idx else 0, p, float(m.group(2))))
+    section = None
+    for line in text.splitlines():
+        if line.startswith("[native-sample] by category:"):
+            section = "category"; continue
+        if line.startswith("[native-sample] by symbol:"):
+            section = "symbol"; continue
+        if line.startswith("[native-sample] hottest program counters:"):
+            section = None; continue
+        if section and line.startswith("  "):
+            m = re.match(r"\s+([\d.]+)%\s+(.*)", line)
+            if m:
+                if section == "category":
+                    result.categories[m.group(2).strip()] = float(m.group(1))
+                else:
+                    result.symbols.append((m.group(2).strip(), float(m.group(1))))
+        elif section and not line.startswith("  "):
+            section = None
+    for m in re.finditer(r"\[staticrecomp\] dispatch-site pc=([0-9a-f]+) samples=(\d+)", text):
+        result.dispatch_sites.append((int(m.group(1), 16), int(m.group(2))))
+    result.smc_lines = [l.strip() for l in text.splitlines() if "[staticrecomp] SMC:" in l]
+    result.timed_out = "[run] timer expired" in text
+    m = re.search(r"native module was rejected[^\n]*", text)
+    if m and "module loaded" not in text:
+        result.rejected = m.group(0)
+
+
+def run_game(disc_id: str, root: str, dylib: str, seconds: int, log_path: str,
+             state: str = "", env: dict = None, pump: str = "", seed: int = 1,
+             route: str = "", states_dir: str = "", perf: bool = True,
+             phone_shaped: bool = True, profile_dir: str = "") -> RunResult:
+    """One headless run. pump is '' (no input), 'boot', 'play' or 'route'."""
+    result = RunResult()
+    result.log_path = log_path
+    work = os.path.join(os.path.dirname(log_path), ".run-" + os.path.basename(log_path).replace(".log", ""))
+    shutil.rmtree(work, ignore_errors=True)
+    user_dir = os.path.join(work, "user")
+    os.makedirs(user_dir)
+    os.makedirs(os.path.join(user_dir, "Config"))
+    fifo = ""
+    if pump:
+        os.makedirs(os.path.join(user_dir, "Pipes"))
+        fifo = os.path.join(user_dir, "Pipes", "pad1")
+        os.mkfifo(fifo)
+        open(os.path.join(user_dir, "Config", "GCPadNew.ini"), "w").write(PAD_INI)
+        pump_path = os.path.join(work, "pump.py")
+        open(pump_path, "w").write(PUMP)
+
+    run_env = dict(os.environ)
+    run_env["MODERNGEKKO_RUN_SECONDS"] = str(seconds)
+    run_env["MODERNGEKKO_EMULATION_SPEED"] = "0"
+    # Not set by default: STATICRECOMP_CPU_QOS=interactive was the first
+    # guess at why the same module and state read 2.8x one minute and 3.5x
+    # the next, and four alternating pairs measured no difference (2.82/2.83/
+    # 3.28/2.83 against 2.98/2.82/2.81/2.93). The knob stays for the next
+    # guess; --env STATICRECOMP_CPU_QOS=interactive tries it.
+    if phone_shaped:
+        run_env["MODERNGEKKO_NO_FALLBACK_JIT"] = "1"
+    if perf:
+        run_env["MODERNGEKKO_PERF_LOG"] = "1"
+    if states_dir:
+        os.makedirs(states_dir, exist_ok=True)
+        run_env["MODERNGEKKO_SAVE_STATE_EVERY"] = "%d:%s" % (STATE_EVERY, states_dir)
+    if profile_dir:
+        os.makedirs(profile_dir, exist_ok=True)
+        run_env["LLVM_PROFILE_FILE"] = os.path.join(profile_dir, "%p.profraw")
+    else:
+        # An instrumented module writes its counters at exit wherever
+        # compiler-rt is pointed, and with nothing set that is default.profraw
+        # in the current directory -- the repository root, when this was
+        # started from there. A bench of an instrumented module has no use for
+        # the counters, so they go into the run's own scratch directory.
+        run_env["LLVM_PROFILE_FILE"] = os.path.join(work, "discard-%p.profraw")
+    run_env.update(env or {})
+
+    command = [RUNNER, "--game", root, "--module", dylib, "--user-dir", user_dir,
+               "--headless", "--graphics", "Null", "--audio", "No Audio Output"]
+    if state:
+        command += ["--load-state", state]
+
+    pump_proc = None
+    if pump:
+        pump_proc = subprocess.Popen(
+            [sys.executable, pump_path, fifo, str(seconds + 15), pump, str(seed), route],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    started = time.monotonic()
+    with open(log_path, "w") as f:
+        f.write("$ " + " ".join(shlex.quote(c) for c in command) + "\n")
+        for key in sorted(k for k in run_env if k.startswith(("MODERNGEKKO_", "STATICRECOMP_", "LLVM_PROFILE"))):
+            f.write("  %s=%s\n" % (key, run_env[key]))
+        f.flush()
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, env=run_env)
+        try:
+            result.exit = proc.wait(timeout=seconds + 180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            result.exit = -9
+            f.write("\n[tunegame] the game did not stop on its own; killed\n")
+    result.wall = time.monotonic() - started
+    if pump_proc:
+        pump_proc.kill()
+        pump_proc.wait()
+    parse_run_log(log_path, result)
+    shutil.rmtree(work, ignore_errors=True)
+    return result
+
+
+# --- measuring -------------------------------------------------------------
+
+
+def refuse_if_busy(ignore: bool):
+    alive = running_runners()
+    if alive and not ignore:
+        die("another moderngekko-run is alive and would depress every number:\n  "
+            + "\n  ".join(alive) + "\nkill it, or pass --ignore-running")
+
+
+def bench(disc_id: str, root: str, dylib: str, state: str, log_path: str,
+          seconds: int = BENCH_SECONDS, env: dict = None) -> RunResult:
+    """The phone-shaped measurement: from the scene, no input, limiter off,
+    no fallback JIT, median speed over the samples after warmup."""
+    return run_game(disc_id, root, dylib, seconds, log_path, state=state, env=env)
+
+
+def ab(disc_id: str, root: str, a: str, b: str, state: str, logs_dir: str, label_a: str,
+       label_b: str, pairs: int = 3, seconds: int = BENCH_SECONDS, env: dict = None) -> dict:
+    """Interleaved A/B, ABBA order, back to back. Returns the per-arm medians,
+    the per-pair ratios and whether the arms overlap. Never compare two
+    numbers taken more than a few minutes apart -- this machine drifts by up
+    to a quarter under sustained load."""
+    arms = {"a": [], "b": []}
+    order = []
+    for i in range(pairs):
+        order += ["a", "b"] if i % 2 == 0 else ["b", "a"]
+    for n, arm in enumerate(order):
+        dylib = a if arm == "a" else b
+        label = label_a if arm == "a" else label_b
+        result = bench(disc_id, root, dylib, state, os.path.join(logs_dir, "ab-%s-%d.log" % (label, n)),
+                       seconds=seconds, env=env)
+        ok, why = result.healthy()
+        speed = result.median_speed()
+        log("  %-12s %.3fx%s" % (label, speed, "" if ok else "  (%s)" % why))
+        arms[arm].append(speed)
+    # This machine's speed steps by a quarter between one minute and the
+    # next -- flat within a run, then a different level for the next run,
+    # both arms alike -- so two adjacent runs are comparable and two distant
+    # ones are not. The verdict is therefore the median of the per-pair
+    # ratios, and it counts only when every pair lands on the same side.
+    pair_ratios = []
+    for i in range(pairs):
+        if arms["a"][i] > 0:
+            pair_ratios.append(arms["b"][i] / arms["a"][i])
+    med_a = statistics.median(arms["a"]) if arms["a"] else 0.0
+    med_b = statistics.median(arms["b"]) if arms["b"] else 0.0
+    ratio = statistics.median(pair_ratios) if pair_ratios else 0.0
+    agree = bool(pair_ratios) and (all(r > 1.0 for r in pair_ratios) or all(r < 1.0 for r in pair_ratios))
+    overlap = bool(arms["a"] and arms["b"]) and not (min(arms["b"]) > max(arms["a"]) or max(arms["b"]) < min(arms["a"]))
+    return {"a": arms["a"], "b": arms["b"], "median_a": med_a, "median_b": med_b,
+            "ratio": ratio, "pair_ratios": pair_ratios, "agree": agree,
+            "overlap": overlap, "label_a": label_a, "label_b": label_b}
+
+
+def ab_verdict(r: dict) -> tuple:
+    """(ratio, agree) from an ab() result's pair ratios, recomputed rather
+    than read back, so a result recorded by an older run is judged the same
+    way as a new one."""
+    pairs = [x for x in r.get("pair_ratios", []) if x > 0]
+    if not pairs:
+        return 0.0, False
+    ratio = statistics.median(pairs)
+    agree = all(x > 1.0 for x in pairs) or all(x < 1.0 for x in pairs)
+    return ratio, agree
+
+
+def percent(r: dict) -> str:
+    ratio, agree = ab_verdict(r)
+    if not ratio:
+        return ""
+    return "%+.1f%%%s" % ((ratio - 1) * 100, "" if agree else "?")
+
+
+# --- profiles --------------------------------------------------------------
+
+
+def profdata_total(path: str) -> int:
+    out = subprocess.run([LLVM_PROFDATA, "show", path], capture_output=True, text=True).stdout
+    m = re.search(r"^Total count:\s*(\d+)", out, re.M)
+    return int(m.group(1)) if m else 0
+
+
+def merge_profiles(out: str, weighted: list) -> int:
+    """weighted: [(weight, path)]. Not --sparse: the recompiler counts a
+    function with no record as stale, and sparse drops every function that
+    never ran -- 7,308 of Mario Soccer's 10,403 chunks read as stale that
+    way. xz takes the full profile to a few hundred kilobytes regardless.
+    Returns the total count, which had better not be zero."""
+    args = [LLVM_PROFDATA, "merge", "-o", out]
+    for weight, path in weighted:
+        args.append("--weighted-input=%d,%s" % (weight, path))
+    p = subprocess.run(args, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("llvm-profdata merge failed: " + p.stderr.strip()[-400:])
+    return profdata_total(out)
+
+
+def profile_top(path: str, n: int = 24) -> list:
+    """(chunk address, count) for the hottest generated functions. LLVM's
+    names are g<ID>_func_<addr>[_budget]; both spellings are the same guest
+    chunk, so they are folded."""
+    out = subprocess.run([LLVM_PROFDATA, "show", "--topn=%d" % (n * 2), path],
+                         capture_output=True, text=True).stdout
+    by_addr = {}
+    for m in re.finditer(r"func_([0-9A-Fa-f]{8})(?:_budget)?, max count = (\d+)", out):
+        addr = int(m.group(1), 16)
+        by_addr[addr] = max(by_addr.get(addr, 0), int(m.group(2)))
+    return sorted(by_addr.items(), key=lambda kv: -kv[1])[:n]
+
+
+# --- reading the DOL -------------------------------------------------------
+
+
+class Dol:
+    """Enough of a DOL to find function starts, name them from Dolphin's
+    signature database, and disassemble a stretch. The names are what turn
+    "func_802591C0 is 44% of the run" into "the scheduler's idle loop is 44%
+    of the run", which is the difference between a number and a lead."""
+
+    def __init__(self, path: str):
+        self.path = path
+        d = open(path, "rb").read()
+        offs = struct.unpack(">18I", d[0:0x48])
+        addrs = struct.unpack(">18I", d[0x48:0x90])
+        sizes = struct.unpack(">18I", d[0x90:0xD8])
+        self.words = {}
+        self.sections = []
+        for i in range(18):
+            if not sizes[i]:
+                continue
+            data = d[offs[i]:offs[i] + sizes[i]]
+            self.sections.append((addrs[i], sizes[i], i < 7))
+            if i < 7:
+                n = len(data) // 4
+                for j, w in enumerate(struct.unpack(">%dI" % n, data[:n * 4])):
+                    self.words[addrs[i] + 4 * j] = w
+        self._functions = None
+        self._names = None
+
+    def functions(self) -> list:
+        """(start, size) for every bl target, run to its blr/rfi."""
+        if self._functions is not None:
+            return self._functions
+        starts = set()
+        for a, op in self.words.items():
+            if (op & 0xFC000003) == 0x48000001:
+                li = op & 0x03FFFFFC
+                if li & 0x02000000:
+                    li -= 0x04000000
+                t = (a + li) & 0xFFFFFFFF
+                if t in self.words:
+                    starts.add(t)
+        funcs = []
+        for s in sorted(starts):
+            a = s
+            for _ in range(16384):
+                op = self.words.get(a)
+                if op is None:
+                    break
+                if op in (0x4E800020, 0x4C000064):
+                    funcs.append((s, a + 4 - s))
+                    break
+                a += 4
+        self._functions = funcs
+        return funcs
+
+    @staticmethod
+    def checksum(words) -> int:
+        s = 0
+        for opcode in words:
+            op = opcode & 0xFC000000
+            op2 = 0
+            op3 = 0
+            aux = op >> 26
+            if aux == 4:
+                op2 = opcode & 0x3F
+                if op2 in (0, 8, 16, 21, 22):
+                    op3 = opcode & 0x7C0
+            elif aux in (7, 8, 10, 11, 12, 13, 14, 15):
+                op2 = opcode & 0x03FF0000
+            elif aux in (19, 31, 63):
+                op2 = opcode & 0x7FF
+            elif aux == 59:
+                op2 = opcode & 0x3F
+                if op2 < 16:
+                    op3 = opcode & 0x7C0
+            elif 32 <= aux < 56:
+                op2 = opcode & 0x03FF0000
+            s = ((s << 17) & 0xFFFE0000) | ((s >> 15) & 0x1FFFF)
+            s ^= (op | op2 | op3)
+        return s
+
+    def names(self) -> dict:
+        """start -> name, for functions Dolphin's totaldb.dsy recognises."""
+        if self._names is not None:
+            return self._names
+        self._names = {}
+        if not os.path.isfile(TOTALDB):
+            return self._names
+        d = open(TOTALDB, "rb").read()
+        n, = struct.unpack("<I", d[:4])
+        db = {}
+        off = 4
+        for _ in range(n):
+            ck, size = struct.unpack("<II", d[off:off + 8])
+            name = d[off + 8:off + 136].split(b"\0")[0].decode("latin1")
+            db[ck] = (size, name)
+            off += 136
+        for s, size in self.functions():
+            hit = db.get(self.checksum([self.words[s + 4 * i] for i in range(size // 4)]))
+            if hit and hit[0] == size:
+                self._names[s] = hit[1]
+        return self._names
+
+    def containing(self, addr: int):
+        """The (start, size, name-or-None) of the function covering addr."""
+        best = None
+        for s, size in self.functions():
+            if s <= addr < s + size and (best is None or s > best[0]):
+                best = (s, size)
+        if best is None:
+            return None
+        return best[0], best[1], self.names().get(best[0])
+
+    def describe(self, addr: int) -> str:
+        f = self.containing(addr)
+        if f is None:
+            return "0x%08X (no function found)" % addr
+        start, size, name = f
+        if name:
+            return "%s (0x%08X, %d bytes)%s" % (name, start, size,
+                                                 "" if start == addr else ", chunk at +0x%X" % (addr - start))
+        return "unnamed 0x%08X (%d bytes)%s" % (start, size, "" if start == addr else ", chunk at +0x%X" % (addr - start))
+
+    def disassemble(self, addr: int, count: int) -> list:
+        words = []
+        for i in range(count):
+            w = self.words.get(addr + 4 * i)
+            if w is None:
+                break
+            words.append(w)
+        if not words or not os.access(LLVM_MC, os.X_OK):
+            return ["  (no disassembler: %s)" % LLVM_MC] if words else []
+        feed = "\n".join(" ".join("0x%02x" % x for x in struct.pack(">I", w)) for w in words)
+        p = subprocess.run([LLVM_MC, "--disassemble", "--triple=powerpc-unknown-linux"],
+                           input=feed, capture_output=True, text=True)
+        out = [l for l in p.stdout.splitlines() if l.strip() and not l.strip().startswith(".text")]
+        lines = []
+        for i, l in enumerate(out):
+            w = words[i] if i < len(words) else 0
+            note = ""
+            op = w >> 26
+            if op in (18, 16) and not (w & 2):
+                if op == 18:
+                    li = w & 0x03FFFFFC
+                    if li & 0x02000000:
+                        li -= 0x04000000
+                else:
+                    li = w & 0xFFFC
+                    if li & 0x8000:
+                        li -= 0x10000
+                target = (addr + 4 * i + li) & 0xFFFFFFFF
+                note = "  -> 0x%08X" % target
+                if op == 18 and (w & 1):
+                    f = self.containing(target)
+                    if f and f[2]:
+                        note += " " + f[2]
+            lines.append("%08X  %08X  %s%s" % (addr + 4 * i, w, l.strip(), note))
+        return lines
+
+
+def find_spin(lines: list):
+    """The tightest backward loop in a disassembly that is a load, a compare
+    and a branch back with nothing else in it: the shape of every wait loop
+    there is. Returns (head address, the loop's lines, what it reads) or
+    None. `reads` is "ram" for a load off r13 or a stack/data pointer and
+    "mmio" for one whose base register was loaded with lis 0xCC00.. -- the
+    difference between a wait the chassis can see (it services every MMIO
+    read) and one it cannot (generated code reads RAM inline)."""
+    by_addr = {}
+    order = []
+    for l in lines:
+        m = re.match(r"^([0-9A-F]{8})\s+[0-9A-F]{8}\s+(.*)$", l)
+        if m:
+            by_addr[int(m.group(1), 16)] = m.group(2)
+            order.append(int(m.group(1), 16))
+    best = None
+    for addr in order:
+        text = by_addr[addr]
+        m = re.search(r"^b\w*\b.*-> 0x([0-9A-F]{8})", text)
+        if not m:
+            continue
+        target = int(m.group(1), 16)
+        if target > addr or addr - target > 32:
+            continue
+        body = [by_addr[a] for a in range(target, addr + 4, 4) if a in by_addr]
+        loads = [b for b in body if re.match(r"(lwz|lhz|lbz|lwzx|lhzx)\b", b)]
+        cmps = [b for b in body if re.match(r"(cmpw|cmpwi|cmplwi|cmplw)\b", b)]
+        stores = [b for b in body if re.match(r"(stw|sth|stb|stwx|sthx)\b", b)]
+        calls = [b for b in body if re.match(r"bl\b", b)]
+        if loads and cmps and not stores and not calls and len(body) <= 6:
+            if best is None or len(body) < len(best[1]):
+                reads = "ram"
+                base = re.search(r"\((\d+)\)", loads[0])
+                if base:
+                    reg = base.group(1)
+                    lis = [by_addr[a] for a in order if a < target and re.match(r"lis %s, -1(33|31|29)\d\d" % reg, by_addr[a])]
+                    if lis:
+                        reads = "mmio"
+                best = (target, [("%08X  %s" % (a, by_addr[a])) for a in range(target, addr + 4, 4) if a in by_addr], reads)
+    return best
+
+
+def looks_like_a_spin(lines: list) -> bool:
+    return find_spin(lines) is not None
+
+
+# --- the deep dive ---------------------------------------------------------
+
+
+class Game:
+    def __init__(self, disc_id: str, name: str, root: str):
+        self.disc_id = disc_id
+        self.name = name
+        self.root = root
+        self.dol = os.path.join(root, "sys", "main.dol")
+        self.dol_sha = sha256_file(self.dol)
+        self._dol = None
+
+    @property
+    def dol_image(self) -> Dol:
+        if self._dol is None:
+            self._dol = Dol(self.dol)
+        return self._dol
+
+
+def stage_done(store: Store, name: str, key: str) -> bool:
+    stage = store.results.get("stages", {}).get(name)
+    return bool(stage) and stage.get("key") == key and stage.get("ok")
+
+
+def stage_mark(store: Store, name: str, key: str, **data):
+    store.results.setdefault("stages", {})[name] = dict(key=key, ok=True, at=now_iso(), **data)
+    store.save()
+
+
+def deep_dive(game: Game, level: int, budget_minutes: float, play_seconds: int, variants: list,
+              fresh: bool, record: bool, route: str, ignore_running: bool) -> dict:
+    store = Store(game.disc_id)
+    log.attach(store.path("tunegame.log"))
+    refuse_if_busy(ignore_running)
+    ensure_tools()
+    if fresh:
+        store.results = {}
+        store.save()
+    started = time.monotonic()
+    rc = recompiler_commit()
+    existing = read_record(game.disc_id)
+    chunk = int(existing.get("LLVM_CHUNK_INSTRUCTIONS") or DEFAULT_CHUNK)
+    identity = "%s|%s|c%d" % (game.dol_sha[:16], rc, chunk)
+    store.results.update(disc_id=game.disc_id, name=game.name, dol_sha256=game.dol_sha,
+                         recompiler_commit=rc, chunk=chunk, started=now_iso())
+    store.save()
+    log("%s (%s): deep dive, level %d, recompiler %s, chunk %d, %d jobs" % (
+        game.name, game.disc_id, level, rc, chunk, JOBS))
+    route_file = route or os.path.join(record_dir(game.disc_id), "play.txt")
+    pump_mode = "route" if os.path.isfile(route_file) else "boot"
+    if pump_mode == "route":
+        log("playing by the route in " + route_file)
+
+    # 1. instrumented -- built the first time a stage asks for it, so a run
+    # that only needs to rewrite its report after `clean` does not relink it.
+    inst_dir = store.path("modules", "instrumented-c%d" % chunk)
+    inst_dylib = os.path.join(inst_dir, "module-build", "g%s_recomp.dylib" % game.disc_id)
+
+    def instrumented() -> str:
+        if not stage_done(store, "instrumented", identity) or not os.path.isfile(inst_dylib):
+            log("recompiling an instrumented copy for this Mac")
+            shutil.rmtree(inst_dir, ignore_errors=True)
+            inst = build_module(game.disc_id, game.dol, inst_dir, pgo="gen", chunk=chunk)
+            log("  %d chunks in %.0f s" % (inst.chunks, inst.seconds))
+            stage_mark(store, "instrumented", identity, chunks=inst.chunks, seconds=inst.seconds,
+                       metadata=inst.metadata)
+        return inst_dylib
+
+    metadata = store.results.get("stages", {}).get("instrumented", {}).get("metadata", {})
+
+    # 2. the boot run: profile, speed curve, states
+    boot_key = "%s|%d|%s" % (identity, play_seconds, pump_mode)
+    boot_raw = store.path("profiles", "boot-raw")
+    states_dir = store.path("candidates")
+    if not stage_done(store, "boot-run", boot_key):
+        log("playing from boot for %d s with scripted input, a state every %d s" % (play_seconds, STATE_EVERY))
+        shutil.rmtree(boot_raw, ignore_errors=True)
+        shutil.rmtree(states_dir, ignore_errors=True)
+        r = run_game(game.disc_id, game.root, instrumented(), play_seconds, store.path("runs", "boot.log"),
+                     pump=pump_mode, route=route_file if pump_mode == "route" else "",
+                     states_dir=states_dir, profile_dir=boot_raw)
+        if r.rejected or not r.counters:
+            die("the boot run did not run the module (exit %d); see %s" % (r.exit, r.log_path))
+        guest_min = r.cycles / GEKKO_HZ / 60.0
+        log("  %.1f guest minutes at %.2fx median; %d states; %d faults; smc_lost=%s" % (
+            guest_min, r.median_speed(), len(r.states), r.faults, r.counters.get("smc_lost", "?")))
+        raws = [os.path.join(boot_raw, f) for f in os.listdir(boot_raw)] if os.path.isdir(boot_raw) else []
+        if not raws:
+            die("the boot run wrote no profile; see " + r.log_path)
+        boot_prof = store.path("profiles", "boot.profdata")
+        total = merge_profiles(boot_prof, [(1, p) for p in raws])
+        if total == 0:
+            die("the boot profile has a total count of zero: the module never ran")
+        stage_mark(store, "boot-run", boot_key, samples=r.samples, states=r.states, faults=r.faults,
+                   counters=r.counters, guest_minutes=guest_min, median_speed=r.median_speed(),
+                   smc=r.smc_lines[:4])
+    boot = store.results["stages"]["boot-run"]
+    boot_prof = store.path("profiles", "boot.profdata")
+
+    # 3. the scene
+    if not stage_done(store, "scene", boot_key) or not os.path.isfile(store.scene):
+        if not boot.get("states") and os.path.isfile(store.path("runs", "boot.log")):
+            # A recorded run whose states went unparsed is still a run; read
+            # them back rather than play five minutes again.
+            reparsed = RunResult()
+            parse_run_log(store.path("runs", "boot.log"), reparsed)
+            boot["states"] = reparsed.states
+            boot["samples"] = boot.get("samples") or reparsed.samples
+            store.save()
+        candidates = rank_candidates(boot["samples"], boot["states"])
+        if not candidates:
+            die("the boot run left no usable state after %.0f s; a longer --play-seconds, or a play.txt route" % MIN_SCENE_T)
+        log("ranking %d candidate states; benching the slowest three" % len(candidates))
+        run_median = statistics.median([s for _, _, s in boot["samples"] if s > 0]) if boot["samples"] else 0.0
+        table = []
+        chosen = None
+        for rank, (path, t, around) in enumerate(candidates[:3]):
+            r = bench(game.disc_id, game.root, instrumented(), path,
+                      store.path("runs", "candidate-%d.log" % rank), seconds=30)
+            ok, why = r.healthy(run_median)
+            entry = dict(path=path, t=t, around=around, bench=r.median_speed(), ok=ok, why=why,
+                         faults=r.faults, cycles=r.cycles)
+            table.append(entry)
+            log("  state at t=%.0f s: %.2fx around it in the run, %.2fx re-benched%s" % (
+                t, around, r.median_speed(), "" if ok else "  (%s)" % why))
+            if ok and (chosen is None or r.median_speed() < chosen["bench"]):
+                chosen = entry
+        if chosen is None:
+            chosen = min(table, key=lambda e: e["bench"] or 1e9)
+            log("  no candidate is clean; taking t=%.0f s and saying so" % chosen["t"])
+        shutil.copyfile(chosen["path"], store.scene)
+        # The runner-up stays for a second opinion; the rest go.
+        keep = {chosen["path"]} | {e["path"] for e in table[:2]}
+        for _, path, _ in boot["states"]:
+            if path not in keep and os.path.isfile(path):
+                os.remove(path)
+        stage_mark(store, "scene", boot_key, chosen=chosen, table=table, candidates=len(candidates))
+    scene = store.results["stages"]["scene"]["chosen"]
+    log("bench scene: t=%.0f s of the boot run, %.2fx when re-benched" % (scene["t"], scene["bench"]))
+
+    # 4. the scene run, and the merged profile
+    scene_key = "%s|%s" % (boot_key, sha256_file(store.scene)[:16])
+    scene_raw = store.path("profiles", "scene-raw")
+    merged = store.path("profiles", "merged.profdata")
+    if not stage_done(store, "scene-run", scene_key) or not os.path.isfile(merged):
+        log("playing from the scene for %d s, instrumented" % SCENE_PROFILE_SECONDS)
+        shutil.rmtree(scene_raw, ignore_errors=True)
+        r = run_game(game.disc_id, game.root, instrumented(), SCENE_PROFILE_SECONDS,
+                     store.path("runs", "scene-profile.log"), state=store.scene, pump="play",
+                     seed=2, profile_dir=scene_raw)
+        raws = [os.path.join(scene_raw, f) for f in os.listdir(scene_raw)] if os.path.isdir(scene_raw) else []
+        if not raws:
+            die("the scene run wrote no profile; see " + r.log_path)
+        scene_prof = store.path("profiles", "scene.profdata")
+        merge_profiles(scene_prof, [(1, p) for p in raws])
+        total = merge_profiles(merged, [(1, boot_prof), (SCENE_WEIGHT, scene_prof)])
+        if total == 0:
+            die("the merged profile is empty")
+        log("  %.1f guest minutes in the scene; merged profile total %d" % (r.cycles / GEKKO_HZ / 60.0, total))
+        stage_mark(store, "scene-run", scene_key, faults=r.faults, counters=r.counters,
+                   median_speed=r.median_speed(), total=total)
+
+    # 5. the tuned module
+    tuned_dir = store.path("modules", "tuned-c%d" % chunk)
+    tuned_key = scene_key + "|" + sha256_file(merged)[:16]
+    if not stage_done(store, "tuned", tuned_key):
+        log("recompiling against the merged profile")
+        shutil.rmtree(tuned_dir, ignore_errors=True)
+        b = build_module(game.disc_id, game.dol, tuned_dir, pgo=merged, chunk=chunk)
+        log("  %d chunks in %.0f s, %d stale" % (b.chunks, b.seconds, b.stale))
+        stage_mark(store, "tuned", tuned_key, chunks=b.chunks, stale=b.stale, seconds=b.seconds,
+                   metadata=b.metadata)
+    tuned_dylib = os.path.join(tuned_dir, "module-build", "g%s_recomp.dylib" % game.disc_id)
+    metadata = store.results["stages"]["tuned"].get("metadata") or metadata
+
+    # 6. diagnostics
+    if not stage_done(store, "diagnose", tuned_key):
+        log("running the scene with the sampler on")
+        r = run_game(game.disc_id, game.root, tuned_dylib, 60, store.path("runs", "diagnose.log"),
+                     state=store.scene, env={"STATICRECOMP_NATIVE_SAMPLE": "1",
+                                             "STATICRECOMP_DISPATCH_SAMPLES": "1"})
+        ok, why = r.healthy()
+        log("  %.2fx median%s; generated %.0f%%, exact-fp %.0f%%, chassis %.0f%%, video %.0f%%" % (
+            r.median_speed(), "" if ok else " (%s)" % why, r.categories.get("generated", 0),
+            r.categories.get("exact-fp/psq", 0), r.categories.get("chassis", 0),
+            r.categories.get("video", 0)))
+        # A clean timing, sampler off, is the headline number.
+        clean = bench(game.disc_id, game.root, tuned_dylib, store.scene, store.path("runs", "tuned.log"))
+        log("  tuned, sampler off: %.3fx" % clean.median_speed())
+        stage_mark(store, "diagnose", tuned_key, median_speed=clean.median_speed(),
+                   sampled_speed=r.median_speed(), healthy=ok, why=why, faults=clean.faults,
+                   counters=clean.counters, categories=r.categories, symbols=r.symbols[:20],
+                   dispatch_sites=r.dispatch_sites[:12], smc=clean.smc_lines[:4],
+                   samples=clean.samples)
+    diag = store.results["stages"]["diagnose"]
+    store.results["speed_tuned"] = diag["median_speed"]
+    store.save()
+
+    # 7. level 2 variants
+    if level >= 2:
+        for variant in variants:
+            elapsed = (time.monotonic() - started) / 60.0
+            if elapsed > budget_minutes:
+                log("budget of %.0f min used (%.0f); stopping before %s" % (budget_minutes, elapsed, variant))
+                break
+            try_variant(game, store, variant, chunk, tuned_dylib, tuned_key, boot_prof, play_seconds,
+                        pump_mode, route_file)
+            tuned_dir = store.path("modules", "tuned-c%d" % store.results["chunk"])
+            tuned_dylib = os.path.join(tuned_dir, "module-build", "g%s_recomp.dylib" % game.disc_id)
+
+    # 8. the record and the report
+    store.results["finished"] = now_iso()
+    store.results["minutes"] = (time.monotonic() - started) / 60.0
+    store.save()
+    write_report(game, store, metadata, record)
+    # The raw counters and the instrumented modules have done their work;
+    # the tuned module stays for `ab`, and `clean` takes even that.
+    for name in os.listdir(store.path("profiles")):
+        if os.path.isdir(store.path("profiles", name)):
+            shutil.rmtree(store.path("profiles", name), ignore_errors=True)
+    for name in os.listdir(store.path("modules")):
+        if name.startswith("instrumented-"):
+            shutil.rmtree(store.path("modules", name), ignore_errors=True)
+    for name in os.listdir(store.path("profiles")):
+        m = re.match(r".*-c(\d+)\.profdata$", name)
+        if m and int(m.group(1)) != store.results.get("chunk", DEFAULT_CHUNK):
+            os.remove(store.path("profiles", name))
+    log("done in %.0f min; report at %s" % (store.results["minutes"],
+                                              os.path.join(record_dir(game.disc_id), "report.md") if record
+                                              else store.path("report.md")))
+    return store.results
+
+
+def rank_candidates(samples: list, states: list) -> list:
+    """(path, t, mean speed around it), slowest first. The sample right after
+    a save is the save, not the scene."""
+    out = []
+    for _, path, t in states:
+        if t < MIN_SCENE_T or not os.path.isfile(path):
+            continue
+        window = [s for st, _, s in samples if t + 2.5 <= st < t + STATE_EVERY and s > 0]
+        if not window:
+            continue
+        out.append((path, t, statistics.mean(window)))
+    out.sort(key=lambda e: e[2])
+    return out
+
+
+VARIANT_HELP = {
+    "generic": "the profile recompios collects on its own (boot run only)",
+    "plain": "no profile at all",
+    "chunk128": "128-instruction chunks, own profile",
+    "chunk32": "32-instruction chunks, own profile",
+}
+
+
+def try_variant(game: Game, store: Store, variant: str, chunk: int, tuned_dylib: str, tuned_key: str,
+                boot_prof: str, play_seconds: int, pump_mode: str, route_file: str):
+    if variant not in VARIANT_HELP:
+        log("unknown variant %s; known: %s" % (variant, ", ".join(VARIANT_HELP)))
+        return
+    key = tuned_key + "|" + variant
+    if stage_done(store, "variant-" + variant, key):
+        return
+    log("variant %s: %s" % (variant, VARIANT_HELP[variant]))
+    out = store.path("modules", "variant-" + variant)
+    shutil.rmtree(out, ignore_errors=True)
+    merged = store.path("profiles", "merged.profdata")
+    profile_for_record = ""
+    adoptable_chunk = 0
+    if variant == "generic":
+        b = build_module(game.disc_id, game.dol, out, pgo=boot_prof, chunk=chunk)
+    elif variant == "plain":
+        b = build_module(game.disc_id, game.dol, out, pgo="", chunk=chunk)
+    else:
+        vchunk = int(variant[len("chunk"):])
+        adoptable_chunk = vchunk
+        # A profile is keyed per function and a function is a chunk, so a
+        # different chunk size needs its own instrumented build and its own
+        # runs; the profile from the other size matches nothing.
+        inst_dir = store.path("modules", "instrumented-c%d" % vchunk)
+        log("  instrumented build at %d" % vchunk)
+        inst = build_module(game.disc_id, game.dol, inst_dir, pgo="gen", chunk=vchunk)
+        inst_dylib = inst.dylib
+        raw_b = store.path("profiles", "boot-raw-c%d" % vchunk)
+        raw_s = store.path("profiles", "scene-raw-c%d" % vchunk)
+        shutil.rmtree(raw_b, ignore_errors=True)
+        shutil.rmtree(raw_s, ignore_errors=True)
+        log("  boot run at %d" % vchunk)
+        run_game(game.disc_id, game.root, inst_dylib, play_seconds, store.path("runs", "boot-c%d.log" % vchunk),
+                 pump=pump_mode, route=route_file if pump_mode == "route" else "", profile_dir=raw_b)
+        log("  scene run at %d" % vchunk)
+        run_game(game.disc_id, game.root, inst_dylib, SCENE_PROFILE_SECONDS,
+                 store.path("runs", "scene-profile-c%d.log" % vchunk), state=store.scene, pump="play",
+                 seed=2, profile_dir=raw_s)
+        raws_b = [os.path.join(raw_b, f) for f in os.listdir(raw_b)] if os.path.isdir(raw_b) else []
+        raws_s = [os.path.join(raw_s, f) for f in os.listdir(raw_s)] if os.path.isdir(raw_s) else []
+        if not raws_b or not raws_s:
+            log("  the runs at %d wrote no profile; skipping" % vchunk)
+            stage_mark(store, "variant-" + variant, key, skipped="no profile")
+            return
+        bp = store.path("profiles", "boot-c%d.profdata" % vchunk)
+        sp = store.path("profiles", "scene-c%d.profdata" % vchunk)
+        mp = store.path("profiles", "merged-c%d.profdata" % vchunk)
+        merge_profiles(bp, [(1, p) for p in raws_b])
+        merge_profiles(sp, [(1, p) for p in raws_s])
+        if merge_profiles(mp, [(1, bp), (SCENE_WEIGHT, sp)]) == 0:
+            log("  empty profile at %d; skipping" % vchunk)
+            stage_mark(store, "variant-" + variant, key, skipped="empty profile")
+            return
+        profile_for_record = mp
+        b = build_module(game.disc_id, game.dol, out, pgo=mp, chunk=vchunk)
+    log("  built in %.0f s (%d chunks, %d stale); A/B against tuned, 3 pairs" % (b.seconds, b.chunks, b.stale))
+    result = ab(game.disc_id, game.root, tuned_dylib, b.dylib, store.scene, store.path("runs"),
+                "tuned", variant)
+    ratio, agree = ab_verdict(result)
+    verdict = "%s vs tuned: %+.1f%% by pairs (%s), pairs %s; arms %s / %s" % (
+        variant, (ratio - 1) * 100, "all agree" if agree else "pairs disagree",
+        ", ".join("%.3f" % r for r in result["pair_ratios"]),
+        "/".join("%.2f" % x for x in result["a"]), "/".join("%.2f" % x for x in result["b"]))
+    log("  " + verdict)
+    adopted = False
+    if adoptable_chunk and ratio >= ADOPT_MARGIN and agree:
+        log("  adopting %d-instruction chunks" % adoptable_chunk)
+        adopted = True
+        store.results["chunk"] = adoptable_chunk
+        shutil.copyfile(profile_for_record, store.path("profiles", "merged.profdata"))
+        new_tuned = store.path("modules", "tuned-c%d" % adoptable_chunk)
+        shutil.rmtree(new_tuned, ignore_errors=True)
+        shutil.move(out, new_tuned)
+        store.results["speed_tuned"] = result["median_b"]
+        store.results["stages"]["diagnose"]["median_speed"] = result["median_b"]
+        stale = b.stale
+        store.results["stages"]["tuned"].update(chunks=b.chunks, stale=stale, metadata=b.metadata)
+    stage_mark(store, "variant-" + variant, key, ab=result, adopted=adopted, stale=b.stale,
+               build_seconds=b.seconds, verdict=verdict)
+    if not adopted:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+# --- the report and the record ---------------------------------------------
+
+
+def leads_for(game: Game, store: Store, top: list) -> list:
+    """Heuristics over what the run measured, phrased as things to look at.
+    Each is a lead, not a diagnosis; the report carries the evidence."""
+    diag = store.results["stages"]["diagnose"]
+    counters = diag.get("counters", {})
+    cats = diag.get("categories", {})
+    leads = []
+    speed = diag["median_speed"]
+    total = sum(c for _, c in top) or 1
+    if top:
+        addr, count = top[0]
+        share = 100.0 * count / total
+        desc = game.dol_image.describe(addr)
+        if share > 25:
+            lines = game.dol_image.disassemble(addr, 64)
+            spin = find_spin(lines)
+            host = next((pct for sym, pct in diag.get("symbols", []) if ("%08X" % addr) in sym), None)
+            if spin:
+                head, body, reads = spin
+                if reads == "mmio":
+                    what = ("It polls a hardware register. The chassis services every such read and skips a poll it can "
+                            "prove (poll_reads=%s here); if this one is not being skipped, the loop has a store or a call the "
+                            "prover rejects, or the value changes between reads." % counters.get("poll_reads", "?"))
+                else:
+                    what = ("It waits on plain RAM, so the chassis never sees the reads -- generated code does them inline "
+                            "and the poll-skip cannot fire. This is the shape Dolphin's own idle-skip (`IsBusyWaitLoop`) "
+                            "recognises: a self-loop of load, compare, branch with no store and no call, waiting for an "
+                            "interrupt handler to write the word. The fix is to recognise it in the recompiler's loop guard "
+                            "and hand the wait to the chassis so guest time advances to the next event, not to make the "
+                            "loop faster. `SelectThread`'s wait on the run-queue bits (r13-relative) is the SDK's idle; "
+                            "read tuning/README.md's dead ends first -- `PPCHalt` is a different loop and skipping it froze a title.")
+                leads.append("**%.0f%% of the hottest-24's block iterations%s are in one wait loop at `0x%08X`** in %s:\n"
+                             "  ```\n  %s\n  ```\n  %s" % (
+                                 share, " and %.0f%% of host samples" % host if host else "", head, desc,
+                                 "\n  ".join(body), what))
+            else:
+                leads.append("**One function has %.0f%% of the hottest-24's block iterations%s:** %s. Not a wait loop by shape; "
+                             "a decoder, a copy loop, or a kernel worth reading. The disassembly at the end is the whole chunk." % (
+                                 share, " and %.0f%% of host samples" % host if host else "", desc))
+    if int(counters.get("fallback", 0) or 0) > 0:
+        leads.append("**fallback=%s guest instructions ran on the interpreter** (with no fallback JIT, exactly what the phone "
+                     "would do). That is a hole in module coverage: find the range in the run log's `[staticrecomp]` lines "
+                     "(diagnose.log / tuned.log)." % counters["fallback"])
+    if int(counters.get("hook_fb", 0) or 0) > 0:
+        leads.append("**hook_fb=%s instructions handed back to the chassis by hooks.** On a phone each one is an interpreter step." % counters["hook_fb"])
+    smc = int(counters.get("smc_lost", 0) or 0)
+    if smc > 4096:
+        leads.append("**%d bytes of guest code lost to self-modification** (smc_failed=%s). At 64-instruction chunks the blast "
+                     "radius is a chunk; this is more than one, so something rewrites code past the SDK's one-word patch. %s" % (
+                         smc, counters.get("smc_failed", "?"), "; ".join(diag.get("smc", [])[:2])))
+    if cats.get("exact-fp/psq", 0) > 20:
+        leads.append("**%.0f%% of host time is in the exact floating-point helpers.** Generated code inlines the common cases; "
+                     "this title is hitting the exact paths (FPSCR, denormals, paired-single quantisation). Compare against the "
+                     "`by symbol` list in diagnose.log to see which." % cats["exact-fp/psq"])
+    if cats.get("chassis", 0) > 15:
+        leads.append("**%.0f%% of host time is in the chassis.** Dispatches and gate checks; the dispatch sites below say where the "
+                     "module keeps returning. Cross-chunk calls that resolve to the dispatcher are the usual cause." % cats["chassis"])
+    if cats.get("video", 0) > 30:
+        leads.append("**%.0f%% of host time is video even with the Null backend.** The CPU is not this title's wall; the renderer is. "
+                     "Nothing in the recompiler fixes that." % cats["video"])
+    if diag.get("faults"):
+        leads.append("**The bench scene faults (%d invalid guest accesses in 40 s).** Every number above is suspect: the guest may be "
+                     "dying and coasting. Re-pick the scene (`tunegame run --fresh`) before believing any of this." % diag["faults"])
+    stale = store.results["stages"]["tuned"].get("stale", 0)
+    if stale:
+        leads.append("**%d chunks were built without profile guidance** (stale records): the emitter changed between the "
+                     "instrumented and the guided build, or the run never reached them." % stale)
+    if not leads:
+        leads.append("Nothing stands out: the time is spread across generated code and no counter is out of line. "
+                     "If the phone still misses frame rate on this title, the renderer and audio are where the desktop cannot look.")
+    return leads
+
+
+def write_report(game: Game, store: Store, metadata: dict, record: bool):
+    res = store.results
+    diag = res["stages"]["diagnose"]
+    scene = res["stages"]["scene"]
+    boot = res["stages"]["boot-run"]
+    counters = diag.get("counters", {})
+    merged = store.path("profiles", "merged.profdata")
+    top = profile_top(merged, 24) if os.path.isfile(merged) else []
+    variants = {k[len("variant-"):]: v for k, v in res["stages"].items() if k.startswith("variant-")}
+    # Every measurement of the tuned module in this dive, so the headline is
+    # a median over several runs and the range says how much this machine
+    # moved between them.
+    tuned_runs = [diag["median_speed"]] + [x for v in variants.values() for x in v.get("ab", {}).get("a", [])]
+    tuned_runs = [x for x in tuned_runs if x > 0]
+    speed = statistics.median(tuned_runs) if tuned_runs else diag["median_speed"]
+    res["speed_tuned"] = speed
+    res["speed_range"] = [min(tuned_runs), max(tuned_runs)] if tuned_runs else [speed, speed]
+    generic = variants.get("generic", {}).get("ab")
+    plain = variants.get("plain", {}).get("ab")
+    leads = leads_for(game, store, top)
+    needs_attention = any(l.startswith("**") for l in leads) or (diag.get("faults") or 0) > 0
+    status = "needs-attention" if needs_attention else "ok"
+    res["status"] = status
+    store.save()
+
+    lines = []
+    lines.append("# %s (%s) — tuning report" % (game.name, game.disc_id))
+    lines.append("")
+    lines.append("Written %s by `tunegame` on this Mac, headless, phone-shaped (no fallback JIT, limiter off, Null video)." % now_iso())
+    lines.append("Recompiler %s; LLVM %s; codegen build `%s`; %d-instruction chunks." % (
+        res.get("recompiler_commit", "?"), metadata.get("llvm", "?"), metadata.get("build", "?"), res.get("chunk", DEFAULT_CHUNK)))
+    lines.append("")
+    lines.append("## Speed on the bench scene (median over 40 s, x real time on this Mac)")
+    lines.append("")
+    lines.append("| module | against tuned, by interleaved pairs | runs |")
+    lines.append("|---|---|---|")
+    lines.append("| **tuned** (scene-weighted profile) | **%.2fx** median of %d runs, %.2f-%.2fx | %s |" % (
+        speed, len(tuned_runs), res["speed_range"][0], res["speed_range"][1], "/".join("%.2f" % x for x in tuned_runs)))
+
+    def variant_row(name, label, v):
+        r = v.get("ab")
+        if not r:
+            return "| %s | skipped: %s | |" % (label, v.get("skipped", "?"))
+        ratio, agree = ab_verdict(r)
+        return "| %s%s | %+.1f%% (%s; pairs %s) | %s |" % (
+            label, " **adopted**" if v.get("adopted") else "", (ratio - 1) * 100,
+            "all pairs agree" if agree else "pairs disagree, so no verdict",
+            ", ".join("%.3f" % x for x in r["pair_ratios"]), "/".join("%.2f" % x for x in r["b"]))
+
+    if "generic" in variants:
+        lines.append(variant_row("generic", "generic (what `recompios send` collects alone)", variants["generic"]))
+    if "plain" in variants:
+        lines.append(variant_row("plain", "plain (no profile)", variants["plain"]))
+    for name, v in variants.items():
+        if name not in ("generic", "plain"):
+            lines.append(variant_row(name, name, v))
+    lines.append("")
+    lines.append("This machine's speed steps by up to a quarter between one run and the next (flat within a run), so only "
+                 "adjacent, interleaved pairs are compared and a difference counts only when every pair agrees on its sign.")
+    lines.append("")
+    lines.append("Status: **%s**. Boot run: %.1f guest minutes at %.2fx median with the instrumented module." % (
+        status, boot.get("guest_minutes", 0), boot.get("median_speed", 0)))
+    lines.append("")
+    lines.append("## The bench scene")
+    lines.append("")
+    lines.append("`%s`: the state written %.0f s into the boot run, where the speed around it was %.2fx, the slowest of %d "
+                 "candidates past the logos; re-benched clean at %.2fx (instrumented). The others tried:" % (
+                     store.scene, scene["chosen"]["t"], scene["chosen"]["around"], scene.get("candidates", 0), scene["chosen"]["bench"]))
+    lines.append("")
+    for e in scene["table"]:
+        lines.append("- t=%.0f s: %.2fx around it, %.2fx re-benched%s" % (e["t"], e["around"], e["bench"], "" if e["ok"] else " — " + e["why"]))
+    lines.append("")
+    lines.append("## Health (tuned module, 40 s from the scene)")
+    lines.append("")
+    lines.append("| counter | value | meaning |")
+    lines.append("|---|---|---|")
+    lines.append("| guest faults | %s | invalid reads/writes; must be 0 or the scene is dying |" % diag.get("faults", "?"))
+    lines.append("| fallback | %s | guest instructions the interpreter ran (phone: same) |" % counters.get("fallback", "?"))
+    lines.append("| hook_fb | %s | instructions hooks handed back |" % counters.get("hook_fb", "?"))
+    lines.append("| smc_lost | %s B in %s chunk(s) | guest code taken from the module after self-modification |" % (
+        counters.get("smc_lost", "?"), counters.get("smc_failed", "?")))
+    lines.append("| poll_reads / yields | %s / %s | polls the chassis proved and skipped |" % (
+        counters.get("poll_reads", "?"), counters.get("poll_yields", "?")))
+    lines.append("| vector_hle | %s | exception-vector stand-in hits |" % counters.get("vector_hle", "?"))
+    lines.append("| native dispatches | %s | module entries over %s guest cycles |" % (counters.get("native", "?"), counters.get("cycles", "?")))
+    lines.append("")
+    if diag.get("categories"):
+        lines.append("## Where host time goes (200 µs samples on the CPU thread, tuned module)")
+        lines.append("")
+        lines.append("| category | share |")
+        lines.append("|---|---|")
+        for cat, pct in sorted(diag["categories"].items(), key=lambda kv: -kv[1]):
+            lines.append("| %s | %.1f%% |" % (cat, pct))
+        lines.append("")
+        lines.append("Hottest symbols:")
+        lines.append("")
+        for sym, pct in diag.get("symbols", [])[:12]:
+            lines.append("- %.1f%% `%s`" % (pct, sym))
+        lines.append("")
+    if top:
+        lines.append("## Hottest guest functions (merged profile, LLVM block counts)")
+        lines.append("")
+        total = sum(c for _, c in top) or 1
+        lines.append("| chunk | share of top 24 | function |")
+        lines.append("|---|---|---|")
+        for addr, count in top[:16]:
+            lines.append("| `0x%08X` | %.1f%% | %s |" % (addr, 100.0 * count / total, game.dol_image.describe(addr)))
+        lines.append("")
+    if diag.get("dispatch_sites"):
+        lines.append("## Where the module returns to the chassis (every 4096th dispatch sampled)")
+        lines.append("")
+        for pc, n in diag["dispatch_sites"][:8]:
+            lines.append("- `0x%08X` ×%d — %s" % (pc, n, game.dol_image.describe(pc)))
+        lines.append("")
+    lines.append("## Leads")
+    lines.append("")
+    for lead in leads:
+        lines.append("- " + lead)
+    lines.append("")
+    if top:
+        lines.append("## Disassembly")
+        lines.append("")
+        lines.append("A chunk is %d instructions; `_budget` in a symbol is the same chunk's budget-carrying entry. "
+                     "The hottest chunk is shown whole, the next two by their first 24 instructions." % res.get("chunk", DEFAULT_CHUNK))
+        lines.append("")
+        for n, (addr, _) in enumerate(top[:3]):
+            lines.append("**%s**" % game.dol_image.describe(addr))
+            lines.append("")
+            lines.append("```")
+            lines.extend(game.dol_image.disassemble(addr, res.get("chunk", DEFAULT_CHUNK) if n == 0 else 24))
+            lines.append("```")
+            lines.append("")
+        if diag.get("dispatch_sites"):
+            pc = diag["dispatch_sites"][0][0]
+            lines.append("**Around the top dispatch site `0x%08X`** (where the module most often hands control back):" % pc)
+            lines.append("")
+            lines.append("```")
+            lines.extend(game.dol_image.disassemble(pc - 16, 12))
+            lines.append("```")
+            lines.append("")
+    if variants:
+        lines.append("## Variants tried")
+        lines.append("")
+        for name, v in variants.items():
+            if "ab" in v:
+                r = v["ab"]
+                ratio, agree = ab_verdict(r)
+                lines.append("- **%s** — %s. %+.1f%% by pairs (%s); pairs %s; tuned arm %s; variant arm %s%s" % (
+                    name, VARIANT_HELP.get(name, ""), (ratio - 1) * 100,
+                    "all agree" if agree else "disagree",
+                    ", ".join("%.3f" % x for x in r["pair_ratios"]),
+                    "/".join("%.3f" % x for x in r["a"]), "/".join("%.3f" % x for x in r["b"]),
+                    "; **adopted**" if v.get("adopted") else ""))
+            else:
+                lines.append("- **%s** — skipped: %s" % (name, v.get("skipped", "?")))
+        lines.append("")
+    lines.append("## Files")
+    lines.append("")
+    lines.append("- store: `%s` (scene.sav, modules/, profiles/, runs/, results.json)" % store.dir)
+    lines.append("- tuned module: `%s`" % os.path.join(store.path("modules", "tuned-c%d" % res.get("chunk", DEFAULT_CHUNK)), "module-build", "g%s_recomp.dylib" % game.disc_id))
+    lines.append("- to re-measure a change: `tunegame ab --disc-id %s --a tuned --b <your dylib>` (`tuned` is rebuilt from the store's profile if `clean` removed it)" % game.disc_id)
+    lines.append("- to build a variant: `tunegame build --disc-id %s --out <dir> --pgo scene [--chunk N] [--env K=V]`" % game.disc_id)
+    lines.append("")
+    text = "\n".join(lines)
+    open(store.path("report.md"), "w").write(text)
+    if record:
+        write_record(game, store, metadata, text)
+
+
+def write_record(game: Game, store: Store, metadata: dict, report_text: str):
+    """What the repository carries: settings for the phone build, the profile
+    compressed, and the report. Small enough to commit for a hundred titles."""
+    res = store.results
+    out = record_dir(game.disc_id)
+    os.makedirs(out, exist_ok=True)
+    merged = store.path("profiles", "merged.profdata")
+    profile_name = "profile.profdata.xz"
+    with open(merged, "rb") as src, lzma.open(os.path.join(out, profile_name), "wb", preset=9) as dst:
+        shutil.copyfileobj(src, dst)
+    diag = res["stages"]["diagnose"]
+    variants = {k[len("variant-"):]: v for k, v in res["stages"].items() if k.startswith("variant-")}
+    generic = variants.get("generic", {}).get("ab")
+    plain = variants.get("plain", {}).get("ab")
+    speed_range = res.get("speed_range", [0, 0])
+    conf = [
+        "# DolBundler tuning record for %s (%s). Written by DolBundler/src/tunegame;" % (game.disc_id, game.name),
+        "# read by recompios send. See DolBundler/tuning/README.md. KEY=VALUE, shell-safe.",
+        "TITLE=%s" % shlex.quote(game.name),
+        "TUNED_ON=%s" % now_iso(),
+        "TUNED_COMMIT=%s" % (git("rev-parse", "--short", "HEAD") or "unknown"),
+        "RECOMPILER_COMMIT=%s" % res.get("recompiler_commit", "unknown"),
+        "RECOMPILER_BUILD=%s" % metadata.get("build", "unknown"),
+        "RECOMPILER_LLVM=%s" % metadata.get("llvm", "unknown"),
+        "DOL_SHA256=%s" % game.dol_sha,
+        "LLVM_CHUNK_INSTRUCTIONS=%d" % res.get("chunk", DEFAULT_CHUNK),
+        "PROFILE=%s" % profile_name,
+        "PROFILE_SHA256=%s" % sha256_file(merged),
+        "PROFILE_STALE_CHUNKS=%d" % res["stages"]["tuned"].get("stale", 0),
+        "SCENE_T=%.0f" % res["stages"]["scene"]["chosen"]["t"],
+        "SPEED_TUNED=%.2f" % res.get("speed_tuned", diag["median_speed"]),
+        "SPEED_RANGE=%.2f-%.2f" % (speed_range[0], speed_range[1]),
+        "# variant against tuned by interleaved pairs; a trailing ? means the pairs disagreed on the sign",
+        "GENERIC_VS_TUNED=%s" % (percent(generic) if generic else ""),
+        "PLAIN_VS_TUNED=%s" % (percent(plain) if plain else ""),
+        "FAULTS=%d" % (diag.get("faults") or 0),
+        "STATUS=%s" % res.get("status", "ok"),
+        "LEVEL=%d" % (2 if variants else 1),
+    ]
+    open(os.path.join(out, "tuning.conf"), "w").write("\n".join(conf) + "\n")
+    open(os.path.join(out, "report.md"), "w").write(report_text)
+    log("record written to %s (%s)" % (out, human_size(out)))
+
+
+# --- the library at a glance -----------------------------------------------
+
+
+def status_rows() -> list:
+    rows = []
+    current = recompiler_commit()
+    for disc_id, name, root in library_games():
+        rec = read_record(disc_id)
+        store_results = {}
+        p = os.path.join(STORE_ROOT, disc_id, "results.json")
+        if os.path.isfile(p):
+            try:
+                store_results = json.load(open(p))
+            except Exception:
+                pass
+        dol_sha = sha256_file(os.path.join(root, "sys", "main.dol"))
+        state = "untuned"
+        if rec:
+            if rec.get("DOL_SHA256") != dol_sha:
+                state = "stale (DOL changed)"
+            elif rec.get("RECOMPILER_COMMIT") != current:
+                state = "stale (recompiler %s, now %s)" % (rec.get("RECOMPILER_COMMIT"), current)
+            else:
+                state = rec.get("STATUS", "ok")
+        rows.append(dict(disc_id=disc_id, name=name, state=state, speed=rec.get("SPEED_TUNED", ""),
+                         generic=rec.get("GENERIC_VS_TUNED", ""), plain=rec.get("PLAIN_VS_TUNED", ""),
+                         tuned_on=rec.get("TUNED_ON", ""), level=rec.get("LEVEL", ""),
+                         minutes=store_results.get("minutes", "")))
+    return rows
+
+
+def write_summary(rows: list):
+    os.makedirs(RECORD_ROOT, exist_ok=True)
+    lines = ["# Tuning summary", "",
+             "Rewritten by `tunegame all` / `tunegame status` on %s. Speeds are x real time on the tuning Mac, "
+             "phone-shaped, on each title's own bench scene; they compare a title with itself across builds, not titles "
+             "with each other. See README.md in this directory." % now_iso(), "",
+             "| game | id | status | tuned | generic vs tuned | plain vs tuned | level | tuned on |", "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            r["name"], r["disc_id"], r["state"], r["speed"] and r["speed"] + "x", r["generic"],
+            r["plain"], r["level"], r["tuned_on"][:10]))
+    open(os.path.join(RECORD_ROOT, "SUMMARY.md"), "w").write("\n".join(lines) + "\n")
+
+
+def print_status(rows: list):
+    width = max([len(r["name"]) for r in rows] + [4])
+    print("%-*s  %-7s  %-7s  %-9s  %-9s  %s" % (width, "game", "id", "tuned", "generic", "plain", "status"))
+    for r in rows:
+        print("%-*s  %-7s  %-7s  %-9s  %-9s  %s" % (
+            width, r["name"], r["disc_id"], r["speed"] and r["speed"] + "x", r["generic"], r["plain"], r["state"]))
+
+
+# --- the overnight loop ----------------------------------------------------
+
+
+def run_agent(disc_id: str, minutes: float):
+    claude = shutil.which("claude")
+    if not claude:
+        log("no `claude` on PATH; skipping the agent pass for %s" % disc_id)
+        return
+    extra = shlex.split(os.environ.get("TUNEGAME_CLAUDE_ARGS", "--permission-mode acceptEdits"))
+    prompt = "/tune-games %s" % disc_id
+    log("agent pass on %s (up to %.0f min): claude -p %s" % (disc_id, minutes, shlex.quote(prompt)))
+    log_path = os.path.join(STORE_ROOT, disc_id, "runs", "agent-%s.log" % _dt.datetime.now().strftime("%Y%m%d-%H%M"))
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "w") as f:
+        proc = subprocess.Popen([claude, "-p", prompt] + extra, cwd=REPO_ROOT, stdin=subprocess.DEVNULL,
+                                stdout=f, stderr=subprocess.STDOUT)
+        try:
+            proc.wait(timeout=minutes * 60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            f.write("\n[tunegame] agent pass stopped at %.0f minutes\n" % minutes)
+    log("  agent log: " + log_path)
+
+
+def tune_all(args):
+    games = library_games()
+    if not games:
+        die("the library has no game with an extracted disc; add one in DolBundler first")
+    rows = {r["disc_id"]: r for r in status_rows()}
+
+    def priority(g):
+        r = rows[g[0]]
+        state = r["state"]
+        try:
+            speed = float(r["speed"] or 0)
+        except ValueError:
+            speed = 0.0
+        return (0 if state == "untuned" else 1 if state.startswith("stale") else 2, speed)
+
+    queue = sorted(games, key=priority)
+    if args.only_untuned:
+        queue = [g for g in queue if rows[g[0]]["state"] == "untuned" or rows[g[0]]["state"].startswith("stale")]
+    deadline = time.monotonic() + args.hours * 3600 if args.hours else None
+    print("tuning %d game(s), level %d, %.0f min each%s" % (
+        len(queue), args.level, args.budget_minutes, ", for %.1f h" % args.hours if args.hours else ""))
+    for disc_id, name, root in queue:
+        if deadline and time.monotonic() > deadline:
+            print("out of time before %s" % name)
+            break
+        try:
+            speed = float(rows[disc_id]["speed"] or 0)
+        except ValueError:
+            speed = 0.0
+        level = args.level
+        if level >= 2 and rows[disc_id]["state"] == "ok" and speed >= args.target_speed:
+            level = 1
+        game = Game(disc_id, name, root)
+        try:
+            results = deep_dive(game, level, args.budget_minutes, args.play_seconds,
+                                args.variants.split(","), args.fresh, not args.no_record, "", args.ignore_running)
+        except SystemExit:
+            print("  %s failed; moving on (see the store's tunegame.log)" % name)
+            continue
+        except Exception as e:  # noqa: BLE001 - an overnight loop must not stop on one title
+            print("  %s failed: %s; moving on" % (name, e))
+            continue
+        if args.agent and results.get("status") == "needs-attention":
+            run_agent(disc_id, args.agent_minutes)
+        if not args.keep_modules:
+            clean_store(Store(disc_id), keep_tuned=False)
+        rows = {r["disc_id"]: r for r in status_rows()}
+        write_summary(list(rows.values()))
+    write_summary(status_rows())
+    print("summary at " + os.path.join(RECORD_ROOT, "SUMMARY.md"))
+
+
+# --- command line ----------------------------------------------------------
+
+
+def env_pairs(items: list) -> dict:
+    out = {}
+    for item in items or []:
+        if "=" not in item:
+            die("--env takes KEY=VALUE, not %r" % item)
+        k, v = item.split("=", 1)
+        out[k] = v
+    return out
+
+
+def one_game(disc_id: str) -> Game:
+    games = library_games([disc_id])
+    if not games:
+        die("%s is not in the library, or its extracted disc is gone; add it in DolBundler (or `tunegame add --iso`)" % disc_id)
+    return Game(*games[0])
+
+
+def main(argv: list):
+    ap = argparse.ArgumentParser(prog="tunegame", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command")
+
+    p_run = sub.add_parser("run", help="deep dive on one title")
+    p_run.add_argument("--disc-id", required=True)
+    p_run.add_argument("--level", type=int, default=2, choices=(1, 2))
+    p_run.add_argument("--budget-minutes", type=float, default=45)
+    p_run.add_argument("--play-seconds", type=int, default=300)
+    p_run.add_argument("--variants", default="generic,plain,chunk128,chunk32")
+    p_run.add_argument("--route", default="", help="a play.txt timeline instead of the button masher")
+    p_run.add_argument("--fresh", action="store_true", help="forget every completed stage")
+    p_run.add_argument("--no-record", action="store_true", help="do not write DolBundler/tuning/<ID>")
+    p_run.add_argument("--ignore-running", action="store_true")
+
+    p_all = sub.add_parser("all", help="every library game, overnight")
+    p_all.add_argument("--level", type=int, default=2, choices=(1, 2))
+    p_all.add_argument("--budget-minutes", type=float, default=45)
+    p_all.add_argument("--play-seconds", type=int, default=300)
+    p_all.add_argument("--variants", default="generic,plain,chunk128,chunk32")
+    p_all.add_argument("--hours", type=float, default=0, help="stop starting new titles after this long")
+    p_all.add_argument("--only-untuned", action="store_true")
+    p_all.add_argument("--target-speed", type=float, default=1.5,
+                       help="a title already at this speed (x real time here) gets level 1 only")
+    p_all.add_argument("--agent", action="store_true", help="run `claude -p /tune-games <ID>` after a title that needs attention")
+    p_all.add_argument("--agent-minutes", type=float, default=40)
+    p_all.add_argument("--fresh", action="store_true")
+    p_all.add_argument("--no-record", action="store_true")
+    p_all.add_argument("--ignore-running", action="store_true")
+    p_all.add_argument("--keep-modules", action="store_true",
+                       help="leave each title's tuned module in the store (about 170 MB a title)")
+
+    sub.add_parser("status", help="the library: tuned, stale, untuned")
+
+    p_rep = sub.add_parser("report", help="print a title's report")
+    p_rep.add_argument("--disc-id", required=True)
+
+    p_bench = sub.add_parser("bench", help="one phone-shaped measurement")
+    p_bench.add_argument("--disc-id", required=True)
+    p_bench.add_argument("--module", required=True)
+    p_bench.add_argument("--state", default="", help="default: the title's bench scene")
+    p_bench.add_argument("--seconds", type=int, default=BENCH_SECONDS)
+    p_bench.add_argument("--env", action="append", default=[])
+    p_bench.add_argument("--ignore-running", action="store_true")
+
+    p_ab = sub.add_parser("ab", help="interleaved A/B of two modules on the bench scene")
+    p_ab.add_argument("--disc-id", required=True)
+    p_ab.add_argument("--a", required=True)
+    p_ab.add_argument("--b", required=True)
+    p_ab.add_argument("--state", default="")
+    p_ab.add_argument("--pairs", type=int, default=3)
+    p_ab.add_argument("--seconds", type=int, default=BENCH_SECONDS)
+    p_ab.add_argument("--env", action="append", default=[], help="runtime environment for both arms")
+    p_ab.add_argument("--ignore-running", action="store_true")
+
+    p_build = sub.add_parser("build", help="build a Mac module variant")
+    p_build.add_argument("--disc-id", required=True)
+    p_build.add_argument("--out", required=True)
+    p_build.add_argument("--chunk", type=int, default=0)
+    p_build.add_argument("--pgo", default="scene", help="none | gen | scene (the store's merged profile) | <.profdata>")
+    p_build.add_argument("--env", action="append", default=[], help="recompiler environment, e.g. DOLRECOMP_NO_DATA_SECTIONS=1")
+    p_build.add_argument("--keep-objects", action="store_true")
+
+    p_add = sub.add_parser("add", help="add disc images to the library through recompgc")
+    p_add.add_argument("--iso", action="append", required=True)
+
+    p_clean = sub.add_parser("clean", help="drop a title's modules and raw counters from the store")
+    p_clean.add_argument("--disc-id", action="append", default=[], help="default: every title in the store")
+    p_clean.add_argument("--keep-tuned", action="store_true", help="keep the tuned module for `ab`")
+
+    args = ap.parse_args(argv)
+    if not args.command:
+        ap.print_help()
+        return 2
+
+    if args.command == "run":
+        game = one_game(args.disc_id)
+        deep_dive(game, args.level, args.budget_minutes, args.play_seconds, args.variants.split(","),
+                  args.fresh, not args.no_record, args.route, args.ignore_running)
+        write_summary(status_rows())
+        return 0
+
+    if args.command == "all":
+        tune_all(args)
+        return 0
+
+    if args.command == "status":
+        rows = status_rows()
+        print_status(rows)
+        write_summary(rows)
+        return 0
+
+    if args.command == "report":
+        for path in (os.path.join(record_dir(args.disc_id), "report.md"), os.path.join(STORE_ROOT, args.disc_id, "report.md")):
+            if os.path.isfile(path):
+                sys.stdout.write(open(path).read())
+                return 0
+        die("no report for %s yet; run `tunegame run --disc-id %s`" % (args.disc_id, args.disc_id))
+
+    if args.command in ("bench", "ab"):
+        game = one_game(args.disc_id)
+        store = Store(game.disc_id)
+        refuse_if_busy(args.ignore_running)
+        state = args.state or store.scene
+        if not os.path.isfile(state):
+            die("no bench scene at %s; run the deep dive first or pass --state" % state)
+        env = env_pairs(args.env)
+        if args.command == "bench":
+            r = bench(game.disc_id, game.root, resolve_module(game, store, args.module), state,
+                      store.path("runs", "bench-%s.log" % _dt.datetime.now().strftime("%H%M%S")),
+                      seconds=args.seconds, env=env)
+            ok, why = r.healthy()
+            print("%.3fx median over %d samples (%s)%s" % (r.median_speed(), len(r.steady()),
+                                                            "clean" if ok else why, "" if ok else " -- do not trust"))
+            print("counters: " + " ".join("%s=%s" % kv for kv in r.counters.items()))
+            print("log: " + r.log_path)
+            return 0 if ok else 1
+        result = ab(game.disc_id, game.root, resolve_module(game, store, args.a),
+                    resolve_module(game, store, args.b), state, store.path("runs"), "A", "B",
+                    pairs=args.pairs, seconds=args.seconds, env=env)
+        print("B/A %+.1f%% by pairs (%s)  pairs %s  A %s  B %s" % (
+            (result["ratio"] - 1) * 100,
+            "ALL PAIRS AGREE" if result.get("agree") else "PAIRS DISAGREE - not a result",
+            ", ".join("%.3f" % x for x in result["pair_ratios"]),
+            "/".join("%.3f" % x for x in result["a"]), "/".join("%.3f" % x for x in result["b"])))
+        return 0
+
+    if args.command == "build":
+        game = one_game(args.disc_id)
+        ensure_tools()
+        store = Store(game.disc_id)
+        pgo = args.pgo
+        if pgo == "none":
+            pgo = ""
+        elif pgo == "scene":
+            pgo = store.path("profiles", "merged.profdata")
+            if not os.path.isfile(pgo):
+                die("no merged profile in the store yet; run the deep dive first, or --pgo none")
+        elif pgo != "gen" and not os.path.isfile(pgo):
+            die("no profile at " + pgo)
+        b = build_module(game.disc_id, game.dol, args.out, pgo=pgo, chunk=args.chunk,
+                         extra_env=env_pairs(args.env), keep_objects=args.keep_objects)
+        print("%s  (%d chunks, %d stale, %.0f s)" % (b.dylib, b.chunks, b.stale, b.seconds))
+        return 0
+
+    if args.command == "clean":
+        ids = args.disc_id or (sorted(os.listdir(STORE_ROOT)) if os.path.isdir(STORE_ROOT) else [])
+        for disc_id in ids:
+            if os.path.isfile(os.path.join(STORE_ROOT, disc_id, "results.json")):
+                clean_store(Store(disc_id), args.keep_tuned)
+        return 0
+
+    if args.command == "add":
+        recompgc = recompgc_path()
+        if not recompgc:
+            die("recompgc with a toolchain.conf is needed; build the app once (DolBundler/build.sh)")
+        for iso in args.iso:
+            print("adding " + iso)
+            p = subprocess.run([recompgc, "--porcelain", iso], capture_output=True, text=True)
+            ids = re.findall(r"^@@info disc_id=(\S+)", p.stdout, re.M)
+            if p.returncode != 0 or not ids:
+                print(p.stdout[-800:])
+                die("recompgc failed on " + iso)
+            print("  %s is in the library" % ids[-1])
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

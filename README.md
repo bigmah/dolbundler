@@ -29,6 +29,11 @@ has to be inside the signature before the app is installed. See
 [On an iPhone](DolBundler/README.md#on-an-iphone), and
 [`ios/README.md`](ios/README.md) for what the phone app is.
 
+Every game is profiled on the Mac before it is compiled for the phone; a title
+that has had a deeper look carries its result in the repository under
+[`DolBundler/tuning/`](DolBundler/tuning/README.md), and the next send of it,
+on any Mac, starts from there.
+
 DolBundler is the glue layer. The heavy lifting is done by two projects it
 drives, both vendored directly into this repo:
 

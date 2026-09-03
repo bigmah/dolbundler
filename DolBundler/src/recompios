@@ -44,6 +44,15 @@
 # re-collects one for a game that is already in the store, for a longer run
 # (--profile-seconds) or after a recompiler change.
 #
+# A title the developer has taken further has a record in the repository,
+# DolBundler/tuning/<ID>/ (written by DolBundler/src/tunegame): the profile
+# from a deep dive that found the title's heaviest scene and played it, plus
+# the recompiler settings that measured best for it. A send starts from that
+# instead of the four-minute generic collection, and says so; the settings
+# apply to `profile` too. If the recompiler has since changed enough that the
+# committed profile no longer describes what it emits, the send says that and
+# falls back to collecting its own.
+#
 # Games come from the same library.json the window shows, so a disc has to be
 # added on the Mac first. With no --disc-id, every game in it that still has
 # its extracted disc is sent.
@@ -161,6 +170,8 @@ IOS_DIR="$SUPPORT_DIR/iphone"
 MODULES_DIR="$IOS_DIR/modules"
 DEVICES_DIR="$IOS_DIR/devices"
 LLVM_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/Library/Caches}/DolBundler/iphone-llvm"
+# The per-title records the repository carries; see DolBundler/tuning/README.md.
+TUNING_ROOT="$REPO_ROOT/DolBundler/tuning"
 
 # The deployment target, the triple and the CPU have to agree with what the app
 # itself is built with: ios/build.sh passes 17.0, and ModernGekko compiles
@@ -403,9 +414,53 @@ ensure_recompiler() {
 
 # What a built module was built from. A module is reused only when the DOL, the
 # triple and the CPU all still match; anything else and the objects would be
-# linked against a runtime that no longer agrees with them.
-module_stamp() {
-  printf '%s %s %s\n' "$(shasum -a 256 "$1" | cut -d' ' -f1)" "$LLVM_TARGET" "$LLVM_CPU"
+# linked against a runtime that no longer agrees with them. A title with a
+# tuning record carries the record's identity too, so a re-tuned title is
+# rebuilt on its next send rather than left on the older profile.
+module_stamp() {  # <dol> [disc id]
+  local tuning=''
+  if [ -n "${2-}" ] && [ -f "$TUNING_ROOT/$2/tuning.conf" ]; then
+    tuning=" tuning=$(cat "$TUNING_ROOT/$2/tuning.conf" "$TUNING_ROOT/$2"/profile.profdata.xz 2>/dev/null \
+      | shasum -a 256 | cut -c1-16)"
+  fi
+  printf '%s %s %s%s\n' "$(shasum -a 256 "$1" | cut -d' ' -f1)" "$LLVM_TARGET" "$LLVM_CPU" "$tuning"
+}
+
+# --- the tuning record --------------------------------------------------------
+
+# Read with a whitelist rather than sourced: the file is data, and the only
+# keys that change a build are the two below. Everything else in it is what the
+# dive measured, for people. Sets the TUNING_* globals; false when there is no
+# record for the title.
+TUNING_CHUNK=''; TUNING_PROFILE=''; TUNING_ON=''; TUNING_SPEED=''
+# Past this share of chunks the emitter no longer produces what the profile
+# describes, and a fresh generic profile is the better module.
+TUNING_STALE_MAX=10
+read_tuning_record() {  # <disc id>
+  local dir="$TUNING_ROOT/$1" key value
+  TUNING_CHUNK=''; TUNING_PROFILE=''; TUNING_ON=''; TUNING_SPEED=''
+  [ -f "$dir/tuning.conf" ] || return 1
+  while IFS='=' read -r key value; do
+    case "$key" in
+      LLVM_CHUNK_INSTRUCTIONS) TUNING_CHUNK="$value" ;;
+      PROFILE)                 TUNING_PROFILE="$dir/$value" ;;
+      TUNED_ON)                TUNING_ON="$value" ;;
+      SPEED_TUNED)             TUNING_SPEED="$value" ;;
+    esac
+  done < <(grep -E '^[A-Z_]+=' "$dir/tuning.conf")
+  case "$TUNING_CHUNK" in ''|*[!0-9]*) TUNING_CHUNK='' ;; esac
+  [ -n "$TUNING_PROFILE" ] && [ ! -f "$TUNING_PROFILE" ] && TUNING_PROFILE=''
+  return 0
+}
+
+# The committed profile is xz-compressed -- a few hundred kilobytes against
+# tens of megabytes raw. Python's lzma is on every Mac; xz is not.
+expand_tuning_profile() {  # <.xz> <out>
+  /usr/bin/python3 - "$1" "$2" <<'PYLZMA'
+import lzma, shutil, sys
+with lzma.open(sys.argv[1], "rb") as src, open(sys.argv[2], "wb") as dst:
+    shutil.copyfileobj(src, dst)
+PYLZMA
 }
 
 # Whether a module was generated against a profile. Read from the module's own
@@ -612,6 +667,7 @@ collect_profile() {  # <disc id> <name> <game root> <module dir being built>
   DOLRECOMP_LLVM_CACHE="$LLVM_CACHE_DIR/$disc_id-profile" \
   DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
   DOLRECOMP_LLVM_PGO=gen \
+  DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS="$TUNING_CHUNK" \
     "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$work/instrumented" \
       </dev/null >"$work/instrumented.log" 2>&1
   if [ $? -ne 0 ] || [ ! -f "$instrumented/generated.h" ]; then
@@ -728,6 +784,61 @@ steps_per_game() { [ "$PROFILE" -eq 1 ] && echo 2 || echo 1; }
 # alone. Kept apart from --force, which also rebuilds the recompiler.
 REBUILD=0
 
+# The phone recompile itself, once the profile question is settled. Leaves the
+# number of chunks it built and how many of them the profile did not describe
+# for the caller to judge.
+STALE_CHUNKS=0; BUILT_CHUNKS=0
+phone_recompile() {  # <disc id> <name> <dol> <module dir being built>
+  local disc_id="$1" name="$2" dol="$3" out="$4"
+  local generated="$out/generated"
+  if [ -n "$PROFILE_DATA" ]; then
+    note "PowerPC -> DolIR -> arm64 iPhone objects, profile-guided, across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
+  else
+    note "PowerPC -> DolIR -> arm64 iPhone objects across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
+  fi
+
+  # Every game in the app exports the same handful of module symbols, so each
+  # one needs its own C-identifier prefix or the second to be linked collides
+  # with the first. With a profile, the emitter is told to warn rather than
+  # stop on a function the profile does not describe: the module is still
+  # correct, that function is merely built as it would have been anyway, and
+  # how many there were is reported below. The chunk size comes from the
+  # title's tuning record when it has one, and the profile was gathered at
+  # the same size -- a profile is keyed per function and a function is a
+  # chunk, so the two have to agree.
+  # No object cache for a guided build: the cache key folds in the profile's
+  # hash, so those objects are never reused and were piling up at 400 MB a
+  # title per profile. A plain build still caches.
+  DOLRECOMP_LLVM_TARGET="$LLVM_TARGET" \
+  DOLRECOMP_LLVM_CPU="$LLVM_CPU" \
+  DOLRECOMP_LLVM_CACHE="${PROFILE_DATA:+off}${PROFILE_DATA:-$LLVM_CACHE_DIR/$disc_id}" \
+  DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
+  DOLRECOMP_LLVM_PGO="${PROFILE_DATA:+use}" \
+  DOLRECOMP_LLVM_PROFILE="$PROFILE_DATA" \
+  DOLRECOMP_LLVM_PGO_STALE=warn \
+  DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS="$TUNING_CHUNK" \
+    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$out" \
+      </dev/null 2>&1 | tee "$out/recompile.log" | strip_colour
+  if [ "${PIPESTATUS[0]}" -ne 0 ] || [ ! -f "$generated/generated.h" ]; then
+    rm -rf "$out"
+    die "recompiling $name for iPhone failed (see the log above)"
+  fi
+
+  STALE_CHUNKS=0; BUILT_CHUNKS=0
+  if [ -n "$PROFILE_DATA" ]; then
+    STALE_CHUNKS="$(grep -c 'PGO profile stale' "$out/recompile.log" || true)"
+    BUILT_CHUNKS="$(sed -n 's/.*objects: .*(\([0-9]*\) files).*/\1/p' "$out/recompile.log" | tail -1)"
+    : "${BUILT_CHUNKS:=0}"
+    if ! module_is_profiled "$out"; then
+      note "warning: the module does not record the profile it was built with; check $out/recompile.log"
+    elif [ "$STALE_CHUNKS" -gt 0 ]; then
+      note "warning: $STALE_CHUNKS chunk(s) had functions the profile did not describe and were built unguided; see $out/recompile.log"
+    else
+      ok "every generated function matched the profile"
+    fi
+  fi
+}
+
 recompile_game() {  # <disc id> <name> <game root> <first step index> <total steps>
   local disc_id="$1" name="$2" root="$3" index="$4" total="$5"
   local final="$MODULES_DIR/$disc_id"
@@ -738,7 +849,7 @@ recompile_game() {  # <disc id> <name> <game root> <first step index> <total ste
   local out="$MODULES_DIR/$disc_id.building"
   local generated="$out/generated"
   local dol="$root/sys/main.dol"
-  local want; want="$(module_stamp "$dol")"
+  local want; want="$(module_stamp "$dol" "$disc_id")"
 
   if [ "$PROFILE" -eq 1 ]; then
     step "$index" "$total" "Profiling $name on this Mac"
@@ -769,46 +880,43 @@ recompile_game() {  # <disc id> <name> <game root> <first step index> <total ste
   mkdir -p "$out" "$LLVM_CACHE_DIR/$disc_id"
 
   PROFILE_DATA=''
-  if [ "$PROFILE" -eq 1 ]; then
+  local tuned=0
+  read_tuning_record "$disc_id" || true
+  if [ "$PROFILE" -eq 1 ] && [ "$REBUILD" -eq 0 ] && [ -n "$TUNING_PROFILE" ]; then
+    # The developer's deep dive on this title: its profile was gathered on the
+    # scene that measured heaviest and then played, not on whatever the
+    # button-masher reached, and it is what the record's speed was measured
+    # with. `profile --disc-id` still collects afresh, for the developer
+    # checking the generic path or training on a longer run.
+    note "using the profile tuned on ${TUNING_ON%%T*}${TUNING_SPEED:+ (${TUNING_SPEED}x on the tuning Mac)}${TUNING_CHUNK:+, $TUNING_CHUNK-instruction chunks}; DolBundler/tuning/$disc_id"
+    if expand_tuning_profile "$TUNING_PROFILE" "$out/profile.profdata"; then
+      PROFILE_DATA="$out/profile.profdata"
+      tuned=1
+      cp -f "$TUNING_ROOT/$disc_id/report.md" "$out/tuning-report.md" 2>/dev/null
+    else
+      note "could not expand the tuned profile; collecting one instead"
+      collect_profile "$disc_id" "$name" "$root" "$out" || rm -rf "$out/profile-work"
+    fi
+    step $((index + 1)) "$total" "Recompiling $name for iPhone"
+  elif [ "$PROFILE" -eq 1 ]; then
+    [ -n "$TUNING_CHUNK" ] && note "$TUNING_CHUNK-instruction chunks, from DolBundler/tuning/$disc_id"
     collect_profile "$disc_id" "$name" "$root" "$out" || rm -rf "$out/profile-work"
     step $((index + 1)) "$total" "Recompiling $name for iPhone"
   fi
 
-  if [ -n "$PROFILE_DATA" ]; then
-    note "PowerPC -> DolIR -> arm64 iPhone objects, profile-guided, across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
-  else
-    note "PowerPC -> DolIR -> arm64 iPhone objects across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
-  fi
-
-  # Every game in the app exports the same handful of module symbols, so each
-  # one needs its own C-identifier prefix or the second to be linked collides
-  # with the first. With a profile, the emitter is told to warn rather than
-  # stop on a function the profile does not describe: the module is still
-  # correct, that function is merely built as it would have been anyway, and
-  # how many there were is reported below.
-  DOLRECOMP_LLVM_TARGET="$LLVM_TARGET" \
-  DOLRECOMP_LLVM_CPU="$LLVM_CPU" \
-  DOLRECOMP_LLVM_CACHE="$LLVM_CACHE_DIR/$disc_id" \
-  DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
-  DOLRECOMP_LLVM_PGO="${PROFILE_DATA:+use}" \
-  DOLRECOMP_LLVM_PROFILE="$PROFILE_DATA" \
-  DOLRECOMP_LLVM_PGO_STALE=warn \
-    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$out" \
-      </dev/null 2>&1 | tee "$out/recompile.log" | strip_colour
-  if [ "${PIPESTATUS[0]}" -ne 0 ] || [ ! -f "$generated/generated.h" ]; then
-    rm -rf "$out"
-    die "recompiling $name for iPhone failed (see the log above)"
-  fi
-
-  if [ -n "$PROFILE_DATA" ]; then
-    local stale; stale="$(grep -c 'PGO profile stale' "$out/recompile.log" || true)"
-    if ! module_is_profiled "$out"; then
-      note "warning: the module does not record the profile it was built with; check $out/recompile.log"
-    elif [ "$stale" -gt 0 ]; then
-      note "warning: $stale chunk(s) had functions the profile did not describe and were built unguided; see $out/recompile.log"
-    else
-      ok "every generated function matched the profile"
-    fi
+  phone_recompile "$disc_id" "$name" "$dol" "$out"
+  if [ "$tuned" -eq 1 ] && [ "$STALE_CHUNKS" -gt 0 ] \
+     && [ $((STALE_CHUNKS * 100)) -gt $((BUILT_CHUNKS * TUNING_STALE_MAX)) ]; then
+    # The recompiler has changed enough since the dive that its profile
+    # describes functions the emitter no longer produces. A stale function is
+    # merely built unguided, which is the plain build; past a tenth of the
+    # game that is not the tuned build either, so a fresh generic profile is
+    # the better module until the title is tuned again.
+    note "the tuned profile no longer matches this recompiler ($STALE_CHUNKS of $BUILT_CHUNKS chunks stale); collecting a fresh one. Run tunegame on $disc_id to re-tune it."
+    PROFILE_DATA=''
+    collect_profile "$disc_id" "$name" "$root" "$out" || rm -rf "$out/profile-work"
+    rm -rf "$generated"
+    phone_recompile "$disc_id" "$name" "$dol" "$out"
   fi
 
   # module-template validates the module against the DOL it came from, so the

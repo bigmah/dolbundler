@@ -25,6 +25,10 @@
 #include "Core/Config/ConfigManager.h"
 #include "Core/HW/SystemTimers.h"
 
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -218,6 +222,29 @@ void StaticRecompNativeSamplerStopAndReport()
 
 void StaticRecompCore::Run()
 {
+#ifdef __APPLE__
+  // STATICRECOMP_CPU_QOS=interactive|initiated: the QoS class of the thread the
+  // guest runs on. Added to test whether macOS parking a default-QoS thread on
+  // an efficiency core explains why a headless bench reads 2.8x one minute
+  // and 3.5x the next on the same module and savestate (flat within a run,
+  // bimodal across runs, M4 Pro). It does not: four alternating pairs at
+  // `interactive` against the default measured the same two levels either
+  // way. Kept for the next hypothesis; nothing sets it by default.
+  if (const char* qos = std::getenv("STATICRECOMP_CPU_QOS"))
+  {
+    qos_class_t wanted = QOS_CLASS_UNSPECIFIED;
+    if (std::strcmp(qos, "interactive") == 0)
+      wanted = QOS_CLASS_USER_INTERACTIVE;
+    else if (std::strcmp(qos, "initiated") == 0)
+      wanted = QOS_CLASS_USER_INITIATED;
+    if (wanted != QOS_CLASS_UNSPECIFIED)
+    {
+      const int rc = pthread_set_qos_class_self_np(wanted, 0);
+      std::fprintf(stderr, "[staticrecomp] cpu thread qos=%s (%s)\n", qos,
+                   rc == 0 ? "set" : "refused");
+    }
+  }
+#endif
   auto& core_timing = m_system.GetCoreTiming();
   auto& power_pc = m_system.GetPowerPC();
   auto& ppc = power_pc.GetPPCState();

@@ -59,6 +59,12 @@ recompiler counts any that do not and `send` says so. What the run saw is in
 --no-profile` skips it; `profile --disc-id X --profile-seconds 600` collects a
 longer one and rebuilds the module.
 
+A title with a tuning record in the repository (`DolBundler/tuning/<ID>/`,
+made by `DolBundler/src/tunegame`) skips the collection and builds against the
+committed profile and settings instead -- a profile from the title's heaviest
+scene rather than from whatever the scripted play reached. See
+[`DolBundler/tuning/README.md`](../DolBundler/tuning/README.md).
+
 The rest of this section is the same thing by hand, which is what you want when
 you are changing the recompiler, tuning a target, or training a profile on a
 scene the scripted play-through does not reach. A module built that way is

@@ -149,6 +149,7 @@ mkdir -p "$MACOS" "$RES"
 install -m 755 "$GUI_BIN" "$MACOS/DolBundler"
 install -m 755 "$HERE/src/recompgc" "$RES/recompgc"
 install -m 755 "$HERE/src/recompios" "$RES/recompios"
+install -m 755 "$HERE/src/tunegame" "$RES/tunegame"
 install -m 644 "$HERE/src/make_game_app.py" "$RES/make_game_app.py"
 python3 "$HERE/src/make_app_icon.py" --out "$RES/icon.icns" >/dev/null
 

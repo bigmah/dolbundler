@@ -476,6 +476,66 @@ RuntimeRunResult Runtime::Run() {
       }
     }
   }
+  // MODERNGEKKO_SAVE_STATE_EVERY=<seconds>:<dir>: a numbered state every so
+  // many wall seconds, so one scripted play-through leaves a reloadable scene
+  // at every point along it. The tuner (DolBundler/src/tunegame) plays a
+  // title once and picks the heaviest of these afterwards, which is how the
+  // scene a bench measures gets chosen by measurement rather than by whatever
+  // the attract loop happened to be showing.
+  const auto run_started = std::chrono::steady_clock::now();
+  const auto elapsed_seconds = [run_started] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         run_started)
+        .count();
+  };
+  std::jthread periodic_state_thread;
+  if (const char* every = std::getenv("MODERNGEKKO_SAVE_STATE_EVERY")) {
+    const std::string spec(every);
+    const size_t colon = spec.find(':');
+    if (colon != std::string::npos) {
+      const int period = std::atoi(spec.substr(0, colon).c_str());
+      std::string dir = spec.substr(colon + 1);
+      if (period > 0 && !dir.empty()) {
+        periodic_state_thread = std::jthread(
+            [period, dir = std::move(dir), elapsed_seconds](std::stop_token stop) {
+              for (int index = 1; !stop.stop_requested(); ++index) {
+                for (int i = 0; i < period * 10 && !stop.stop_requested(); ++i)
+                  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (stop.stop_requested())
+                  return;
+                const std::string path =
+                    fmt::format("{}/state-{:04d}.sav", dir, index);
+                State::SaveAs(Core::System::GetInstance(), path);
+                std::fprintf(stderr, "[state] savestate written to %s at t=%.1f\n",
+                             path.c_str(), elapsed_seconds());
+              }
+            });
+      }
+    }
+  }
+  // MODERNGEKKO_PERF_LOG=1: fps and emulation speed every two seconds, the
+  // same two numbers the iPhone app logs under DOLBUNDLER_PERF_LOG. Read
+  // speed, not fps -- a game's own frame rate varies by scene -- and with the
+  // limiter off it reads above 100%, which is what makes a Mac run a
+  // measurement of the module rather than of the throttle. The wall time
+  // since Run() began is on every line so a run can be aligned with the
+  // states written above.
+  std::jthread perf_log_thread;
+  if (const char* perf = std::getenv("MODERNGEKKO_PERF_LOG");
+      perf && perf[0] == '1') {
+    perf_log_thread = std::jthread([elapsed_seconds](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        for (int i = 0; i < 20 && !stop.stop_requested(); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (stop.stop_requested())
+          return;
+        const auto& metrics = Core::System::GetInstance().GetPerfMetrics();
+        std::fprintf(stderr, "[perf] t=%.1f fps=%.1f speed=%.0f%%\n",
+                     elapsed_seconds(), metrics.GetFPS(),
+                     metrics.GetSpeed() * 100.0);
+      }
+    });
+  }
   // MODERNGEKKO_RUN_SECONDS=<seconds>: stop the machine after that much wall
   // time and return from Run() the way a Quit would. This is what lets a
   // script run a game for a bounded stretch and still get a clean shutdown --
@@ -509,6 +569,8 @@ RuntimeRunResult Runtime::Run() {
   }
   m_impl->platform->MainLoop();
   timed_state_thread.request_stop();
+  periodic_state_thread.request_stop();
+  perf_log_thread.request_stop();
   title_thread.request_stop();
   if (title_thread.joinable())
     title_thread.join();

@@ -235,6 +235,32 @@ $R/recompios adopt --disc-id GEXE52 --generated /tmp/gexe52-llvm-ios/generated
 Without it, the first send after such a build would quietly produce an app
 missing that game.
 
+### Tuning records
+
+The four-minute play-through is the floor every game gets. A title the
+developer has taken further has a record in the repository,
+[`DolBundler/tuning/<ID>/`](tuning/README.md): a profile from a deep dive that
+found the title's heaviest scene and played it, the recompiler settings that
+measured best for it, and a report of where its time goes. A send of that title
+starts from the record instead of collecting its own, and says so:
+
+```
+    using the profile tuned on 2026-09-03 (1.09x on the tuning Mac); DolBundler/tuning/G4QE01
+```
+
+The records are made by `DolBundler/src/tunegame`, on a Mac, overnight, with
+the phone never involved:
+
+```sh
+$R/tunegame run --disc-id G4QE01          # one title, about 45 minutes
+$R/tunegame all --hours 8 --agent         # the library, slowest first, with an
+                                          # agent pass on each title that needs one
+$R/tunegame status                        # what is tuned, stale, or untuned
+```
+
+[`tuning/README.md`](tuning/README.md) is the whole story: what is in a record,
+how to read a report, how to measure a change, and the dead ends already walked.
+
 ### Settings
 
 **Settings** in the top right holds the defaults every game starts from.
