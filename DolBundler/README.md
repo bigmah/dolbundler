@@ -21,16 +21,18 @@ mario_party_4.iso  ──▶  DolBundler  ──▶  ~/Applications/Mario Party 
 `DolRecomp` and `ModernGekko` began as separate projects. `DolBundler` is the
 glue that turns their CLI tools into something you can double-click.
 
-Both are vendored directly into this repo: `ModernGekko` at the repo root, and
-`DolRecomp` at `ModernGekko/vendor/dolphin/DolRecomp`. The recompiler is built
-through ModernGekko's CMake, so that is the tree to edit if you need to hack on
-it. See the [root README](../README.md) for the full wiring.
+Both are forks, checked out as submodules: `ModernGekko` at the repo root,
+and `DolRecomp` at `ModernGekko/vendor/dolphin/DolRecomp`, inside the
+RecompCore fork. The recompiler is built through ModernGekko's CMake, so that
+is the tree to edit if you need to hack on it. See the
+[root README](../README.md#how-the-dependencies-are-wired) for the full wiring
+and for `forks.sh`, which pushes a change back through the chain.
 
 ## Install
 
 ```sh
-git clone --recursive https://github.com/<you>/recomp_gc.git
-cd recomp_gc
+git clone --recursive https://github.com/bigmah/dolbundler.git
+cd dolbundler
 ./DolBundler/build.sh
 ```
 
@@ -314,7 +316,7 @@ bundled SDL does not perform it. That is a worse failure than not appearing at
 all, because it reads as a binding problem.
 
 [`gc_controller`](https://github.com/bigmah/nso_gc_macos) does the handshake
-and feeds Dolphin's Pipe input backend instead. It is vendored at
+and feeds Dolphin's Pipe input backend instead. It is a submodule at
 `vendor/gc_controller` — it used to be a checkout you had to keep beside this
 repo, which meant a clone that built cleanly still could not drive the one pad
 this project most wants to support, and only said so at the moment a game
@@ -400,12 +402,13 @@ the protocol is documented at the top of the script.
   the config parser will accept. Pick a different one per game in Settings, or
   change `GRAPHICS_BACKEND` in
   `DolBundler.app/Contents/Resources/toolchain.conf` for the build-wide default.
-- **Three upstream patches**, in `patches/`, applied by `build.sh` (idempotently
-  — a patch that reverse-applies cleanly is treated as already in the tree):
-  - `0001-accept-unpinned-discs` — an unbranded ModernGekko build pins no disc
-    ID and ships no disc preparer, so `PrepareDisc()` falls into a branch that
+- **Three fixes to ModernGekko** that upstream does not have yet, carried as
+  commits on the fork's `dolbundler` branch (until the forks became submodules
+  they were `patches/` that `build.sh` applied at build time):
+  - **Accept unpinned discs** — an unbranded ModernGekko build pins no disc
+    ID and ships no disc preparer, so `PrepareDisc()` fell into a branch that
     rejects every image. Without this, no disc can be added at all.
-  - `0002-dol-patch-widths-and-conditionals` — `moderngekko-port` bakes
+  - **DOL patch widths and conditionals** — `moderngekko-port` bakes
     Dolphin's enabled `[OnFrame]` patches into the DOL before recompiling, but
     only parsed the 32-bit `dword` form. Dolphin also emits `byte` and `word`
     widths and a four-field conditional form, and the recompiler refused to
@@ -417,13 +420,13 @@ the protocol is documented at the top of the script.
     a static DOL the only thing to test is what the image ships with, so a
     condition that does not hold is simply not applied.
 
-  Run `./src/check_game_patches.py` after bumping the vendored Dolphin tree to
-  see whether any newly shipped INI uses a form the patcher still rejects.
-  - `0003-list-controllers` — adds `moderngekko-run --list-controllers`, which
-    prints the SDL gamepads Dolphin's input backend will see. The device string
-    a controller profile needs is SDL's own name for the pad, so guessing it
-    from outside is not an option; the runner already links SDL, and this is
-    the same enumeration the ModernGekko launcher does for its own picker.
+    Run `./src/check_game_patches.py` after moving the RecompCore pin to see
+    whether any newly shipped INI uses a form the patcher still rejects.
+  - **`moderngekko-run --list-controllers`** prints the SDL gamepads Dolphin's
+    input backend will see. The device string a controller profile needs is
+    SDL's own name for the pad, so guessing it is not an option, and the runner
+    is the only thing in the tree that both links SDL and can be asked without
+    opening a window.
 - **The GameCube controller driver is optional and external.** It lives in its
   own checkout, is built by `build.sh` only if one is found, and nothing else
   here depends on it. Without one the controller picker simply offers SDL
@@ -476,7 +479,7 @@ DolBundler/
     src/settings.rs        settings.json, and the config.ini and pad profile
                            it renders into before each launch
     assets/style.css
-  patches/                 the ModernGekko fixes build.sh applies
+  forks.sh                 push a change back through the nested forks
   src/
     recompgc               the four-step pipeline
     recompios              the iPhone pipeline: recompile, link, sign, install

@@ -44,48 +44,29 @@ for tool in cmake ninja; do
   esac
 done
 
-# ModernGekko, RecompCore (vendor/dolphin) and DolRecomp all live directly in
-# this repo, so a plain `git clone` already has them. Check anyway: a truncated
-# or half-copied tree fails later, in CMake, with a much less obvious message.
-step "Checking the runtime sources"
+# ModernGekko, RecompCore (vendor/dolphin), DolRecomp and gc_controller are
+# forks pinned as submodules, and Dolphin's third-party externals are
+# submodules of RecompCore. A plain clone leaves all of them empty; this fetches
+# whatever is missing and is a no-op once everything is there. The externals
+# are marked shallow in RecompCore's .gitmodules and come down at depth 1; the
+# forks come with their history, which is what lets a fix made in one of them
+# be pushed back. See forks.sh for that.
+step "Checking out the forks and Dolphin's externals"
+if [ ! -f "$MG_SRC/vendor/dolphin/DolRecomp/CMakeLists.txt" ] || \
+   [ ! -f "$MG_SRC/vendor/dolphin/Externals/fmt/fmt/CMakeLists.txt" ]; then
+  echo "    fetching submodules (the externals are a few hundred MB)"
+  git -C "$ROOT" submodule update --init --recursive
+else
+  echo "    already present"
+fi
 for f in "$MG_SRC/CMakeLists.txt" \
          "$MG_SRC/vendor/dolphin/CMakeLists.txt" \
          "$MG_SRC/vendor/dolphin/DolRecomp/CMakeLists.txt"; do
   [ -f "$f" ] || {
     echo "missing $f" >&2
-    echo "That is part of this repo, so the checkout at $ROOT is incomplete." >&2
+    echo "The submodules did not come down; run: git -C $ROOT submodule update --init --recursive" >&2
     exit 1
   }
-done
-echo "    ModernGekko, RecompCore and DolRecomp are in-tree"
-
-# Dolphin's third-party externals are the one thing still fetched separately.
-# They are upstream submodules pinned here, so a plain clone leaves them empty.
-step "Checking out Dolphin's externals"
-if [ ! -f "$MG_SRC/vendor/dolphin/Externals/fmt/fmt/CMakeLists.txt" ]; then
-  echo "    fetching the externals (this is a few hundred MB)"
-  git -C "$ROOT" submodule update --init --recursive --depth 1
-else
-  echo "    already present"
-fi
-
-# DolBundler needs two fixes in ModernGekko that upstream has not made. Both
-# live in patches/ as ordinary diffs; see DolBundler/README.md for what each one
-# is for. Applying is idempotent: a patch that reverse-applies cleanly is
-# already in the tree.
-step "Patching ModernGekko"
-for patch in "$HERE"/patches/*.patch; do
-  name="$(basename "$patch")"
-  if git -C "$MG_SRC" apply --reverse --check "$patch" >/dev/null 2>&1; then
-    echo "    $name (already applied)"
-  elif git -C "$MG_SRC" apply --check "$patch" >/dev/null 2>&1; then
-    git -C "$MG_SRC" apply "$patch"
-    echo "    $name (applied)"
-  else
-    echo "$name does not apply to $MG_SRC and is not already in the tree." >&2
-    echo "Check out the pinned ModernGekko revision, or apply it by hand." >&2
-    exit 1
-  fi
 done
 
 step "Configuring ModernGekko"

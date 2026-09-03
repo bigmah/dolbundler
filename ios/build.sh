@@ -44,11 +44,13 @@ for tool in cmake xcodebuild; do
   command -v "$tool" >/dev/null || { echo "$tool is required but not installed" >&2; exit 1; }
 done
 
-# Dolphin's third-party externals are still submodules; the rest of the tree is
-# in this repo. A plain clone leaves them empty.
-if [ ! -f "$ROOT/ModernGekko/vendor/dolphin/Externals/fmt/fmt/CMakeLists.txt" ]; then
-  step "Fetching Dolphin's externals"
-  git -C "$ROOT" submodule update --init --recursive --depth 1
+# ModernGekko, RecompCore and DolRecomp are forks pinned as submodules, and
+# Dolphin's third-party externals are submodules of RecompCore. A plain clone
+# leaves all of them empty; the externals are marked shallow in .gitmodules.
+if [ ! -f "$ROOT/ModernGekko/vendor/dolphin/DolRecomp/CMakeLists.txt" ] || \
+   [ ! -f "$ROOT/ModernGekko/vendor/dolphin/Externals/fmt/fmt/CMakeLists.txt" ]; then
+  step "Fetching the forks and Dolphin's externals"
+  git -C "$ROOT" submodule update --init --recursive
 fi
 
 [ "$CLEAN" -eq 1 ] && rm -rf "$BUILD"

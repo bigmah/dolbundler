@@ -34,13 +34,14 @@ that has had a deeper look carries its result in the repository under
 [`DolBundler/tuning/`](DolBundler/tuning/README.md), and the next send of it,
 on any Mac, starts from there.
 
-DolBundler is the glue layer. The heavy lifting is done by two projects it
-drives, both vendored directly into this repo:
+DolBundler is the glue layer. The heavy lifting is done by three projects it
+drives, each a fork of its upstream, checked out here as a submodule:
 
-| Piece | Role | Path | Originally from |
+| Piece | Role | Path | Forked from |
 |---|---|---|---|
-| `DolRecomp` | reads the disc's `main.dol`, decodes PowerPC, emits C or bytecode | `ModernGekko/vendor/dolphin/DolRecomp/` | [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp) |
-| `ModernGekko` | the runtime: GX/Metal video, audio, input, memory, disc I/O | `ModernGekko/` | [ExpansionPak/ModernGekko](https://github.com/ExpansionPak/ModernGekko) |
+| `DolRecomp` | reads the disc's `main.dol`, decodes PowerPC, emits C or LLVM IR | `ModernGekko/vendor/dolphin/DolRecomp/` | [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp) |
+| `RecompCore` | the Dolphin fork the recompiled code runs inside: memory, devices, GX, audio | `ModernGekko/vendor/dolphin/` | [ExpansionPak/RecompCore](https://github.com/ExpansionPak/RecompCore), from [aharonahdoot/RecompCore](https://github.com/aharonahdoot/RecompCore) |
+| `ModernGekko` | the runtime around it: module loading, the runner, the tools that port a disc | `ModernGekko/` | [ExpansionPak/ModernGekko](https://github.com/ExpansionPak/ModernGekko) |
 | `DolBundler` | the Dioxus window, the pipeline, and the macOS app packaging | `DolBundler/` | this repo |
 
 ## Legal
@@ -68,17 +69,18 @@ you already own. Hold anything you add to the same line.
 ## Quick start
 
 ```sh
-git clone --recursive https://github.com/<you>/recomp_gc.git
-cd recomp_gc
+git clone --recursive https://github.com/bigmah/dolbundler.git
+cd dolbundler
 ./DolBundler/build.sh
 ```
 
-If you forgot `--recursive`, `build.sh` fetches Dolphin's externals for you.
+If you forgot `--recursive`, `build.sh` fetches the submodules for you.
 
-All the code is in the clone; the first run fetches only Dolphin's third-party
-externals (a few hundred MB), builds them, builds the window, and installs
-`DolBundler.app` to `~/Applications`. A cold build compiles all of Dolphin, so
-expect it to take a while; later runs reuse the build directory.
+The recursive clone brings the three forks with their history and Dolphin's
+third-party externals at depth 1 (a few hundred MB together). The first run
+builds the externals, builds the window, and installs `DolBundler.app` to
+`~/Applications`. A cold build compiles all of Dolphin, so expect it to take a
+while; later runs reuse the build directory.
 
 Requirements: Xcode command line tools, `cmake`, `ninja`, `python3`, `cargo`.
 Apple Silicon and Intel are both fine.
@@ -88,34 +90,44 @@ Full usage, the four pipeline steps, and the known limitations are in
 
 ## How the dependencies are wired
 
-This is a **monorepo**. ModernGekko, RecompCore (a Dolphin fork) and DolRecomp
-are ordinary tracked directories here — not submodules, not forks to keep in
-sync:
+ModernGekko, RecompCore and DolRecomp are **forks, pinned as submodules**, one
+inside the next, at the same paths their upstreams use:
 
 ```
-recomp_gc/
+dolbundler/
   DolBundler/                   the window, the pipeline, the app packaging
-  ModernGekko/                  the runtime
-    vendor/dolphin/             RecompCore, a Dolphin fork
-      DolRecomp/                the recompiler
-      Externals/                Dolphin's third-party deps — still submodules
+    vendor/gc_controller/       submodule: bigmah/nso_gc_macos
+  ModernGekko/                  submodule: bigmah/ModernGekko, forked from ExpansionPak/ModernGekko
+    vendor/dolphin/             submodule: bigmah/RecompCore, forked from ExpansionPak/RecompCore
+      DolRecomp/                submodule: bigmah/DolRecomp, forked from ExpansionPak/DolRecomp
+      Externals/                Dolphin's third-party deps, submodules on their real upstreams
 ```
 
-The only submodules left are Dolphin's own third-party externals under
-`ModernGekko/vendor/dolphin/Externals` — Qt, SDL, curl, imgui and about thirty
-more. Those point at their real upstreams, they are pinned, and `build.sh`
-initialises them on the first run.
+Each fork's `dolbundler` branch is its upstream's full history plus what this
+project has added, so `git log upstream/master..` inside any of them lists
+exactly that, and a fix made here can go back upstream as an ordinary pull
+request. [`THIRD_PARTY.md`](THIRD_PARTY.md) lists every piece, its license,
+and where it came from.
 
-Edit the runtime or the recompiler directly in this tree and commit like any
-other change. There is no second repo to push to and nothing to re-pin.
+Edit the runtime or the recompiler in place: `ModernGekko/` and
+`ModernGekko/vendor/dolphin/DolRecomp/` are ordinary checkouts on their
+`dolbundler` branches. A change is committed at the level it lives, and each
+level above it then pins the new commit. `DolBundler/forks.sh` does the
+bookkeeping:
 
-One further project is vendored the same way, at
-`DolBundler/vendor/gc_controller`: [`gc_controller`](https://github.com/bigmah/nso_gc_macos),
-a driver for the Nintendo Switch Online GameCube controller. `build.sh` builds
-it in place and DolBundler then offers that pad as a controller. Point
-`GC_CONTROLLER_DIR` at a checkout of your own to build that instead. Nothing
-here needs it; the controller picker offers SDL gamepads either way. See
-[`DolBundler/README.md`](DolBundler/README.md#gamecube-controllers).
+```sh
+./DolBundler/forks.sh status     # branch, unpushed commits, dirty files and pins, at every level
+./DolBundler/forks.sh push       # push each fork, deepest first, and re-pin each level above it
+./DolBundler/forks.sh upstream   # how far each fork has drifted from its upstream
+./DolBundler/forks.sh checkout   # put every level back on its branch after a submodule update
+```
+
+The submodule URLs are `https://` so that anyone can clone. To push over SSH
+with a specific key, rewrite them once in your global git config:
+
+```sh
+git config --global url."git@github.com:bigmah/".insteadOf "https://github.com/bigmah/"
+```
 
 **DolRecomp lives at `ModernGekko/vendor/dolphin/DolRecomp`.** It is built
 through ModernGekko's CMake, so that is the tree to edit — a separate top-level
@@ -129,54 +141,58 @@ patch coverage:
 ./DolBundler/src/check_game_patches.py
 ```
 
-### The patches
+### The fixes that used to be patches
 
-Three fixes live in `DolBundler/patches/` as ordinary diffs, applied
-idempotently by `build.sh`. All three are candidates for upstreaming rather
-than carrying here forever:
+Three fixes that `build.sh` used to apply from `DolBundler/patches/` at build
+time are ordinary commits on the ModernGekko fork now, and all three are
+candidates for upstream pull requests:
 
-- `0001-accept-unpinned-discs` — an unbranded ModernGekko build pins no disc ID
-  and ships no disc preparer, so `PrepareDisc()` falls into a branch that
-  rejects every image. Without this, no disc can be added at all.
-- `0002-dol-patch-widths-and-conditionals` — the DOL patcher only parsed
+- **Accept unpinned discs** — an unbranded ModernGekko build pins no disc ID
+  and ships no disc preparer, so `PrepareDisc()` fell into a branch that
+  rejected every image. Without this, no disc can be added at all.
+- **DOL patch widths and conditionals** — the DOL patcher only parsed
   Dolphin's 32-bit `dword` form, so it refused to build any game whose INI used
   the `byte`, `word`, or four-field conditional forms. That is 21 of the 127
   games that ship enabled patches.
-- `0003-list-controllers` — adds `moderngekko-run --list-controllers`, printing
-  the SDL gamepads Dolphin's input backend will see. DolBundler's per-game
-  controller picker needs SDL's own name for a pad to write a working profile,
-  and the runner is the only thing in the tree that both links SDL and can be
-  asked without opening a window.
+- **`moderngekko-run --list-controllers`** — prints the SDL gamepads Dolphin's
+  input backend will see. DolBundler's per-game controller picker needs SDL's
+  own name for a pad to write a working profile, and the runner is the only
+  thing in the tree that both links SDL and can be asked without opening a
+  window.
 
 ## Licensing
 
 DolBundler is **GPL-3.0-or-later**. See [`LICENSE`](LICENSE).
 
-Both upstreams are GPL-3.0-or-later, and `DolBundler/patches/` contains
-modified source from ModernGekko's `tools/`, which makes those files derivative
-works of a GPL program. Licensing the whole repo the same way keeps the
-boundary from being something anyone has to argue about.
+Every upstream is GPL: ModernGekko and DolRecomp are GPL-3.0-or-later, and
+RecompCore is Dolphin, GPL-2.0-or-later with GPLv3 parts, GPLv3-compatible as
+a whole. DolBundler drives them, links against them, and embeds the runtime in
+its iOS app, so licensing the whole repo GPL-3.0-or-later keeps the boundary
+from being something anyone has to argue about.
 
-ModernGekko's own provenance — its Dolphin and RecompCore lineage, and the
-per-file SPDX identifiers that remain authoritative for that code — is
-documented in [`ModernGekko/PROVENANCE.md`](ModernGekko/PROVENANCE.md).
+[`THIRD_PARTY.md`](THIRD_PARTY.md) lists each piece with its license and
+origin. ModernGekko's own provenance — its Dolphin and RecompCore lineage, and
+the per-file SPDX identifiers that remain authoritative for that code — is in
+[`ModernGekko/PROVENANCE.md`](ModernGekko/PROVENANCE.md).
 
 ## Credits
 
 DolBundler exists because other people did the hard part. `DolRecomp` and
 `ModernGekko` are by the [ExpansionPak](https://github.com/ExpansionPak)
-project; ModernGekko builds on RecompCore by SpecialK / aharonahdoot, which
-builds on the Dolphin emulator. Their credits are in their own repos and worth
-reading.
+project. ModernGekko runs on RecompCore by SpecialK / aharonahdoot, continued
+by ExpansionPak, which carries GXRuntime and StrikersRecomp by Tomoeko and
+aharonahdoot, and all of it stands on the Dolphin emulator. Their credits are
+in their own repos and worth reading.
 
 ## Contributing
 
 Issues and pull requests welcome. Two things to know first:
 
-- Bugs in recompilation or in the runtime are fixed in this repo too, under
-  `ModernGekko/vendor/dolphin/DolRecomp/` and `ModernGekko/`. Those trees began
-  as [DolRecomp](https://github.com/ExpansionPak/DolRecomp) and
-  [ModernGekko](https://github.com/ExpansionPak/ModernGekko); this copy has
-  diverged and is not kept in sync with them.
+- Bugs in recompilation or in the runtime are fixed in the forks, checked out
+  here under `ModernGekko/vendor/dolphin/DolRecomp/` and `ModernGekko/`. Their
+  `dolbundler` branches sit on the upstream history, so a fix that is not
+  DolBundler-specific is worth offering to
+  [DolRecomp](https://github.com/ExpansionPak/DolRecomp) or
+  [ModernGekko](https://github.com/ExpansionPak/ModernGekko) as well.
 - Never attach a disc image, an extracted DOL, or game assets to an issue. A
   disc ID and the failing address are enough.
