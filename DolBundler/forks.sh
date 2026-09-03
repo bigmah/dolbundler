@@ -18,6 +18,10 @@
 #   forks.sh adopt      make the bigmah repos GitHub forks of their upstreams:
 #                       renames the current repos aside, forks, pushes. The
 #                       forks are public and this is one-way, so it asks first.
+#
+# The submodule URLs are https so anyone can clone. To push with a specific
+# SSH key, rewrite them once, globally:
+#   git config --global url."git@github.com:bigmah/".insteadOf "https://github.com/bigmah/"
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/.." && pwd)"
 
@@ -156,5 +160,5 @@ case "${1:-}" in
   upstream) cmd_upstream ;;
   checkout) cmd_checkout ;;
   adopt)    cmd_adopt "${2:-}" ;;
-  *) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
