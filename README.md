@@ -54,6 +54,17 @@ DolBundler is a build tool. It compiles code you already own into a program
 you run locally. Nothing it produces is redistributable, and the generated
 apps hold no game data — each one points at your own extracted disc.
 
+That holds for what the tools *write back* into this repo, too.
+[`DolBundler/tuning/`](DolBundler/tuning/README.md) commits a per-title record
+so a later build starts from what an earlier one measured, and those records
+are measurements about a game and never any part of one: counters, timings,
+guest addresses, a hash of your DOL, and the SDK routine names that Dolphin's
+signature database already publishes. No disassembly, no bytes out of the DOL,
+no screenshots. `tunegame` keeps it that way on its own — a report's
+disassembly stays in the working store under Application Support, and the
+committed copy points at `tunegame disasm`, which reads it back off the disc
+you already own. Hold anything you add to the same line.
+
 ## Quick start
 
 ```sh

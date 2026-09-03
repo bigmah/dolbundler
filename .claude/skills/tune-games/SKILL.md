@@ -37,7 +37,8 @@ report and lists the dead ends already walked. Then read
 ## The loop
 
 1. Read the report's `Leads`, `Where host time goes`, `Hottest guest functions`
-   and the disassembly. Decide which lead is worth the first hour; write one
+   and, from `tunegame disasm --disc-id <ID>`, the disassembly the committed
+   report deliberately leaves out. Decide which lead is worth the first hour; write one
    sentence saying why.
 2. Form a hypothesis with a measurable prediction ("skipping this poll site
    should take the scene from 1.09x to at least 1.2x").

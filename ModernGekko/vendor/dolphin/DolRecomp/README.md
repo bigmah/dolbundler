@@ -8,11 +8,7 @@ Luckily, we have you covered there. check out ![ModernGekko!](https://github.com
 
 ## Actual Progress
 
-We'd rather show real game progress than pad the README with synthetic tests and tiny demos, so here is Luigi's Mansion reaching the title screen through DolRecomp:
-
-![Luigi's Mansion title screen running via DolRecomp](assets/mansion.png)
-
-And many more in the discord!
+We'd rather show real game progress than pad the README with synthetic tests and tiny demos. DolRecomp takes commercial titles to their title screens and into gameplay; screenshots of that are in [upstream DolRecomp](https://github.com/ExpansionPak/DolRecomp) and in the discord. This fork does not carry them: it ships no part of any game, screenshots included.
 
 ## Important!
 

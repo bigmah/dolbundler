@@ -180,6 +180,13 @@ ADOPT_MARGIN = 1.03
 # --- small utilities -------------------------------------------------------
 
 
+def redact_home(text: str) -> str:
+    """Paths in a committed record belong to whoever reads it, not to whoever
+    wrote it. The store's own copy of a report keeps them absolute."""
+    home = os.path.expanduser("~")
+    return text.replace(home, "~") if home and home != "/" else text
+
+
 def now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1523,10 +1530,11 @@ def leads_for(game: Game, store: Store, top: list) -> list:
                             "and hand the wait to the chassis so guest time advances to the next event, not to make the "
                             "loop faster. `SelectThread`'s wait on the run-queue bits (r13-relative) is the SDK's idle; "
                             "read tuning/README.md's dead ends first -- `PPCHalt` is a different loop and skipping it froze a title.")
-                leads.append("**%.0f%% of the hottest-24's block iterations%s are in one wait loop at `0x%08X`** in %s:\n"
-                             "  ```\n  %s\n  ```\n  %s" % (
+                leads.append("**%.0f%% of the hottest-24's block iterations%s are in one wait loop at `0x%08X`** in %s "
+                             "-- %d instructions, no store and no call in it "
+                             "(`tunegame disasm --disc-id %s --addr 0x%08X --count %d` to read it off your own disc). %s" % (
                                  share, " and %.0f%% of host samples" % host if host else "", head, desc,
-                                 "\n  ".join(body), what))
+                                 len(body), game.disc_id, head, len(body), what))
             else:
                 leads.append("**One function has %.0f%% of the hottest-24's block iterations%s:** %s. Not a wait loop by shape; "
                              "a decoder, a copy loop, or a kernel worth reading. The disassembly at the end is the whole chunk." % (
@@ -1684,27 +1692,38 @@ def write_report(game: Game, store: Store, metadata: dict, record: bool):
     for lead in leads:
         lines.append("- " + lead)
     lines.append("")
+    # A disassembly is the game's own instructions, so it stays on the machine
+    # that owns the disc: the store's copy of this report carries it in full,
+    # the committed record points at `tunegame disasm` instead. The reasoning
+    # is in DolBundler/tuning/README.md.
+    disasm_at = len(lines)
+    disasm, pointer = [], []
     if top:
-        lines.append("## Disassembly")
-        lines.append("")
-        lines.append("A chunk is %d instructions; `_budget` in a symbol is the same chunk's budget-carrying entry. "
-                     "The hottest chunk is shown whole, the next two by their first 24 instructions." % res.get("chunk", DEFAULT_CHUNK))
-        lines.append("")
+        disasm.append("## Disassembly")
+        disasm.append("")
+        disasm.append("A chunk is %d instructions; `_budget` in a symbol is the same chunk's budget-carrying entry. "
+                      "The hottest chunk is shown whole, the next two by their first 24 instructions." % res.get("chunk", DEFAULT_CHUNK))
+        disasm.append("")
         for n, (addr, _) in enumerate(top[:3]):
-            lines.append("**%s**" % game.dol_image.describe(addr))
-            lines.append("")
-            lines.append("```")
-            lines.extend(game.dol_image.disassemble(addr, res.get("chunk", DEFAULT_CHUNK) if n == 0 else 24))
-            lines.append("```")
-            lines.append("")
+            disasm.append("**%s**" % game.dol_image.describe(addr))
+            disasm.append("")
+            disasm.append("```")
+            disasm.extend(game.dol_image.disassemble(addr, res.get("chunk", DEFAULT_CHUNK) if n == 0 else 24))
+            disasm.append("```")
+            disasm.append("")
         if diag.get("dispatch_sites"):
             pc = diag["dispatch_sites"][0][0]
-            lines.append("**Around the top dispatch site `0x%08X`** (where the module most often hands control back):" % pc)
-            lines.append("")
-            lines.append("```")
-            lines.extend(game.dol_image.disassemble(pc - 16, 12))
-            lines.append("```")
-            lines.append("")
+            disasm.append("**Around the top dispatch site `0x%08X`** (where the module most often hands control back):" % pc)
+            disasm.append("")
+            disasm.append("```")
+            disasm.extend(game.dol_image.disassemble(pc - 16, 12))
+            disasm.append("```")
+            disasm.append("")
+        pointer = ["## Disassembly", "",
+                   "Left out of the committed record on purpose: it would be the game's own instructions. "
+                   "`tunegame disasm --disc-id %s` prints the same three chunks and the top dispatch site from "
+                   "your own copy of the disc, and the store's copy of this report has them inline." % game.disc_id,
+                   ""]
     if variants:
         lines.append("## Variants tried")
         lines.append("")
@@ -1728,15 +1747,17 @@ def write_report(game: Game, store: Store, metadata: dict, record: bool):
     lines.append("- to re-measure a change: `tunegame ab --disc-id %s --a tuned --b <your dylib>` (`tuned` is rebuilt from the store's profile if `clean` removed it)" % game.disc_id)
     lines.append("- to build a variant: `tunegame build --disc-id %s --out <dir> --pgo scene [--chunk N] [--env K=V]`" % game.disc_id)
     lines.append("")
-    text = "\n".join(lines)
-    open(store.path("report.md"), "w").write(text)
+    open(store.path("report.md"), "w").write("\n".join(lines[:disasm_at] + disasm + lines[disasm_at:]))
     if record:
-        write_record(game, store, metadata, text)
+        write_record(game, store, metadata,
+                     redact_home("\n".join(lines[:disasm_at] + pointer + lines[disasm_at:])))
 
 
 def write_record(game: Game, store: Store, metadata: dict, report_text: str):
     """What the repository carries: settings for the phone build, the profile
-    compressed, and the report. Small enough to commit for a hundred titles."""
+    compressed, and the report with its disassembly replaced by a pointer.
+    Measurements about a game, never the game. Small enough to commit for a
+    hundred titles."""
     res = store.results
     out = record_dir(game.disc_id)
     os.makedirs(out, exist_ok=True)
@@ -1964,6 +1985,11 @@ def main(argv: list):
     p_rep = sub.add_parser("report", help="print a title's report")
     p_rep.add_argument("--disc-id", required=True)
 
+    p_dis = sub.add_parser("disasm", help="disassemble a title's hot code from your own disc")
+    p_dis.add_argument("--disc-id", required=True)
+    p_dis.add_argument("--addr", default="", help="hex address; default: the hottest chunks in the store's profile")
+    p_dis.add_argument("--count", type=int, default=0, help="instructions (default: one chunk)")
+
     p_bench = sub.add_parser("bench", help="one phone-shaped measurement")
     p_bench.add_argument("--disc-id", required=True)
     p_bench.add_argument("--module", required=True)
@@ -2025,6 +2051,36 @@ def main(argv: list):
                 sys.stdout.write(open(path).read())
                 return 0
         die("no report for %s yet; run `tunegame run --disc-id %s`" % (args.disc_id, args.disc_id))
+
+    if args.command == "disasm":
+        # What the committed report leaves out, read back from the disc the
+        # person running this already owns. Nothing here is ever written to
+        # DolBundler/tuning; see that directory's README.
+        game = one_game(args.disc_id)
+        store = Store(game.disc_id)
+        chunk = store.results.get("chunk") or int(read_record(args.disc_id).get("LLVM_CHUNK_INSTRUCTIONS") or DEFAULT_CHUNK)
+        dol = game.dol_image
+        if args.addr:
+            addr = int(args.addr, 16)
+            print("%s\n" % dol.describe(addr))
+            print("\n".join(dol.disassemble(addr, args.count or chunk)))
+            return 0
+        merged = store.path("profiles", "merged.profdata")
+        if not os.path.isfile(merged):
+            die("no profile in the store for %s: run `tunegame run --disc-id %s`, or pass --addr" % (args.disc_id, args.disc_id))
+        top = profile_top(merged, 24)
+        if not top:
+            die("the store's profile for %s has no counters" % args.disc_id)
+        for n, (addr, _) in enumerate(top[:3]):
+            print("%s\n" % dol.describe(addr))
+            print("\n".join(dol.disassemble(addr, (args.count or chunk) if n == 0 else 24)))
+            print("")
+        sites = store.results.get("stages", {}).get("diagnose", {}).get("dispatch_sites")
+        if sites:
+            pc = sites[0][0]
+            print("Around the top dispatch site 0x%08X\n" % pc)
+            print("\n".join(dol.disassemble(pc - 16, 12)))
+        return 0
 
     if args.command in ("bench", "ab"):
         game = one_game(args.disc_id)

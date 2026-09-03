@@ -20,6 +20,14 @@ DolBundler/tuning/
                        button-masher cannot get into play
 ```
 
+A record is measurements *about* a game and never any part of the game
+itself: counts, addresses, timings, and SDK routine names that Dolphin's own
+signature database already publishes. No disassembly, no bytes lifted out of
+the DOL, no assets. `tunegame` enforces that when it writes one -- a report's
+disassembly section stays in the working store and the committed copy points at
+`tunegame disasm`, which reads it back off the disc the reader already owns.
+Keep it that way in anything added here by hand.
+
 Everything here is small enough to commit for a hundred titles (a profile is a
 few hundred kilobytes). The big things -- the bench scene savestate, the tuned
 module, every log -- stay in the working store under
@@ -116,8 +124,9 @@ vertex loading, not a renderer).
 
 `Hottest guest functions` are the LLVM block counts from the merged profile,
 named where Dolphin's signature database recognises the SDK routine. One
-function far ahead of the rest is either a wait loop or a decoder, and the
-disassembly at the end of the report is there to tell which.
+function far ahead of the rest is either a wait loop or a decoder;
+`tunegame disasm --disc-id <ID>` disassembles it from your own disc to tell
+which. The committed report does not carry that, for the reason above.
 
 `Leads` are heuristics over all of the above, phrased as things to look at.
 They are leads, not diagnoses.
