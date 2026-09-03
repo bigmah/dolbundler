@@ -160,5 +160,5 @@ case "${1:-}" in
   upstream) cmd_upstream ;;
   checkout) cmd_checkout ;;
   adopt)    cmd_adopt "${2:-}" ;;
-  *) sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"; exit 2 ;;
 esac
