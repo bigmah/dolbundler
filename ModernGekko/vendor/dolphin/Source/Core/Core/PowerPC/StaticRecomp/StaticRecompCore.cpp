@@ -262,6 +262,7 @@ void StaticRecompCore::Shutdown()
   m_lockstep_verifier.reset();
   m_block_cache.Shutdown();
   m_module = nullptr;
+  FlushModuleProfile();
   if (m_library.IsOpen())
     m_library.Close();
 
@@ -270,6 +271,27 @@ void StaticRecompCore::Shutdown()
     m_fallback_jit->Shutdown();
     m_fallback_jit.reset();
   }
+}
+
+// A module generated with DOLRECOMP_LLVM_PGO=gen carries compiler-rt's profile
+// runtime inside the dylib, and that runtime writes its counters to
+// LLVM_PROFILE_FILE from an atexit handler. Whether that handler still runs
+// once the library has been closed is a property of the platform's dlclose,
+// not of this code, so the counters are written here, explicitly, while the
+// symbol is still mapped. A module that was not instrumented has no such
+// symbol and nothing happens; a process that did not ask for a profile is
+// left alone.
+void StaticRecompCore::FlushModuleProfile()
+{
+  if (!m_library.IsOpen() || !std::getenv("LLVM_PROFILE_FILE"))
+    return;
+  using WriteProfileFn = int (*)(void);
+  const auto write_profile =
+      reinterpret_cast<WriteProfileFn>(m_library.GetSymbolAddress("__llvm_profile_write_file"));
+  if (!write_profile)
+    return;
+  const int status = write_profile();
+  std::fprintf(stderr, "[staticrecomp] LLVM profile written (status %d)\n", status);
 }
 
 void StaticRecompCore::LoadModule()
@@ -294,8 +316,16 @@ void StaticRecompCore::LoadModule()
       ERROR_LOG_FMT(POWERPC, "StaticRecomp: failed to open explicit module '{}'.", path);
       return;
     }
-    const auto get_module = reinterpret_cast<StaticRecompGetModuleFn>(
+    // Unprefixed, or under the per-game prefix a module built for a shared
+    // binary carries (see ModuleLibrary::Open).
+    auto get_module = reinterpret_cast<StaticRecompGetModuleFn>(
         m_library.GetSymbolAddress(STATICRECOMP_GET_MODULE_SYMBOL));
+    if (!get_module)
+    {
+      const std::string prefixed = "g" + game_id + "_" STATICRECOMP_GET_MODULE_SYMBOL;
+      get_module =
+          reinterpret_cast<StaticRecompGetModuleFn>(m_library.GetSymbolAddress(prefixed.c_str()));
+    }
     desc = get_module ? get_module() : nullptr;
   }
 

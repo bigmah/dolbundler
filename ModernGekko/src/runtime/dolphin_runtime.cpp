@@ -227,9 +227,23 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
       module_result.status != ModuleLoadStatus::Ok) {
     if (!config.allow_interpreter) {
       std::string message = "native module was rejected";
-      if (module_result.status == ModuleLoadStatus::DescriptorRejected)
+      switch (module_result.status) {
+      case ModuleLoadStatus::DescriptorRejected:
         message += ": " + std::string(moderngekko_module_status_string(
                               module_result.validation_status));
+        break;
+      case ModuleLoadStatus::LibraryOpenFailed:
+        message += ": the library could not be opened";
+        break;
+      case ModuleLoadStatus::EntryPointMissing:
+        message += ": it exports no " MODERNGEKKO_GET_MODULE_SYMBOL;
+        break;
+      case ModuleLoadStatus::DynamicLoadingUnavailable:
+        message += ": this build cannot load modules from disk";
+        break;
+      default:
+        break;
+      }
       return {
           {},
           RuntimeError{RuntimeErrorCode::ModuleRejected, std::move(message)}};
@@ -460,6 +474,27 @@ RuntimeRunResult Runtime::Run() {
                            path.c_str());
             });
       }
+    }
+  }
+  // MODERNGEKKO_RUN_SECONDS=<seconds>: stop the machine after that much wall
+  // time and return from Run() the way a Quit would. This is what lets a
+  // script run a game for a bounded stretch and still get a clean shutdown --
+  // the counters the StaticRecomp core prints, a savestate, a PGO profile --
+  // where a kill would get nothing. The iPhone app has the same knob under
+  // DOLBUNDLER_RUN_SECONDS; the desktop had only the window close button.
+  std::jthread run_timer_thread;
+  if (const char* timed = std::getenv("MODERNGEKKO_RUN_SECONDS")) {
+    const int seconds = std::atoi(timed);
+    if (seconds > 0) {
+      run_timer_thread = std::jthread([this, seconds](std::stop_token stop) {
+        for (int i = 0; i < seconds * 10 && !stop.stop_requested(); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (stop.stop_requested())
+          return;
+        std::fprintf(stderr, "[run] timer expired after %ds, stopping\n",
+                     seconds);
+        RequestStop();
+      });
     }
   }
   std::jthread title_thread;

@@ -96,6 +96,7 @@ private:
   };
 
   void LoadModule();
+  void FlushModuleProfile();
 
   // D4 SMC guard, verify-on-entry model. Every chunk starts Unverified; the
   // first native dispatch into it hashes its guest RAM against the module's

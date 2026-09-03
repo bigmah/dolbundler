@@ -1478,3 +1478,59 @@ puts LLVM AOT **~17% ahead of DolVM** on the simulator workload. The prior hot
 instruction-cache locality outweighed the extra cross-chunk gates. The LLVM
 default is now 64; `DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS` remains available for
 per-title sweeps.
+
+# Every title gets a profile now (2026-09-02)
+
+Disney skate was the only module in the iPhone store built against a PGO
+profile -- `pgo=use:` in its generated.h fingerprint -- and it was the only
+title that ran well on the phone. Mario Soccer and Mario Party 4 were plain
+builds. The profile step is part of `recompios send` now, so the difference
+between the hand-tuned title and the rest is gone: each game is recompiled
+instrumented for the Mac, played headless for four minutes with a scripted
+pipe controller (START/A through the menus, then stick and A), and the
+counters are handed to the phone build.
+
+**The profile crosses from Mac to phone intact.** PGO matches on function name
+and the CFG hash of the IR before the pipeline runs, and the emitter's IR does
+not depend on the target triple, so the Mac-collected profile matched
+**10,403 of 10,403** G4QE01 chunks in the `arm64-apple-ios17.0` build with
+zero stale records. That is what makes the run a Mac job instead of an
+instrumented simulator app.
+
+**What it is worth, desktop, phone-shaped** (M4 Pro, headless Null video,
+`MODERNGEKKO_NO_FALLBACK_JIT=1` so uncovered code is interpreted as on iOS,
+speed limiter off, the same mid-match savestate, 45 s per arm, interleaved):
+
+| arm | charged guest cycles / wall second, as a fraction of 486 MHz |
+|---|---|
+| plain LLVM module | 0.923x, 0.941x, 0.945x |
+| profile-guided, same DOL, same profile the phone gets | 1.087x, 1.092x, 1.097x |
+
+**+16%**, arms non-overlapping. `fallback=0`, `smc_lost=256B` (one
+64-instruction chunk, the `OSExceptionInit` patch) both arms.
+
+Two things the same run says about Mario Soccer that PGO does not fix:
+
+- **A match runs under real time on an M4 Pro** with the plain module, and the
+  phone is slower than the Mac. Sixteen percent is not the whole distance.
+- **The hottest function in the profile is not game code.** `func_802591C0`
+  carried 44e9 block iterations in five guest minutes -- the SDK scheduler's
+  idle spin on the run-queue bits (`lwz r0,-18584(r13); cmplwi r0,0; beq`),
+  where the guest waits for an interrupt to make a thread runnable. Native
+  code runs that loop as fast as the host can, for nothing. An idle skip
+  there is the obvious next lever; the `PPCHalt` skip that froze this same
+  title (see *The coverage a single rewritten instruction costs*) is the
+  reason to prove it on the differential test before shipping it.
+
+The report each run writes (`modules/<ID>/profile-report.txt`) ends with the
+twelve hottest generated functions for exactly this reason: on a title that is
+still slow, that list is the first thing to read.
+
+**What it costs**, measured on the first end-to-end run (`recompios profile
+--disc-id G4QE01`, M4 Pro, 14 jobs, cold object cache): 9 min 14 s wall for
+the whole thing -- about three minutes recompiling the instrumented Mac copy,
+seconds linking it, 250 s playing it (10.0 guest minutes at 2.4x real time,
+instrumented), and about three and a half minutes for the profile-guided
+iPhone recompile, which is keyed on the profile and never hits the object
+cache. Once per DOL; a send of a game that already has a profile-guided
+module skips all of it.

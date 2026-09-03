@@ -46,9 +46,23 @@ merely linked into the binary. See
 ~/Applications/DolBundler.app/Contents/Resources/recompios send
 ```
 
+It also profiles the game first. The phone has no JIT, so every decision about
+how a game is compiled is made on the Mac, and the recompiler alone cannot
+tell which of a title's functions it lives in. `send` recompiles an
+instrumented copy for the Mac, plays it headless for four minutes with
+scripted input -- START and A through the menus, then the stick and A -- and
+hands the counters to the phone build as an LLVM PGO profile. The profile is
+keyed on the IR the recompiler emits, which is the same for both targets, so
+a Mac-collected profile matches the phone module function for function; the
+recompiler counts any that do not and `send` says so. What the run saw is in
+`profile-report.txt` beside the module, hottest functions first. `send
+--no-profile` skips it; `profile --disc-id X --profile-seconds 600` collects a
+longer one and rebuilds the module.
+
 The rest of this section is the same thing by hand, which is what you want when
-you are changing the recompiler, tuning a target, or building with PGO. A
-module built that way is brought into DolBundler's store with
+you are changing the recompiler, tuning a target, or training a profile on a
+scene the scripted play-through does not reach. A module built that way is
+brought into DolBundler's store with
 
 ```sh
 recompios adopt --disc-id GEXE52 --generated /tmp/gexe52-llvm-ios/generated
@@ -101,6 +115,17 @@ build.
 `-j` is worth passing every time. dolrecomp emits one object per guest-code
 chunk and a GameCube game has thousands of them, but the default is `-j1`, not
 a core count — the flag reads as being about the split C output and is not.
+
+A profile by hand is the same three moves `send` makes. Generate with
+`DOLRECOMP_LLVM_PGO=gen` and `DOLRECOMP_LLVM_TARGET=arm64-apple-macos14.0`,
+same symbol prefix as the phone build; link the output with module-template
+(it sees `pgo=gen` in `generated.h` and adds compiler-rt's profile runtime);
+play it with `moderngekko-run --headless` under `LLVM_PROFILE_FILE=<dir>/%p.profraw`
+and `MODERNGEKKO_RUN_SECONDS=<n>` -- or `--load-state` on the scene you care
+about -- and the StaticRecomp core writes the counters at shutdown. Merge with
+llvm@20's `llvm-profdata merge`, then generate the phone module with
+`DOLRECOMP_LLVM_PGO=use DOLRECOMP_LLVM_PROFILE=<.profdata>`. The `send`
+pipeline's own copy of this lives in `recompios`, function `collect_profile`.
 
 The wrapper rejects an unversioned or non-20 LLVM and keeps the host tool out
 of `build-ios`. The module configure step validates its target, minimum OS,

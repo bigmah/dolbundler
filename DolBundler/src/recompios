@@ -6,23 +6,43 @@
 #   recompios [--porcelain] teams [--device <id>]
 #   recompios [--porcelain] send [--device <id>] [--team <id>]
 #                                [--disc-id <id>]... [--force] [--no-launch]
+#                                [--no-profile] [--profile-seconds <n>]
+#   recompios [--porcelain] profile --disc-id <id>... [--profile-seconds <n>]
 #   recompios [--porcelain] drop --disc-id <id> [--device <id>]
 #   recompios [--porcelain] adopt --disc-id <id> --generated <dir>
 #
 # `send` is the whole iPhone pipeline, and it is what the window's "Send to
 # iPhone" button runs:
 #
-#   1. recompile each game's DOL to arm64 iPhone objects, here on the Mac
-#   2. link every recompiled game into DolBundler.app and sign it
-#   3. install that app on the phone
-#   4. copy each game's extracted disc into the app's Documents folder
+#   1. profile each game: recompile an instrumented copy for this Mac, play it
+#      for a few minutes with scripted input, and keep what was hot
+#   2. recompile each game's DOL to arm64 iPhone objects, here on the Mac,
+#      laid out and optimised around that profile
+#   3. link every recompiled game into DolBundler.app and sign it
+#   4. install that app on the phone
+#   5. copy each game's extracted disc into the app's Documents folder
 #
-# Step 2 is why this cannot be one game at a time. Guest code has to be part of
+# Step 3 is why this cannot be one game at a time. Guest code has to be part of
 # the signed binary -- iOS will not map a page executable without a valid
 # signature behind it -- so adding a game means relinking and reinstalling the
-# app with every game in it. Steps 1 and 4 are the slow ones and both are
+# app with every game in it. Steps 1, 2 and 5 are the slow ones and all are
 # skipped when nothing changed, so sending the same library twice is a relink
 # and an install rather than an afternoon.
+#
+# Step 1 exists because the phone has no JIT: every optimisation the game will
+# ever get has to be decided here, and the recompiler on its own does not know
+# which of a title's ten thousand functions it actually lives in. Profile-guided
+# generation (LLVM's instrumented PGO) answers that -- the first title tuned by
+# hand this way went from a stutter to full speed on an iPhone 15 Pro Max, and
+# every other title in the store was shipping without it. Now every title gets
+# it. The profile is gathered on the Mac rather than the phone because the
+# instrumented module is the same LLVM IR either way and the Mac runs it in a
+# minute what the phone would need a whole install cycle for; the recompiler
+# checks the profile against every function it generates and says so if any
+# went unmatched. It costs one extra recompile and a few minutes of play per
+# game, once per DOL. --no-profile skips it for a quick send; `profile`
+# re-collects one for a game that is already in the store, for a longer run
+# (--profile-seconds) or after a recompiler change.
 #
 # Games come from the same library.json the window shows, so a disc has to be
 # added on the Mac first. With no --disc-id, every game in it that still has
@@ -57,9 +77,9 @@ CONF="$SELF_DIR/toolchain.conf"
 
 MODE=''
 case "${1-}" in
-  devices|teams|send|drop|adopt) MODE="$1"; shift ;;
+  devices|teams|send|profile|drop|adopt) MODE="$1"; shift ;;
   *)
-    echo "usage: $(basename "$0") devices|teams|send|drop|adopt [options]" >&2
+    echo "usage: $(basename "$0") devices|teams|send|profile|drop|adopt [options]" >&2
     exit 2
     ;;
 esac
@@ -67,24 +87,37 @@ esac
 PORCELAIN=0
 FORCE=0
 LAUNCH=1
+# DOLBUNDLER_IOS_PROFILE=0 is the environment's way of saying --no-profile,
+# for a window that launches this without a command line to add it to.
+PROFILE=1
+[ "${DOLBUNDLER_IOS_PROFILE:-1}" = 0 ] && PROFILE=0
+# Wall-clock seconds the instrumented game is played for. With the speed
+# limiter off a Mac runs a title at several times real time, so the default
+# is a handful of guest minutes: past the logos, through the menus, into play.
+PROFILE_SECONDS="${DOLBUNDLER_IOS_PROFILE_SECONDS:-240}"
 ARG_DEVICE="${DOLBUNDLER_DEVICE:-}"
 ARG_TEAM="${DOLBUNDLER_TEAM:-}"
 ARG_GENERATED=''
 WANTED=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --porcelain) PORCELAIN=1 ;;
-    --device)    ARG_DEVICE="${2-}"; shift ;;
-    --team)      ARG_TEAM="${2-}"; shift ;;
-    --disc-id)   WANTED+=("${2-}"); shift ;;
-    --generated) ARG_GENERATED="${2-}"; shift ;;
-    --force)     FORCE=1 ;;
-    --no-launch) LAUNCH=0 ;;
-    -*)          echo "unknown option: $1" >&2; exit 2 ;;
-    *)           echo "unexpected argument: $1" >&2; exit 2 ;;
+    --porcelain)  PORCELAIN=1 ;;
+    --device)     ARG_DEVICE="${2-}"; shift ;;
+    --team)       ARG_TEAM="${2-}"; shift ;;
+    --disc-id)    WANTED+=("${2-}"); shift ;;
+    --generated)  ARG_GENERATED="${2-}"; shift ;;
+    --force)      FORCE=1 ;;
+    --no-launch)  LAUNCH=0 ;;
+    --no-profile) PROFILE=0 ;;
+    --profile-seconds) PROFILE_SECONDS="${2-}"; shift ;;
+    -*)           echo "unknown option: $1" >&2; exit 2 ;;
+    *)            echo "unexpected argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
+case "$PROFILE_SECONDS" in
+  ''|*[!0-9]*) echo "--profile-seconds takes a whole number of seconds" >&2; exit 2 ;;
+esac
 
 if [ "$PORCELAIN" -eq 1 ]; then
   bold=''; dim=''; red=''; green=''; off=''
@@ -114,6 +147,9 @@ source "$CONF"
 # is how you started this, and only then. build.sh records where it found them.
 [ -n "${TOOLCHAIN_PATH-}" ] && export PATH="$TOOLCHAIN_PATH:$PATH"
 : "${MG_SRC:?toolchain.conf did not set MG_SRC}"
+# The desktop runtime that plays a game for its profile lives in the ModernGekko
+# build; a conf from before that was recorded still has the source tree.
+: "${MG_BUILD:=$MG_SRC/build}"
 # REPO_ROOT was added to toolchain.conf after this script; a conf written by an
 # older build.sh still has MG_SRC, which sits one level down from the root.
 REPO_ROOT="${REPO_ROOT:-$(dirname "$MG_SRC")}"
@@ -134,6 +170,19 @@ LLVM_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/Library/Caches}/DolBundler/iphone-llvm"
 # it calls into.
 LLVM_TARGET="${DOLRECOMP_LLVM_TARGET:-arm64-apple-ios17.0}"
 LLVM_CPU="${DOLRECOMP_LLVM_CPU:-apple-a16}"
+
+# The instrumented copy a profile is gathered from is built for this Mac. Same
+# CPU as the phone build: the profile is keyed on the LLVM IR the recompiler
+# emits, which does not depend on the target, but there is no reason to let the
+# two differ in anything. The pinned LLVM 20's own llvm-profdata merges the
+# counters, since it is the same LLVM that reads them back; Xcode's is the
+# fallback when the wrapper was built against another root.
+MAC_LLVM_TARGET="${DOLRECOMP_LLVM_MAC_TARGET:-arm64-apple-macos14.0}"
+LLVM_PROFDATA="${DOLRECOMP_LLVM20_ROOT:-/opt/homebrew/opt/llvm@20}/bin/llvm-profdata"
+[ -x "$LLVM_PROFDATA" ] || LLVM_PROFDATA="xcrun llvm-profdata"
+# A Gekko runs at 486 MHz; the chassis charges guest cycles, so this turns a
+# run's cycle count back into the guest time it covered.
+GEKKO_HZ=486000000
 
 # One object per guest-code chunk, and a GameCube game has thousands of them.
 # dolrecomp emits them one at a time unless it is told otherwise -- the default
@@ -359,36 +408,407 @@ module_stamp() {
   printf '%s %s %s\n' "$(shasum -a 256 "$1" | cut -d' ' -f1)" "$LLVM_TARGET" "$LLVM_CPU"
 }
 
-recompile_game() {
-  local disc_id="$1" name="$2" root="$3"
-  local out="$MODULES_DIR/$disc_id"
+# Whether a module was generated against a profile. Read from the module's own
+# generated.h rather than from a stamp of ours: the emitter folds the profile's
+# content hash into the codegen fingerprint it writes there, so a hand-built
+# PGO module brought in with `adopt` counts, and a module that merely sat
+# beside a profile does not.
+module_is_profiled() {
+  grep -q 'pgo=use:' "$1/generated/generated.h" 2>/dev/null
+}
+
+# --- profiling a game on this Mac --------------------------------------------
+
+# The controller the profiling run plays with. Dolphin offers every FIFO in
+# <user-dir>/Pipes as an input device, fed by lines of text, and this is the
+# same device the desktop app uses for its NSO controller driver -- the one
+# input path that does not need a keyboard, a window or a human.
+write_pipe_pad_config() {  # <user dir>
+  mkdir -p "$1/Config" "$1/Pipes"
+  rm -f "$1/Pipes/pad1"
+  mkfifo "$1/Pipes/pad1" || return 1
+  cat > "$1/Config/GCPadNew.ini" <<'INI'
+[GCPad1]
+Device = Pipe/0/pad1
+Buttons/A = `Button A`
+Buttons/B = `Button B`
+Buttons/X = `Button X`
+Buttons/Y = `Button Y`
+Buttons/Z = `Button Z`
+Buttons/Start = `Button START`
+Main Stick/Up = `Axis MAIN Y +`
+Main Stick/Down = `Axis MAIN Y -`
+Main Stick/Left = `Axis MAIN X -`
+Main Stick/Right = `Axis MAIN X +`
+Main Stick/Calibration = 100.00
+C-Stick/Up = `Axis C Y +`
+C-Stick/Down = `Axis C Y -`
+C-Stick/Left = `Axis C X -`
+C-Stick/Right = `Axis C X +`
+C-Stick/Calibration = 100.00
+Triggers/L = `Button L`
+Triggers/R = `Button R`
+Triggers/L-Analog = `Axis L +`
+Triggers/R-Analog = `Axis R +`
+D-Pad/Up = `Button D_UP`
+D-Pad/Down = `Button D_DOWN`
+D-Pad/Left = `Button D_LEFT`
+D-Pad/Right = `Button D_RIGHT`
+[GCPad2]
+[GCPad3]
+[GCPad4]
+INI
+}
+
+# What gets pressed, and when. The aim is to walk an arbitrary title from its
+# boot logos into something that looks like play with no knowledge of the
+# game: START and A get past almost every title screen, mode select and
+# confirmation there is, and after that the stick is kept moving and A is
+# tapped so that whatever is running gets input rather than an idle screen.
+# Nothing here needs to be right for a particular game; it needs to be
+# harmless for all of them, which is why B (back) is never sent and START
+# only ever comes as a pair once play is assumed -- a pause and an unpause.
+write_pump() {  # <path>
+  cat > "$1" <<'PY'
+import errno, os, random, sys, time
+
+fifo, seconds = sys.argv[1], float(sys.argv[2])
+deadline = time.monotonic() + seconds
+random.seed(1)
+
+# Dolphin opens the FIFO read-only and non-blocking at startup; until it has,
+# opening the write end fails with ENXIO. Poll rather than block so a runner
+# that never starts does not leave this process hanging.
+fd = None
+while fd is None and time.monotonic() < deadline:
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno not in (errno.ENXIO, errno.ENOENT):
+            raise
+        time.sleep(0.5)
+if fd is None:
+    sys.exit(0)
+
+
+def send(line):
+    try:
+        os.write(fd, (line + "\n").encode())
+    except BlockingIOError:
+        pass
+    except BrokenPipeError:
+        sys.exit(0)
+
+
+def tap(button, hold=0.25):
+    send("PRESS " + button)
+    time.sleep(hold)
+    send("RELEASE " + button)
+
+
+def wait(t):
+    end = time.monotonic() + t
+    while time.monotonic() < end:
+        if time.monotonic() >= deadline:
+            send("SET MAIN 0.5 0.5")
+            sys.exit(0)
+        time.sleep(min(0.1, end - time.monotonic()))
+
+
+# Menus: alternate START and A, with an occasional nudge down the list so the
+# second entry gets a turn. This is wall time with the speed limiter off, so
+# ninety seconds is several guest minutes -- enough for any intro movie.
+menu_end = time.monotonic() + min(90.0, seconds * 0.5)
+turn = 0
+while time.monotonic() < menu_end:
+    tap("START" if turn % 3 == 0 else "A")
+    wait(2.0)
+    if turn % 4 == 3:
+        tap("D_DOWN")
+        wait(0.5)
+    turn += 1
+
+# Play: keep the stick moving, tap A now and then, and once in a while send a
+# START pair -- a pause and unpause during play, one more screen advanced if
+# the title is still in a menu.
+last_start = time.monotonic()
+while True:
+    x = random.choice([0.0, 0.25, 0.5, 0.75, 1.0])
+    y = random.choice([0.0, 0.25, 0.5, 0.75, 1.0])
+    send("SET MAIN %.2f %.2f" % (x, y))
+    wait(random.uniform(0.8, 1.8))
+    if random.random() < 0.5:
+        tap("A")
+    if random.random() < 0.15:
+        tap(random.choice(["X", "Y", "R", "L"]))
+    if time.monotonic() - last_start > 30.0:
+        tap("START")
+        wait(1.0)
+        tap("START")
+        last_start = time.monotonic()
+PY
+}
+
+# The one line the chassis prints at shutdown, turned into a report a person
+# can read. Cycles are the guest's; the rest are the chassis's own counters
+# and say how much of the run the module itself executed.
+profile_report() {  # <run log> <report path> <name> <wall seconds>
+  /usr/bin/python3 - "$1" "$2" "$3" "$4" "$GEKKO_HZ" <<'PY'
+import re, sys
+log, report, name, wall, hz = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), float(sys.argv[5])
+text = open(log, errors="replace").read()
+lines = [l for l in text.splitlines() if "[staticrecomp] shutdown:" in l]
+if not lines:
+    print("the run left no shutdown counters")
+    sys.exit(1)
+fields = dict(re.findall(r"(\w+)=(\d+)", lines[-1]))
+cycles = int(fields.get("cycles", 0))
+guest = cycles / hz
+rate = guest / wall if wall else 0.0
+out = [
+    f"profile of {name}",
+    f"guest time covered: {guest / 60:.1f} min ({cycles} cycles)",
+    f"wall time: {wall:.0f} s ({rate:.2f}x real time on this Mac)",
+    f"module dispatches: {fields.get('native', '?')}",
+    f"instructions the module could not run: {fields.get('hook_fb', '?')} (hooks), {fields.get('fallback', '?')} (fallback)",
+    f"self-modified code taken from the module: {fields.get('smc_lost', '?')} bytes in {fields.get('smc_failed', '?')} chunk(s)",
+    f"poll reads skipped: {fields.get('poll_reads', '?')} ({fields.get('poll_yields', '?')} yields)",
+    "",
+    lines[-1].strip(),
+]
+open(report, "w").write("\n".join(out) + "\n")
+print(f"{guest / 60:.1f} guest minutes played at {rate:.1f}x; "
+      f"{fields.get('smc_lost', '?')} B of self-modifying code lost to the interpreter")
+PY
+}
+
+# Where the profile step leaves its result for the build step. Empty when no
+# profile could be gathered, in which case the build goes ahead without one.
+PROFILE_DATA=''
+
+collect_profile() {  # <disc id> <name> <game root> <module dir being built>
+  local disc_id="$1" name="$2" root="$3" out="$4"
+  local work="$out/profile-work"
+  local dol="$root/sys/main.dol"
+  local instrumented="$work/instrumented/generated"
+  local module_build="$work/module-build"
+  local user_dir="$work/user"
+  PROFILE_DATA=''
+
+  [ -x "$MG_BUILD/moderngekko-run" ] \
+    || { note "no $MG_BUILD/moderngekko-run to play the game with; skipping the profile"; return 1; }
+  command -v cmake >/dev/null && command -v ninja >/dev/null \
+    || { note "cmake and ninja are needed to link the instrumented copy; skipping the profile"; return 1; }
+
+  rm -rf "$work"
+  mkdir -p "$work" "$LLVM_CACHE_DIR/$disc_id-profile"
+
+  # 1. The same DOL, recompiled for this Mac with counters in every function.
+  # Same symbol prefix as the phone build, because the profile is keyed on
+  # function names; same CPU for the same reason it is everywhere else.
+  note "recompiling an instrumented copy for this Mac across $JOBS jobs"
+  DOLRECOMP_LLVM_TARGET="$MAC_LLVM_TARGET" \
+  DOLRECOMP_LLVM_CPU="$LLVM_CPU" \
+  DOLRECOMP_LLVM_CACHE="$LLVM_CACHE_DIR/$disc_id-profile" \
+  DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
+  DOLRECOMP_LLVM_PGO=gen \
+    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$work/instrumented" \
+      </dev/null >"$work/instrumented.log" 2>&1
+  if [ $? -ne 0 ] || [ ! -f "$instrumented/generated.h" ]; then
+    tail -20 "$work/instrumented.log" | strip_colour
+    note "the instrumented recompile failed; building without a profile"
+    return 1
+  fi
+  cp -f "$dol" "$instrumented/main.dol" || return 1
+
+  # 2. Linked into a module this Mac's runtime can load. The template sees
+  # pgo=gen in the header and links compiler-rt's profile runtime in.
+  note "linking it"
+  if ! CMAKE_NINJA_FORCE_RESPONSE_FILE=1 cmake -S "$MG_SRC/vendor/dolphin/module-template" \
+        -B "$module_build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=clang -DGAME_ID="$disc_id" \
+        -DGENERATED_DIR="$instrumented" \
+        -DGXRUNTIME_DIR="$MG_SRC/vendor/dolphin/GXRuntime" \
+        -DCHASSIS_ABI_DIR="$MG_SRC/vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp" \
+        >"$work/link.log" 2>&1 \
+     || ! cmake --build "$module_build" -j"$JOBS" >>"$work/link.log" 2>&1 \
+     || [ ! -f "$module_build/g${disc_id}_recomp.dylib" ]; then
+    tail -20 "$work/link.log" | strip_colour
+    note "the instrumented module did not link; building without a profile"
+    return 1
+  fi
+
+  # 3. Play it. Headless, silent, speed limiter off, its own user directory so
+  # nothing here touches the desktop app's settings, and a watchdog behind
+  # the runtime's own timer for the run that never comes back. The profile is
+  # written when the runtime shuts the module down, so a run that has to be
+  # killed leaves nothing, and that is reported as such rather than merged.
+  note "playing it for $PROFILE_SECONDS seconds with scripted input"
+  write_pipe_pad_config "$user_dir" || return 1
+  write_pump "$work/pump.py"
+  mkdir -p "$work/raw"
+  local started; started="$(date +%s)"
+  /usr/bin/python3 "$work/pump.py" "$user_dir/Pipes/pad1" $((PROFILE_SECONDS + 15)) &
+  local pump=$!
+  LLVM_PROFILE_FILE="$work/raw/%p.profraw" \
+  MODERNGEKKO_RUN_SECONDS="$PROFILE_SECONDS" \
+  MODERNGEKKO_EMULATION_SPEED=0 \
+    "$MG_BUILD/moderngekko-run" --game "$root" \
+      --module "$module_build/g${disc_id}_recomp.dylib" --user-dir "$user_dir" \
+      --headless --graphics Null --audio "No Audio Output" \
+      </dev/null >"$work/run.log" 2>&1 &
+  local runner=$!
+  local waited=0
+  while kill -0 "$runner" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    if [ "$waited" -gt $((PROFILE_SECONDS + 180)) ]; then
+      note "the game did not stop on its own; giving up on it"
+      kill "$runner" 2>/dev/null; sleep 2; kill -9 "$runner" 2>/dev/null
+      break
+    fi
+  done
+  wait "$runner" 2>/dev/null
+  local status=$?
+  kill "$pump" 2>/dev/null; wait "$pump" 2>/dev/null
+  local wall=$(( $(date +%s) - started ))
+  cp -f "$work/run.log" "$out/profile-run.log" 2>/dev/null
+  if ! ls "$work"/raw/*.profraw >/dev/null 2>&1; then
+    grep -a "StaticRecomp\|error" "$work/run.log" | tail -5 | strip_colour
+    note "the run (exit $status) wrote no profile; building without one"
+    return 1
+  fi
+
+  # 4. Merge, and say what the run covered.
+  if ! $LLVM_PROFDATA merge -o "$work/profile.profdata" "$work"/raw/*.profraw >"$work/merge.log" 2>&1; then
+    tail -5 "$work/merge.log"
+    note "llvm-profdata could not merge the counters; building without a profile"
+    return 1
+  fi
+  # A profile in which nothing ran is worse than none: the optimiser would
+  # read every function as cold and build the whole game for size. It
+  # happens when the module was rejected at load and the game ran on the
+  # interpreter instead, which the run log says and the counters do not.
+  local executed
+  executed="$($LLVM_PROFDATA show "$work/profile.profdata" 2>/dev/null \
+    | sed -n 's/^Total count: *//p' | head -1)"
+  if [ -z "$executed" ] || [ "$executed" -eq 0 ] 2>/dev/null; then
+    grep -a "StaticRecomp\|rejected" "$work/run.log" | tail -3 | strip_colour
+    note "the run never executed the instrumented module; building without a profile"
+    return 1
+  fi
+  local summary
+  if summary="$(profile_report "$work/run.log" "$out/profile-report.txt" "$name" "$wall")"; then
+    ok "$summary"
+  else
+    note "$summary"
+  fi
+  # The functions the run spent its time in, by guest address. When a title
+  # is still slow on the phone this is the first thing to read: one function
+  # far ahead of the rest is a wait loop or a decoder, and either is a lead.
+  {
+    printf '\nhottest generated functions (LLVM block counts, most first):\n'
+    $LLVM_PROFDATA show --topn=12 "$work/profile.profdata" 2>/dev/null \
+      | sed -n '/^Top /,$p' | tail -n +2
+  } >> "$out/profile-report.txt"
+  mv -f "$work/profile.profdata" "$out/profile.profdata"
+  # The instrumented objects and the dylib are a quarter of a gigabyte a game
+  # and have done their job; the object cache keeps the next collection quick.
+  rm -rf "$work"
+  PROFILE_DATA="$out/profile.profdata"
+  return 0
+}
+
+# How many of the pipeline's steps one game takes: the profile and the
+# recompile are separate headings, because the window shows the heading and
+# the profile is the longer of the two.
+steps_per_game() { [ "$PROFILE" -eq 1 ] && echo 2 || echo 1; }
+
+# `profile` rebuilds a game that is already in the store; `send` leaves one
+# alone. Kept apart from --force, which also rebuilds the recompiler.
+REBUILD=0
+
+recompile_game() {  # <disc id> <name> <game root> <first step index> <total steps>
+  local disc_id="$1" name="$2" root="$3" index="$4" total="$5"
+  local final="$MODULES_DIR/$disc_id"
+  # Built beside the module in the store and swapped in at the end, so a
+  # re-profile of a game that already works cannot fail half way and leave
+  # the next send building an app without it. Nothing else looks in here: the
+  # window and embedded_modules() both key on the stamp, which is written last.
+  local out="$MODULES_DIR/$disc_id.building"
   local generated="$out/generated"
   local dol="$root/sys/main.dol"
   local want; want="$(module_stamp "$dol")"
 
-  if [ "$FORCE" -eq 0 ] && [ -f "$generated/generated.h" ] \
-     && [ "$(cat "$out/dol.sha256" 2>/dev/null)" = "$want" ]; then
-    ok "$name is already recompiled for iPhone"
-    info module "$disc_id"
-    return 0
+  if [ "$PROFILE" -eq 1 ]; then
+    step "$index" "$total" "Profiling $name on this Mac"
+  else
+    step "$index" "$total" "Recompiling $name for iPhone"
   fi
 
-  note "PowerPC -> DolIR -> arm64 iPhone objects across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
+  if [ "$FORCE" -eq 0 ] && [ "$REBUILD" -eq 0 ] && [ -f "$final/generated/generated.h" ] \
+     && [ "$(cat "$final/dol.sha256" 2>/dev/null)" = "$want" ]; then
+    # A module built before profiling was part of the pipeline is still a
+    # working module; it is only rebuilt when a profile is wanted and it has
+    # none. Without --no-profile that is the upgrade every older module gets
+    # on its next send.
+    if [ "$PROFILE" -eq 0 ] || module_is_profiled "$final"; then
+      if module_is_profiled "$final"; then
+        ok "$name is already recompiled for iPhone, profile-guided"
+      else
+        ok "$name is already recompiled for iPhone"
+      fi
+      [ "$PROFILE" -eq 1 ] && step $((index + 1)) "$total" "Recompiling $name for iPhone"
+      info module "$disc_id"
+      return 0
+    fi
+    note "$name is recompiled for iPhone but without a profile"
+  fi
+
   rm -rf "$out"
   mkdir -p "$out" "$LLVM_CACHE_DIR/$disc_id"
 
+  PROFILE_DATA=''
+  if [ "$PROFILE" -eq 1 ]; then
+    collect_profile "$disc_id" "$name" "$root" "$out" || rm -rf "$out/profile-work"
+    step $((index + 1)) "$total" "Recompiling $name for iPhone"
+  fi
+
+  if [ -n "$PROFILE_DATA" ]; then
+    note "PowerPC -> DolIR -> arm64 iPhone objects, profile-guided, across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
+  else
+    note "PowerPC -> DolIR -> arm64 iPhone objects across $JOBS jobs. Minutes, and gigabytes of RAM for a large game."
+  fi
+
   # Every game in the app exports the same handful of module symbols, so each
   # one needs its own C-identifier prefix or the second to be linked collides
-  # with the first.
+  # with the first. With a profile, the emitter is told to warn rather than
+  # stop on a function the profile does not describe: the module is still
+  # correct, that function is merely built as it would have been anyway, and
+  # how many there were is reported below.
   DOLRECOMP_LLVM_TARGET="$LLVM_TARGET" \
   DOLRECOMP_LLVM_CPU="$LLVM_CPU" \
   DOLRECOMP_LLVM_CACHE="$LLVM_CACHE_DIR/$disc_id" \
   DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
+  DOLRECOMP_LLVM_PGO="${PROFILE_DATA:+use}" \
+  DOLRECOMP_LLVM_PROFILE="$PROFILE_DATA" \
+  DOLRECOMP_LLVM_PGO_STALE=warn \
     "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$out" \
-      </dev/null 2>&1 | strip_colour
+      </dev/null 2>&1 | tee "$out/recompile.log" | strip_colour
   if [ "${PIPESTATUS[0]}" -ne 0 ] || [ ! -f "$generated/generated.h" ]; then
     rm -rf "$out"
     die "recompiling $name for iPhone failed (see the log above)"
+  fi
+
+  if [ -n "$PROFILE_DATA" ]; then
+    local stale; stale="$(grep -c 'PGO profile stale' "$out/recompile.log" || true)"
+    if ! module_is_profiled "$out"; then
+      note "warning: the module does not record the profile it was built with; check $out/recompile.log"
+    elif [ "$stale" -gt 0 ]; then
+      note "warning: $stale chunk(s) had functions the profile did not describe and were built unguided; see $out/recompile.log"
+    else
+      ok "every generated function matched the profile"
+    fi
   fi
 
   # module-template validates the module against the DOL it came from, so the
@@ -397,8 +817,10 @@ recompile_game() {
     || { rm -rf "$out"; die "could not copy $name's main.dol beside its module"; }
   printf '%s' "$name" > "$out/title"
   printf '%s\n' "$want" > "$out/dol.sha256"
+  rm -rf "$final"
+  mv "$out" "$final" || die "could not move $name's module into place"
   info module "$disc_id"
-  ok "$(du -sh "$generated" | cut -f1 | tr -d ' ') of arm64 iPhone code"
+  ok "$(du -sh "$final/generated" | cut -f1 | tr -d ' ') of arm64 iPhone code"
 }
 
 # Every module that is whole, not only the ones being sent now: a game already
@@ -633,6 +1055,30 @@ if [ "$MODE" = drop ]; then
   exit 0
 fi
 
+# --- profile ------------------------------------------------------------------
+
+if [ "$MODE" = profile ]; then
+  [ "${#WANTED[@]}" -ge 1 ] || die "profile needs at least one --disc-id"
+  PROFILE=1
+  REBUILD=1
+  games="$(library_games "${WANTED[@]}")"
+  [ -n "$games" ] || die "no such game in the library, or its extracted disc is gone"
+  count="$(printf '%s' "$games" | grep -c .)"
+  total=$((1 + 2 * count))
+  printf '%s%s%s\n' "$bold" "RecompIOS - profiling $count game(s)" "$off"
+  step 1 "$total" "Preparing the iPhone recompiler"
+  ensure_recompiler
+  index=1
+  while IFS=$'\t' read -r disc_id name root; do
+    [ -n "$disc_id" ] || continue
+    recompile_game "$disc_id" "$name" "$root" $((index + 1)) "$total"
+    index=$((index + 2))
+  done <<<"$games"
+  printf '\n%sDone.%s %sThe next send links the new module in.%s\n' "$green" "$off" "$dim" "$off"
+  emit ok
+  exit 0
+fi
+
 # --- send ---------------------------------------------------------------------
 
 command -v xcrun >/dev/null || die "Xcode's command line tools are required"
@@ -642,8 +1088,9 @@ xcodebuild -version >/dev/null 2>&1 \
 games="$(library_games "${WANTED[@]+"${WANTED[@]}"}")"
 [ -n "$games" ] || die "no game to send. Add a disc image first; a game whose extracted disc has been deleted cannot be sent either."
 count="$(printf '%s' "$games" | grep -c .)"
-# checks, toolchain, one recompile and one copy per game, build, install
-total=$((4 + 2 * count))
+# checks, toolchain, a profile and a recompile and a copy per game, build,
+# install
+total=$((4 + ($(steps_per_game) + 1) * count))
 
 printf '%s%s%s\n' "$bold" "RecompIOS - $count game(s) to iPhone" "$off"
 
@@ -662,9 +1109,8 @@ ensure_recompiler
 index=2
 while IFS=$'\t' read -r disc_id name root; do
   [ -n "$disc_id" ] || continue
-  index=$((index + 1))
-  step "$index" "$total" "Recompiling $name for iPhone"
-  recompile_game "$disc_id" "$name" "$root"
+  recompile_game "$disc_id" "$name" "$root" $((index + 1)) "$total"
+  index=$((index + $(steps_per_game)))
 done <<<"$games"
 
 index=$((index + 1))

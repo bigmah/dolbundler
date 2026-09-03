@@ -114,21 +114,35 @@ launching from the library, you never need to.
 
 ## On an iPhone
 
-**iPhone** in the top right takes the library to a phone. One button, four
+**iPhone** in the top right takes the library to a phone. One button, five
 things:
 
 ```
-game.iso ─▶ DolBundler ─▶ arm64 iPhone objects ─┐
-                                                ├─▶ DolBundler.app, signed ─▶ 📱
-                        extracted disc ─────────┘        installed
+game.iso ─▶ DolBundler ─▶ played on the Mac ─▶ profile ─▶ arm64 iPhone objects ─┐
+                                                                                ├─▶ DolBundler.app, signed ─▶ 📱
+                        extracted disc ─────────────────────────────────────────┘        installed
 ```
 
-1. **Recompile** each game's DOL a second time, for `arm64-apple-ios17.0`
-2. **Link** every recompiled game into the phone app, and **sign** it
-3. **Install** that app on the phone
-4. **Copy** each game's extracted disc into the app's Documents folder
+1. **Profile** each game: recompile an instrumented copy for this Mac, play it
+   for a few minutes with scripted input, and keep a record of what was hot
+2. **Recompile** each game's DOL a second time, for `arm64-apple-ios17.0`,
+   laid out and optimised around that profile
+3. **Link** every recompiled game into the phone app, and **sign** it
+4. **Install** that app on the phone
+5. **Copy** each game's extracted disc into the app's Documents folder
 
-Step 2 is why the phone app is rebuilt whenever a game is added, and why
+Step 1 is there because the phone has no JIT: every decision about how a
+game's code is compiled is made here, once, and the recompiler alone cannot
+tell which of a title's ten thousand functions it actually lives in. Playing
+it answers that, and LLVM's profile-guided generation acts on the answer. The
+first title tuned this way by hand went from a stutter to full speed on an
+iPhone 15 Pro Max; every other title was shipping without it. It costs one
+extra recompile and a few minutes of unattended play per game, once per DOL.
+The report of what the run saw is beside the module, in
+`profile-report.txt`, and the hottest functions it lists are where to look
+when a title is still slow.
+
+Step 3 is why the phone app is rebuilt whenever a game is added, and why
 sending one game reinstalls the app with all of them in it. Guest code has to
 be inside the code signature: iOS will not map a page executable without a
 valid one, and nothing on a phone could sign a module produced there, so
@@ -178,7 +192,8 @@ that:
 
 | | |
 |---|---|
-| **Recompiling a game** | minutes, and gigabytes of RAM. Skipped unless the DOL, the target triple or the CPU changed. Objects are cached under `~/Library/Caches/DolBundler/iphone-llvm`, so even a forced rebuild mostly copies. |
+| **Profiling a game** | one more recompile, for this Mac, plus four minutes of play. Skipped when the module in the store was already built against a profile; a module from before profiling existed is rebuilt with one on its next send. `--no-profile` skips it for a quick send. |
+| **Recompiling a game** | minutes, and gigabytes of RAM. Skipped unless the DOL, the target triple or the CPU changed. Objects are cached under `~/Library/Caches/DolBundler/iphone-llvm`, so even a forced rebuild mostly copies -- except a profile-guided one, which is keyed on the profile and is always a fresh compile. |
 | **Building the app** | a relink, once Dolphin is built. |
 | **Copying a disc** | a GameCube disc over the cable. Skipped unless the extracted disc changed size. |
 
@@ -194,13 +209,19 @@ $R/recompios devices                       # paired phones, one per line
 $R/recompios teams --device "15 pro max"   # teams, readiest first
 $R/recompios send                          # the whole library onto the phone
 $R/recompios send --disc-id GMPE01         # one game, and relink around the rest
+$R/recompios send --no-profile             # quick: skip the play-through
+$R/recompios profile --disc-id GMPE01 --profile-seconds 600
+                                           # a longer play-through, module rebuilt
 $R/recompios drop --disc-id GMPE01         # and off it again
 ```
 
 `send` takes `--device` and `--team` (a devicectl identifier or any part of the
-phone's name; a team ID), `--force` to redo work that would be skipped, and
-`--no-launch` to leave the app closed at the end. Add `--porcelain` for the
-event stream the window consumes.
+phone's name; a team ID), `--force` to redo work that would be skipped,
+`--no-profile` to build without a play-through, `--profile-seconds` to play for
+longer or shorter than the default 240, and `--no-launch` to leave the app
+closed at the end. Add `--porcelain` for the event stream the window consumes.
+`DOLBUNDLER_IOS_PROFILE=0` and `DOLBUNDLER_IOS_PROFILE_SECONDS` are the same
+two knobs for a window, which has no command line.
 
 One more subcommand exists for the command-line route in
 [`ios/README.md`](../ios/README.md): a module built by hand — a PGO build, say —
@@ -400,6 +421,8 @@ the protocol is documented at the top of the script.
     settings.json                                   defaults and per-game overrides
     covers/<DISC_ID>.png                            banner art for the list
     iphone/modules/<DISC_ID>/generated/             arm64 iPhone objects
+    iphone/modules/<DISC_ID>/profile.profdata       what the play-through saw
+    iphone/modules/<DISC_ID>/profile-report.txt     ... in words, hottest functions first
     iphone/devices/<device>/games/<DISC_ID>         what is on which phone
 ~/.local/share/moderngekko/games/<DISC_ID>/         extracted disc
 ~/.local/share/moderngekko/Logs/<DISC_ID>.log       runtime log
