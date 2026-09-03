@@ -5,8 +5,15 @@
 // One imported disc: the extracted game, and whether this build can play it.
 @interface DBGameEntry : NSObject
 @property(nonatomic, copy) NSString* discID;
+// The disc header's title, 64 characters of whatever the publisher typed
+// there. What the screen shows is displayTitle.
 @property(nonatomic, copy) NSString* title;
 @property(nonatomic, copy) NSString* gameRoot;
+// <gameRoot>/files/opening.bnr, the disc's own art and properly set title.
+// Present for every disc the extractor has been through; see DBBanner.
+@property(nonatomic, readonly) NSString* bannerPath;
+// The banner's long title when the disc has one, else the header's.
+@property(nonatomic, readonly) NSString* displayTitle;
 // Bytes on disk for the extracted game, so the UI can explain where the
 // storage went. A GameCube disc costs well over a gigabyte extracted.
 @property(nonatomic, assign) unsigned long long extractedBytes;
@@ -30,6 +37,9 @@
 // Rescans <Documents>/games and rebuilds the list from what is actually there,
 // so deleting a folder in Files is enough to remove a game.
 - (void)reload;
+
+// Bytes on disk across every imported game, for the storage readout.
+@property(nonatomic, readonly) unsigned long long totalExtractedBytes;
 
 // Read a disc's identity without extracting it. Cheap -- it touches only the
 // first 0x440 bytes -- and it is what lets the import banner name the game and

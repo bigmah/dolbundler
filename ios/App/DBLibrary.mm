@@ -2,6 +2,9 @@
 
 #import "DBLibrary.h"
 
+#import "DBBanner.h"
+#import "DBSettings.h"
+
 #include <cstdio>
 #include <cstring>
 
@@ -11,6 +14,46 @@
 #include "dolbundler_run.h"
 
 @implementation DBGameEntry
+
+- (NSString*)bannerPath
+{
+  return [self.gameRoot stringByAppendingPathComponent:@"files/opening.bnr"];
+}
+
+- (NSString*)displayTitle
+{
+  // The banner's title when it says more than the header's, which it usually
+  // does -- "Super Mario Strikers" against a header of "Mario Soccer" -- and
+  // the header's when it does not: Disney's skate game banners itself as
+  // "D.E.S.A.". A banner title written in capitals ("STAR FOX: ASSAULT") is
+  // the publisher's box art shouting; the header is preferred for those, and
+  // failing a header the capitals are folded into a name.
+  DBBanner* banner = [DBBanner cachedBannerAtPath:self.bannerPath discID:self.discID];
+  NSString* candidate = banner.title;
+  // The header title is cached beside the disc by the import; a root without
+  // it reports the disc ID, which is not a title anything should defer to.
+  NSString* header = [self.title isEqualToString:self.discID] ? nil : self.title;
+  if (!candidate.length)
+    return self.title;
+  if (header.length > candidate.length)
+    return header;
+
+  NSUInteger letters = 0, capitals = 0;
+  for (NSUInteger i = 0; i < candidate.length; i++)
+  {
+    const unichar c = [candidate characterAtIndex:i];
+    if (![NSCharacterSet.letterCharacterSet characterIsMember:c])
+      continue;
+    letters++;
+    if ([NSCharacterSet.uppercaseLetterCharacterSet characterIsMember:c])
+      capitals++;
+  }
+  const BOOL shouting = letters > 0 && capitals * 10 > letters * 6;
+  if (!shouting)
+    return candidate;
+  return header.length ? header : candidate.capitalizedString;
+}
+
 @end
 
 @implementation DBLibrary
@@ -85,6 +128,10 @@
     entry.gameRoot = @(game.game_root);
     entry.extractedBytes = [self directorySize:entry.gameRoot];
     entry.playable = db_has_native_module(game.disc_id) != 0;
+    // A preview build has no modules at all, and a library of greyed-out
+    // tiles is not the screen being looked at.
+    if (DBSettings.uiPreviewMode)
+      entry.playable = YES;
 
     // The disc header's title is not kept anywhere after import, so it is
     // cached beside the game rather than re-read from an ISO that may be gone.
@@ -101,6 +148,14 @@
 - (NSArray<DBGameEntry*>*)games
 {
   return [_games copy];
+}
+
+- (unsigned long long)totalExtractedBytes
+{
+  unsigned long long total = 0;
+  for (DBGameEntry* entry in _games)
+    total += entry.extractedBytes;
+  return total;
 }
 
 - (unsigned long long)bytesOnDiskAt:(NSString*)path

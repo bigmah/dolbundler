@@ -256,6 +256,26 @@ int db_has_native_module(const char* disc_id)
   return 0;
 }
 
+int db_native_module_count(void)
+{
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  return (int)(sizeof(kDolBundlerNativeModules) / sizeof(kDolBundlerNativeModules[0]));
+#else
+  return 0;
+#endif
+}
+
+const char* db_native_module_id(int index)
+{
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  if (index >= 0 && index < db_native_module_count())
+    return kDolBundlerNativeModules[index].game_id;
+#else
+  (void)index;
+#endif
+  return "";
+}
+
 int db_run_game(const char* game_root, const char* user_dir,
                 const char* title, char* err, size_t err_size)
 {

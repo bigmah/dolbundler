@@ -173,21 +173,69 @@ the denominator, a CISO is compressed and its size says nothing so a full
 GameCube disc is used as a ceiling instead — and it is clamped short of the end
 rather than allowed to sit at 100% while the extractor is still working.
 
+## The library
+
+Every card shows the disc's own art. A GameCube disc carries `opening.bnr` at
+the root of its filesystem -- a 96x32 picture plus the game's name, maker and a
+two-line description, which is what the console's own menu shows for an
+inserted disc -- and the import extracts it with everything else. `DBBanner`
+decodes it (RGB5A3, 4x4 tiles, Shift-JIS text on a Japanese disc and
+Windows-1252 otherwise) and the card is built from two copies: one stretched
+to fill, which at that magnification is its own blur and gives the card the
+game's colours, and one drawn pixel-for-pixel with no smoothing, because a
+banner that was pixel art on a CRT stays pixel art at 6x. It is the same
+picture the Mac app uses for its covers. The banner's long title is what the
+library shows -- "Super Smash Bros. Melee" where the disc header says "Super
+Smash Bros Melee" -- and press-and-hold on a card lifts out the art at full
+size with the description under it. A game root with no banner falls back to a
+tile generated from the disc ID.
+
+The gear opens Settings: the same controls settings as the pause menu, a
+layout reset, how much of the phone the library takes, and the list of disc
+IDs this build was linked with.
+
 ## In a game
 
-The corner button opens a panel that pauses the emulated machine rather than
-leaving it running behind a menu, using `Runtime::Pause()`. It carries an
-overlay-opacity slider, a haptics switch, the fps/speed readout's switch, and
-Quit. It exists because the alternative was a bare ✕ that quit without asking,
-on a screen whose entire surface is a controller — a mis-tap in the corner
-ended the session.
+The button at the top opens a panel that pauses the emulated machine rather
+than leaving it running behind a menu, using `Runtime::Pause()`. It exists
+because the alternative was a bare ✕ that quit without asking, on a screen
+whose entire surface is a controller — a mis-tap in the corner ended the
+session. Quit still asks.
 
-The button and the readout sit at the top *centre*. The corners are where L and
-R are, and those belong under the index fingers and cannot move.
+The panel is two columns because the screen is landscape: the game's card and
+the two ways out on the left, the settings on the right -- overlay opacity,
+control size, haptics, the fps/speed readout, and **Edit Layout**. A single
+stack of rows stopped fitting a phone's short side.
+
+**Every control can be moved.** Edit Layout dismisses the panel, keeps the
+game paused, and turns the pad into an editor: a scrim, a dashed ring round
+every control, and a toolbar at the top with Reset, a size slider and Done. A
+touch drags whatever it lands on -- the buttons, the D-pad, either stick's
+home -- and keeps its offset from the finger rather than snapping to sit under
+it, so a thumb that picked up the edge of A is still holding the edge of A.
+Where a control is dropped is stored in `DBSettings` as a fraction of the safe
+area, not in points, so the layout comes back on the next launch and lands in
+about the same place on a different phone. Done resumes the game: someone who
+has just arranged the pad wants to try it, not to see the menu again.
+
+The editor shows the pad even with a physical controller attached, and the
+main stick's floating zone follows its home rather than being fixed below the
+D-pad, so a layout that puts the stick somewhere unusual still gets its own
+well.
+
+The menu button and the readout sit at the top *centre*. The corners are where
+L and R are by default, and those belong under the index fingers.
 
 Backgrounding the app pauses the game and returning resumes it, unless the
-panel is open — someone who opened it before switching away still has it open,
-and resuming underneath it is what the panel exists to prevent.
+panel or the layout editor is open — someone who opened it before switching
+away still has it open, and resuming underneath it is what the panel exists to
+prevent.
+
+`DOLBUNDLER_UI_PREVIEW=library|settings|game|menu|edit` walks the app to that screen
+without a game running -- every entry reads as playable, the game screen opens
+without booting anything, and the pad stays visible whatever is attached. It
+exists because nothing can tap the simulator from a script, and a screen that
+sits behind two taps has to be reached by the app itself to be looked at.
 
 There is no "Starting <game>…" placeholder. The one that used to be here was a
 label on an eighteen-second timer, sized for the twelve seconds the removed

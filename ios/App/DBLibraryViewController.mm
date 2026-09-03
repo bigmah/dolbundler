@@ -4,9 +4,12 @@
 
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#import "DBBanner.h"
 #import "DBGameCell.h"
 #import "DBGameViewController.h"
 #import "DBLibrary.h"
+#import "DBSettings.h"
+#import "DBSettingsViewController.h"
 #import "DBTheme.h"
 
 // A GameCube disc is ~1.35 GB as an ISO and expands to roughly the same again
@@ -19,6 +22,97 @@ static const unsigned long long kMinimumFreeBytes = 3ULL * 1024 * 1024 * 1024;
 // directory itself -- and walking a disc's worth of files is not free, so it
 // is walked once a second and not more.
 static const NSTimeInterval kImportPollInterval = 1.0;
+
+// What a press-and-hold on a card lifts out of the grid: the art at a size
+// the grid cannot afford, and the description the disc wrote for itself --
+// two lines the publisher chose, which no library screen has room for and
+// which is the one thing about a game a card cannot say.
+@interface DBGamePreviewController : UIViewController
+- (instancetype)initWithEntry:(DBGameEntry*)entry;
+@end
+
+@implementation DBGamePreviewController
+{
+  DBGameEntry* _entry;
+}
+
+- (instancetype)initWithEntry:(DBGameEntry*)entry
+{
+  self = [super initWithNibName:nil bundle:nil];
+  if (self)
+    _entry = entry;
+  return self;
+}
+
+- (void)viewDidLoad
+{
+  [super viewDidLoad];
+  self.view.backgroundColor = UIColor.secondarySystemBackgroundColor;
+
+  const CGFloat width = 320;
+  const CGSize artSize = CGSizeMake(width, round(width / 1.6));
+  DBBanner* banner = [DBBanner cachedBannerAtPath:_entry.bannerPath discID:_entry.discID];
+
+  UIImageView* art = [[UIImageView alloc] init];
+  art.image = [DBTheme cardImageForDiscID:_entry.discID
+                                   banner:banner
+                                     size:artSize
+                                    scale:UIScreen.mainScreen.scale
+                                   dimmed:!_entry.playable];
+  art.contentMode = UIViewContentModeScaleAspectFill;
+  art.clipsToBounds = YES;
+  [art.heightAnchor constraintEqualToConstant:artSize.height].active = YES;
+
+  UILabel* title = [[UILabel alloc] init];
+  title.text = _entry.displayTitle;
+  title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+  title.textColor = UIColor.labelColor;
+  title.numberOfLines = 2;
+
+  NSString* size = [NSByteCountFormatter stringFromByteCount:(long long)_entry.extractedBytes
+                                                  countStyle:NSByteCountFormatterCountStyleFile];
+  UILabel* facts = [[UILabel alloc] init];
+  facts.text = banner.maker.length
+                   ? [NSString stringWithFormat:@"%@ · %@ · %@", banner.maker, _entry.discID, size]
+                   : [NSString stringWithFormat:@"%@ · %@", _entry.discID, size];
+  facts.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+  facts.textColor = UIColor.secondaryLabelColor;
+  facts.numberOfLines = 2;
+
+  UILabel* summary = [[UILabel alloc] init];
+  summary.text = banner.summary.length ? banner.summary
+                 : _entry.playable    ? @"Tap to play."
+                                      : @"This build has no native module for this disc.";
+  summary.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+  summary.textColor = UIColor.labelColor;
+  summary.numberOfLines = 0;
+
+  UIStackView* text = [[UIStackView alloc] initWithArrangedSubviews:@[ title, facts, summary ]];
+  text.axis = UILayoutConstraintAxisVertical;
+  text.spacing = 4;
+  [text setCustomSpacing:10 afterView:facts];
+  text.layoutMargins = UIEdgeInsetsMake(12, 14, 14, 14);
+  text.layoutMarginsRelativeArrangement = YES;
+
+  UIStackView* stack = [[UIStackView alloc] initWithArrangedSubviews:@[ art, text ]];
+  stack.axis = UILayoutConstraintAxisVertical;
+  stack.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:stack];
+  [NSLayoutConstraint activateConstraints:@[
+    [stack.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+    [stack.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [stack.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    [stack.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    [stack.widthAnchor constraintEqualToConstant:width],
+  ]];
+
+  const CGSize fitted = [stack systemLayoutSizeFittingSize:CGSizeMake(width, UILayoutFittingCompressedSize.height)
+                                     withHorizontalFittingPriority:UILayoutPriorityRequired
+                                           verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+  self.preferredContentSize = CGSizeMake(width, fitted.height);
+}
+
+@end
 
 @interface DBLibraryViewController () <UICollectionViewDataSource,
                                        UICollectionViewDelegate,
@@ -47,12 +141,19 @@ static const NSTimeInterval kImportPollInterval = 1.0;
   self.title = @"Library";
   self.view.backgroundColor = UIColor.systemBackgroundColor;
 
-  self.navigationItem.rightBarButtonItem =
+  UIBarButtonItem* add =
       [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"plus"]
                                        style:UIBarButtonItemStylePlain
                                       target:self
                                       action:@selector(pickDisc)];
-  self.navigationItem.rightBarButtonItem.accessibilityLabel = @"Add a disc";
+  add.accessibilityLabel = @"Add a disc";
+  UIBarButtonItem* settings =
+      [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"gearshape"]
+                                       style:UIBarButtonItemStylePlain
+                                      target:self
+                                      action:@selector(showSettings)];
+  settings.accessibilityLabel = @"Settings";
+  self.navigationItem.rightBarButtonItems = @[ add, settings ];
   self.view.tintColor = DBTheme.accent;
 
   [self buildCollectionView];
@@ -275,6 +376,23 @@ static const NSTimeInterval kImportPollInterval = 1.0;
   static BOOL autoplay_done = NO;
   if (autoplay_done)
     return;
+
+  // The UI preview walks into the first game's screen the same way, without
+  // starting it. See DBSettings.uiPreviewMode.
+  NSString* preview = DBSettings.uiPreviewMode;
+  if ([preview isEqualToString:@"settings"])
+  {
+    autoplay_done = YES;
+    [self showSettings];
+    return;
+  }
+  if (preview && ![preview isEqualToString:@"library"] && DBLibrary.shared.games.count)
+  {
+    autoplay_done = YES;
+    [self play:DBLibrary.shared.games.firstObject];
+    return;
+  }
+
   const char* autoplay = getenv("DOLBUNDLER_AUTOPLAY");
   if (!autoplay || !*autoplay)
     return;
@@ -309,6 +427,23 @@ static const NSTimeInterval kImportPollInterval = 1.0;
   [[DBLibrary shared] reload];
   [self refresh];
   [control endRefreshing];
+}
+
+#pragma mark - Settings
+
+- (void)showSettings
+{
+  UINavigationController* nav = [[UINavigationController alloc]
+      initWithRootViewController:[[DBSettingsViewController alloc] init]];
+  nav.navigationBar.tintColor = DBTheme.accent;
+  // A sheet rather than a push: the settings are a side trip from the
+  // library, not a place in it, and a sheet comes back to the grid with one
+  // swipe.
+  UISheetPresentationController* sheet = nav.sheetPresentationController;
+  sheet.detents = @[ UISheetPresentationControllerDetent.mediumDetent,
+                     UISheetPresentationControllerDetent.largeDetent ];
+  sheet.prefersGrabberVisible = YES;
+  [self presentViewController:nav animated:YES completion:nil];
 }
 
 #pragma mark - Import
@@ -507,7 +642,7 @@ static const NSTimeInterval kImportPollInterval = 1.0;
                        @"Games are recompiled on a Mac and linked into the app before it is "
                        @"signed, so a disc has to be built in to be played. The import is still "
                        @"here — a build that includes %@ will pick it up.",
-                       entry.title, entry.discID, entry.discID];
+                       entry.displayTitle, entry.discID, entry.discID];
   if (!justImported)
   {
     message = [NSString
@@ -559,8 +694,10 @@ static const NSTimeInterval kImportPollInterval = 1.0;
   DBGameEntry* entry = DBLibrary.shared.games[indexPath.item];
 
   return [UIContextMenuConfiguration
-      configurationWithIdentifier:nil
-                  previewProvider:nil
+      configurationWithIdentifier:@(indexPath.item)
+                  previewProvider:^UIViewController*() {
+                    return [[DBGamePreviewController alloc] initWithEntry:entry];
+                  }
                    actionProvider:^UIMenu*(NSArray<UIMenuElement*>* suggested) {
                      NSMutableArray<UIMenuElement*>* actions = [NSMutableArray array];
 
@@ -587,19 +724,32 @@ static const NSTimeInterval kImportPollInterval = 1.0;
                      remove.attributes = UIMenuElementAttributesDestructive;
                      [actions addObject:remove];
 
-                     NSString* size = [NSByteCountFormatter
-                         stringFromByteCount:(long long)entry.extractedBytes
-                                  countStyle:NSByteCountFormatterCountStyleFile];
-                     return [UIMenu menuWithTitle:[NSString stringWithFormat:@"%@ · %@",
-                                                                            entry.discID, size]
-                                         children:actions];
+                     return [UIMenu menuWithTitle:@"" children:actions];
                    }];
+}
+
+// Tapping the lifted preview is the same as tapping the card.
+- (void)collectionView:(UICollectionView*)collectionView
+    willPerformPreviewActionForMenuWithConfiguration:(UIContextMenuConfiguration*)configuration
+                                            animator:(id<UIContextMenuInteractionCommitAnimating>)animator
+{
+  const NSInteger item = [(NSNumber*)configuration.identifier integerValue];
+  if (item < 0 || item >= (NSInteger)DBLibrary.shared.games.count)
+    return;
+  DBGameEntry* entry = DBLibrary.shared.games[item];
+  animator.preferredCommitStyle = UIContextMenuInteractionCommitStyleDismiss;
+  [animator addCompletion:^{
+    if (entry.playable)
+      [self play:entry];
+    else
+      [self explainUnplayable:entry importedJustNow:NO];
+  }];
 }
 
 - (void)confirmDelete:(DBGameEntry*)entry
 {
   UIAlertController* alert = [UIAlertController
-      alertControllerWithTitle:[NSString stringWithFormat:@"Delete %@?", entry.title]
+      alertControllerWithTitle:[NSString stringWithFormat:@"Delete %@?", entry.displayTitle]
                        message:@"The extracted game is removed from this device. The original "
                                @"disc image is not touched."
                 preferredStyle:UIAlertControllerStyleAlert];

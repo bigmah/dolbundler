@@ -2,13 +2,16 @@
 
 #import <UIKit/UIKit.h>
 
-// One place for the colours the app uses twice or more, and for the artwork it
-// has to invent.
+@class DBBanner;
+
+// One place for the colours the app uses twice or more, and for the artwork
+// on the library's cards.
 //
-// No game here ships with cover art -- the app is handed a disc image and
-// nothing else -- so a tile is generated from the disc ID instead. It is
-// derived, not random: the same disc always produces the same tile, which is
-// what makes a library of six grey rectangles scannable at a glance.
+// A card is built around the disc's own banner (see DBBanner) when the game
+// has one, which every extracted disc does. For a game root that somehow has
+// none, a tile is generated from the disc ID instead. It is derived, not
+// random: the same disc always produces the same tile, which is what makes a
+// library of grey rectangles scannable at a glance.
 @interface DBTheme : NSObject
 
 // The GameCube's own button colours, used by the on-screen pad so the overlay
@@ -27,12 +30,14 @@
 // The two ends of a disc's generated gradient. Stable for a given disc ID.
 + (NSArray<UIColor*>*)coverColorsForDiscID:(NSString*)discID;
 
-// A generated tile for one disc: the gradient above, a mini-disc glyph, and
-// the disc ID set across the bottom. `dimmed` renders the greyed-out version
-// used for a disc this build has no module for.
-+ (UIImage*)coverImageForDiscID:(NSString*)discID
-                           size:(CGSize)size
-                          scale:(CGFloat)scale
-                         dimmed:(BOOL)dimmed;
+// The art for one game's card at the given size: the banner, pixel-sharp,
+// floating over a blurred and darkened copy of itself -- or, with no banner,
+// the generated tile. `dimmed` renders the greyed-out version used for a disc
+// this build has no module for.
++ (UIImage*)cardImageForDiscID:(NSString*)discID
+                        banner:(DBBanner*)banner
+                          size:(CGSize)size
+                         scale:(CGFloat)scale
+                        dimmed:(BOOL)dimmed;
 
 @end

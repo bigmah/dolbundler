@@ -4,14 +4,14 @@
 
 @class DBGameEntry;
 
-// One tile in the library grid: generated cover art, the title, and one line
-// saying either how much room the game takes or why it cannot be played.
+// One card in the library grid: the disc's banner art, the title, and one
+// line saying either how much room the game takes or why it cannot be played.
 @interface DBGameCell : UICollectionViewCell
 
 @property(class, nonatomic, readonly) NSString* reuseIdentifier;
 
-// The height a tile needs for a given tile width, so the layout and the cell
-// agree on the artwork's proportions without either guessing.
+// The height a card needs for a given width, so the layout and the cell agree
+// on the artwork's proportions without either guessing.
 + (CGFloat)heightForWidth:(CGFloat)width;
 
 - (void)configureWithEntry:(DBGameEntry*)entry;

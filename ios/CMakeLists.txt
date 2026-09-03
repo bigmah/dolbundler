@@ -43,13 +43,23 @@ add_executable(DolBundler MACOSX_BUNDLE
   App/DBLibraryViewController.mm
   App/DBGameCell.mm
   App/DBGameViewController.mm
+  App/DBBanner.mm
   App/DBPauseMenuView.mm
   App/DBSettings.mm
+  App/DBSettingsViewController.mm
   App/DBTheme.mm
   App/DBTouchPadView.mm
   bridge/dolbundler_core.c
   bridge/dolbundler_run.mm
+  App/Assets.xcassets
 )
+
+# The app icon. Xcode compiles the catalog with actool and writes the icon
+# entries into the Info.plist itself, so nothing about it is in Info.plist.in.
+# The PNG is drawn by DolBundler/src/make_app_icon.py --ios-png; regenerate it
+# there rather than editing the file.
+set_source_files_properties(App/Assets.xcassets PROPERTIES
+  MACOSX_PACKAGE_LOCATION Resources)
 
 target_include_directories(DolBundler PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/App
@@ -206,6 +216,7 @@ target_link_libraries(DolBundler PRIVATE
   "-framework QuartzCore"
   "-framework Metal"
   "-framework MetalKit"
+  "-framework CoreImage"
   "-framework AVFoundation"
   "-framework GameController"
   "-framework UniformTypeIdentifiers"
@@ -217,6 +228,7 @@ set_target_properties(DolBundler PROPERTIES
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${DOLBUNDLER_BUNDLE_ID}"
   XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
   XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+  XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
   # The emulation thread is long-lived and the interpreter is the hot path;
   # letting Xcode strip or reorder it buys nothing and complicates profiling.
   XCODE_ATTRIBUTE_ENABLE_BITCODE NO

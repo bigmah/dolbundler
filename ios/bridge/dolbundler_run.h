@@ -50,6 +50,11 @@ void db_set_render_layer(void* ca_metal_layer, float scale);
 // anything on disk, is what decides whether an imported disc can be played.
 int db_has_native_module(const char* disc_id);
 
+// The disc IDs this build was linked with, for the settings screen to list.
+// db_native_module_id() returns a string that lives as long as the process.
+int db_native_module_count(void);
+const char* db_native_module_id(int index);
+
 // Boots the disc extracted at `game_root` against this build's native module
 // for it and blocks until the game stops or db_request_stop() is called.
 // Fails if there is no such module; ask db_has_native_module() first.

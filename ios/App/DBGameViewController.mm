@@ -9,6 +9,7 @@
 #import "DBMetalView.h"
 #import "DBPauseMenuView.h"
 #import "DBSettings.h"
+#import "DBTheme.h"
 #import "DBTouchPadView.h"
 
 #include "dolbundler_run.h"
@@ -58,6 +59,11 @@ CGFloat GameDrawableScale(CGSize bounds)
 
   UILabel* _perfLabel;
   CADisplayLink* _perfLink;
+
+  // The layout editor's toolbar, built the first time it is needed.
+  UIView* _editBar;
+  UISlider* _editScale;
+  BOOL _editing;
 }
 
 - (instancetype)initWithGame:(DBGameEntry*)game
@@ -166,6 +172,92 @@ CGFloat GameDrawableScale(CGSize bounds)
   [self.view addSubview:_perfLabel];
 }
 
+- (UIButton*)editBarButton:(NSString*)title
+                     image:(NSString*)symbol
+                    filled:(BOOL)filled
+                    action:(SEL)action
+{
+  UIButtonConfiguration* config = filled ? [UIButtonConfiguration filledButtonConfiguration]
+                                         : [UIButtonConfiguration grayButtonConfiguration];
+  config.title = title;
+  if (symbol)
+  {
+    config.image = [UIImage systemImageNamed:symbol
+                           withConfiguration:[UIImageSymbolConfiguration
+                                                 configurationWithPointSize:12
+                                                                     weight:UIImageSymbolWeightSemibold]];
+    config.imagePadding = 5;
+  }
+  config.baseBackgroundColor = filled ? DBTheme.accent : [UIColor colorWithWhite:1.0 alpha:0.14];
+  config.baseForegroundColor = UIColor.whiteColor;
+  config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+  config.contentInsets = NSDirectionalEdgeInsetsMake(7, 13, 7, 13);
+  config.titleTextAttributesTransformer = ^NSDictionary*(NSDictionary* incoming) {
+    NSMutableDictionary* attrs = [incoming mutableCopy];
+    attrs[NSFontAttributeName] = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    return attrs;
+  };
+  UIButton* button = [UIButton buttonWithConfiguration:config primaryAction:nil];
+  [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+  return button;
+}
+
+// The toolbar the layout editor puts where the HUD was: reset, the size
+// slider, and the way out. Everything it needs is in one strip at the top
+// centre, which is the one part of the screen the default layout leaves empty
+// -- and it stays there whatever the controls have been dragged to.
+- (void)buildEditBar
+{
+  _editBar = [[UIView alloc] init];
+  _editBar.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.72];
+  _editBar.layer.cornerRadius = 24;
+  _editBar.layer.cornerCurve = kCACornerCurveContinuous;
+  _editBar.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+  _editBar.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+  [self.view addSubview:_editBar];
+
+  UILabel* hint = [[UILabel alloc] init];
+  hint.text = @"Drag any control";
+  hint.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+  hint.textColor = [UIColor colorWithWhite:1.0 alpha:0.7];
+
+  UILabel* sizeLabel = [[UILabel alloc] init];
+  sizeLabel.text = @"Size";
+  sizeLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+  sizeLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.7];
+
+  _editScale = [[UISlider alloc] init];
+  _editScale.minimumValue = DBSettings.minPadScale;
+  _editScale.maximumValue = DBSettings.maxPadScale;
+  _editScale.value = DBSettings.shared.padScale;
+  _editScale.minimumTrackTintColor = DBTheme.accent;
+  [_editScale addTarget:self
+                 action:@selector(editScaleChanged)
+       forControlEvents:UIControlEventValueChanged];
+  [_editScale.widthAnchor constraintEqualToConstant:130].active = YES;
+
+  UIStackView* row = [[UIStackView alloc] initWithArrangedSubviews:@[
+    [self editBarButton:@"Reset" image:@"arrow.counterclockwise" filled:NO action:@selector(resetLayoutFromEditor)],
+    hint,
+    sizeLabel,
+    _editScale,
+    [self editBarButton:@"Done" image:@"checkmark" filled:YES action:@selector(endEditingLayout)],
+  ]];
+  row.axis = UILayoutConstraintAxisHorizontal;
+  row.alignment = UIStackViewAlignmentCenter;
+  row.spacing = 14;
+  [row setCustomSpacing:8 afterView:sizeLabel];
+  row.translatesAutoresizingMaskIntoConstraints = NO;
+  [_editBar addSubview:row];
+
+  [NSLayoutConstraint activateConstraints:@[
+    [row.leadingAnchor constraintEqualToAnchor:_editBar.leadingAnchor constant:8],
+    [row.trailingAnchor constraintEqualToAnchor:_editBar.trailingAnchor constant:-8],
+    [row.topAnchor constraintEqualToAnchor:_editBar.topAnchor constant:6],
+    [row.bottomAnchor constraintEqualToAnchor:_editBar.bottomAnchor constant:-6],
+  ]];
+}
+
 - (void)dealloc
 {
   [NSNotificationCenter.defaultCenter removeObserver:self];
@@ -176,6 +268,15 @@ CGFloat GameDrawableScale(CGSize bounds)
 - (void)updatePadVisibility
 {
   dispatch_async(dispatch_get_main_queue(), ^{
+    // The editor shows the pad whatever is attached: a layout is edited on
+    // the screen even by someone who mostly plays on a pad. The preview hook
+    // does too -- a Mac with a controller plugged in reports it to the
+    // simulator, and the pad is the thing being looked at.
+    if (self->_editing || DBSettings.uiPreviewMode)
+    {
+      self->_pad.hidden = NO;
+      return;
+    }
     self->_pad.hidden = GCController.controllers.count > 0;
   });
 }
@@ -201,6 +302,14 @@ CGFloat GameDrawableScale(CGSize bounds)
   _perfLabel.frame = CGRectMake(originX + size + gap, top + (size - perfHeight) / 2, perfWidth,
                                 perfHeight);
 
+  if (_editBar)
+  {
+    const CGSize wanted = [_editBar systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
+    const CGFloat width = MIN(wanted.width, CGRectGetWidth(self.view.bounds) - 2 * inset);
+    _editBar.frame = CGRectMake(round(CGRectGetMidX(self.view.bounds) - width / 2), top - 4, width,
+                                MAX(48, wanted.height));
+  }
+
   CAMetalLayer* layer = (CAMetalLayer*)_metalView.layer;
   layer.contentsScale = GameDrawableScale(_metalView.bounds.size);
   layer.drawableSize = CGSizeMake(CGRectGetWidth(_metalView.bounds) * layer.contentsScale,
@@ -213,6 +322,18 @@ CGFloat GameDrawableScale(CGSize bounds)
   if (_started)
     return;
   _started = YES;
+
+  // Test hook: the screen without the game. See DBSettings.uiPreviewMode.
+  NSString* preview = DBSettings.uiPreviewMode;
+  if (preview)
+  {
+    [self scheduleHUDFade];
+    if ([preview isEqualToString:@"menu"])
+      [self showMenu];
+    else if ([preview isEqualToString:@"edit"])
+      [self beginEditingLayout];
+    return;
+  }
 
   // A running game must not let the screen dim; there is no input for iOS to
   // notice while someone is only holding the on-screen stick.
@@ -290,7 +411,7 @@ CGFloat GameDrawableScale(CGSize bounds)
 
 - (void)showMenu
 {
-  if (_menu)
+  if (_menu || _editing)
     return;
   [self wakeHUD];
 
@@ -298,7 +419,7 @@ CGFloat GameDrawableScale(CGSize bounds)
   // run for the length of the animation with its controls already covered.
   db_set_paused(1);
 
-  _menu = [[DBPauseMenuView alloc] initWithTitle:_game.title];
+  _menu = [[DBPauseMenuView alloc] initWithGame:_game];
   __weak __typeof(self) weakSelf = self;
   _menu.onSettingsChanged = ^{
     [weakSelf applySettings];
@@ -307,10 +428,24 @@ CGFloat GameDrawableScale(CGSize bounds)
     [weakSelf dismissMenuAndResume];
   };
   _menu.onQuit = ^{
-    [weakSelf quitGame];
+    [weakSelf confirmQuit];
+  };
+  _menu.onEditLayout = ^{
+    [weakSelf beginEditingLayout];
+  };
+  _menu.onResetLayout = ^{
+    [weakSelf resetLayout];
   };
   [_menu presentInView:self.view];
   _menuButton.hidden = YES;
+  // The readout sits beside the button and would otherwise poke out above
+  // the panel, dimmed, saying nothing about a paused game.
+  _perfLabel.hidden = YES;
+}
+
+- (void)resetLayout
+{
+  [_pad resetLayout];
 }
 
 - (void)dismissMenuAndResume
@@ -321,6 +456,7 @@ CGFloat GameDrawableScale(CGSize bounds)
   _menu = nil;
   [menu dismissWithCompletion:^{
     self->_menuButton.hidden = NO;
+    self->_perfLabel.hidden = !DBSettings.shared.showsPerformance;
     [self scheduleHUDFade];
   }];
   db_set_paused(0);
@@ -329,10 +465,31 @@ CGFloat GameDrawableScale(CGSize bounds)
 - (void)applySettings
 {
   [_pad refreshFromSettings];
-  _perfLabel.hidden = !DBSettings.shared.showsPerformance;
+  [_pad reloadLayout];
+  _perfLabel.hidden = _menu || _editing || !DBSettings.shared.showsPerformance;
   // Hiding the readout changes how wide the HUD group is, and so where its
   // centre falls.
   [self.view setNeedsLayout];
+}
+
+// The menu's Quit asks first. It is one tap from a slider someone was
+// adjusting, and quitting throws away everything since the game last saved.
+- (void)confirmQuit
+{
+  NSString* title = [NSString stringWithFormat:@"Quit %@?", _game.displayTitle ?: @"the game"];
+  UIAlertController* alert =
+      [UIAlertController alertControllerWithTitle:title
+                                          message:@"Anything the game has not saved is lost."
+                                   preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                            style:UIAlertActionStyleCancel
+                                          handler:nil]];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Quit"
+                                            style:UIAlertActionStyleDestructive
+                                          handler:^(UIAlertAction* action) {
+                                            [self quitGame];
+                                          }]];
+  [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)quitGame
@@ -353,6 +510,76 @@ CGFloat GameDrawableScale(CGSize bounds)
   [self dismissViewControllerAnimated:YES completion:nil];
 }
 
+#pragma mark - Layout editor
+
+// The game stays paused underneath -- it was paused for the menu this came
+// from -- and the controls stop driving it. Done resumes: someone who has
+// just arranged the pad wants to try it, not to see the menu again.
+- (void)beginEditingLayout
+{
+  if (_editing)
+    return;
+  _editing = YES;
+
+  DBPauseMenuView* menu = _menu;
+  _menu = nil;
+  [menu dismissWithCompletion:nil];
+  db_set_paused(1);
+
+  if (!_editBar)
+    [self buildEditBar];
+  _editScale.value = DBSettings.shared.padScale;
+  _editBar.hidden = NO;
+  _editBar.alpha = 0;
+  _menuButton.hidden = YES;
+  _perfLabel.hidden = YES;
+
+  [self updatePadVisibility];
+  _pad.hidden = NO;
+  _pad.editingLayout = YES;
+  [self.view setNeedsLayout];
+  [UIView animateWithDuration:0.18
+                   animations:^{
+                     self->_editBar.alpha = 1;
+                   }];
+}
+
+- (void)endEditingLayout
+{
+  if (!_editing)
+    return;
+  _editing = NO;
+
+  _pad.editingLayout = NO;
+  [UIView animateWithDuration:0.15
+      animations:^{
+        self->_editBar.alpha = 0;
+      }
+      completion:^(BOOL finished) {
+        self->_editBar.hidden = YES;
+      }];
+
+  _menuButton.hidden = NO;
+  _perfLabel.hidden = !DBSettings.shared.showsPerformance;
+  [self updatePadVisibility];
+  [self.view setNeedsLayout];
+  [self wakeHUD];
+  [self scheduleHUDFade];
+  db_set_paused(0);
+}
+
+- (void)resetLayoutFromEditor
+{
+  [self resetLayout];
+  _editScale.value = DBSettings.shared.padScale;
+}
+
+- (void)editScaleChanged
+{
+  DBSettings.shared.padScale = _editScale.value;
+  [_pad reloadLayout];
+}
+
 #pragma mark - Lifecycle
 
 - (void)applicationDidEnterBackground
@@ -368,10 +595,10 @@ CGFloat GameDrawableScale(CGSize bounds)
   if (!_pausedByBackground)
     return;
   _pausedByBackground = NO;
-  // Not while the menu is up: someone who opened it before switching away
-  // still has it open, and resuming underneath it is exactly what the menu
-  // exists to prevent.
-  if (!_menu)
+  // Not while the menu or the editor is up: someone who opened it before
+  // switching away still has it open, and resuming underneath it is exactly
+  // what it exists to prevent.
+  if (!_menu && !_editing)
     db_set_paused(0);
 }
 

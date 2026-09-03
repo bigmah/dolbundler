@@ -38,9 +38,11 @@ def blend(base, colour, alpha):
     return tuple(int(base[i] * (1 - alpha) + colour[i] * alpha) for i in range(3))
 
 
-def draw():
+def draw(rounded=True):
     size = MASTER
-    radius = size * RADIUS
+    # iOS masks its own corners and rejects an icon with any transparency, so
+    # the phone's copy is the same picture on a square plate.
+    radius = size * RADIUS if rounded else 0.0
     canvas = new_image(size, size, (0, 0, 0))
 
     cx = size / 2
@@ -94,8 +96,19 @@ def draw():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--out", help="write a macOS .icns here")
+    parser.add_argument("--ios-png", help="write the square 1024x1024 iOS icon here")
     args = parser.parse_args()
+    if not args.out and not args.ios_png:
+        parser.error("one of --out or --ios-png is required")
+
+    if args.ios_png:
+        ios = Path(args.ios_png)
+        ios.parent.mkdir(parents=True, exist_ok=True)
+        write_png(draw(rounded=False), ios)
+        print(ios)
+    if not args.out:
+        return
 
     destination = Path(args.out)
     destination.parent.mkdir(parents=True, exist_ok=True)
