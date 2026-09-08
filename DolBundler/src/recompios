@@ -433,12 +433,14 @@ module_stamp() {  # <dol> [disc id]
 # dive measured, for people. Sets the TUNING_* globals; false when there is no
 # record for the title.
 TUNING_CHUNK=''; TUNING_PROFILE=''; TUNING_ON=''; TUNING_SPEED=''
+TUNING_REL_DIR=''; TUNING_REL_BASE=''; TUNING_REL_BSS=''
 # Past this share of chunks the emitter no longer produces what the profile
 # describes, and a fresh generic profile is the better module.
 TUNING_STALE_MAX=10
 read_tuning_record() {  # <disc id>
   local dir="$TUNING_ROOT/$1" key value
   TUNING_CHUNK=''; TUNING_PROFILE=''; TUNING_ON=''; TUNING_SPEED=''
+  TUNING_REL_DIR=''; TUNING_REL_BASE=''; TUNING_REL_BSS=''
   [ -f "$dir/tuning.conf" ] || return 1
   while IFS='=' read -r key value; do
     case "$key" in
@@ -446,11 +448,36 @@ read_tuning_record() {  # <disc id>
       PROFILE)                 TUNING_PROFILE="$dir/$value" ;;
       TUNED_ON)                TUNING_ON="$value" ;;
       SPEED_TUNED)             TUNING_SPEED="$value" ;;
+      REL_DIR)                 TUNING_REL_DIR="${value//\'/}" ;;
+      REL_BASE)                TUNING_REL_BASE="${value//\'/}" ;;
+      REL_BSS_BASE)            TUNING_REL_BSS="${value//\'/}" ;;
     esac
   done < <(grep -E '^[A-Z_]+=' "$dir/tuning.conf")
   case "$TUNING_CHUNK" in ''|*[!0-9]*) TUNING_CHUNK='' ;; esac
   [ -n "$TUNING_PROFILE" ] && [ ! -f "$TUNING_PROFILE" ] && TUNING_PROFILE=''
   return 0
+}
+
+# A game that keeps most of its code in RELs -- Mario Party 7 is one minigame
+# per REL -- has almost none of it in the module unless they are recompiled
+# too, and on the phone, where there is no fallback JIT, that is the whole
+# difference. It is opt-in per title because the address matters: a REL's code
+# is relocated against the address the game loads it at, and built for any
+# other one its bytes differ from guest RAM, so the chassis verifies every one
+# of those chunks as failed and hands them straight back to the interpreter --
+# a much larger module for nothing. The record carries the address the title
+# was observed to use.
+REL_ARGS=()
+set_rel_args() {  # <game root>
+  REL_ARGS=()
+  [ -n "$TUNING_REL_DIR" ] && [ -n "$TUNING_REL_BASE" ] || return 0
+  local dir="$1/$TUNING_REL_DIR"
+  if [ ! -d "$dir" ]; then
+    note "the tuning record names $TUNING_REL_DIR, which this copy of the game does not have; building without its RELs"
+    return 0
+  fi
+  REL_ARGS=(--rel-dir "$dir" --rel-base "$TUNING_REL_BASE")
+  [ -n "$TUNING_REL_BSS" ] && REL_ARGS+=(--rel-bss-base "$TUNING_REL_BSS")
 }
 
 # The committed profile is xz-compressed -- a few hundred kilobytes against
@@ -645,6 +672,7 @@ collect_profile() {  # <disc id> <name> <game root> <module dir being built>
   local disc_id="$1" name="$2" root="$3" out="$4"
   local work="$out/profile-work"
   local dol="$root/sys/main.dol"
+  set_rel_args "$root"
   local instrumented="$work/instrumented/generated"
   local module_build="$work/module-build"
   local user_dir="$work/user"
@@ -668,7 +696,8 @@ collect_profile() {  # <disc id> <name> <game root> <module dir being built>
   DOLRECOMP_LLVM_SYMBOL_PREFIX="g${disc_id}_" \
   DOLRECOMP_LLVM_PGO=gen \
   DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS="$TUNING_CHUNK" \
-    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$work/instrumented" \
+    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm \
+      ${REL_ARGS[@]+"${REL_ARGS[@]}"} "$dol" "$work/instrumented" \
       </dev/null >"$work/instrumented.log" 2>&1
   if [ $? -ne 0 ] || [ ! -f "$instrumented/generated.h" ]; then
     tail -20 "$work/instrumented.log" | strip_colour
@@ -817,7 +846,8 @@ phone_recompile() {  # <disc id> <name> <dol> <module dir being built>
   DOLRECOMP_LLVM_PROFILE="$PROFILE_DATA" \
   DOLRECOMP_LLVM_PGO_STALE=warn \
   DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS="$TUNING_CHUNK" \
-    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm "$dol" "$out" \
+    "$DOLRECOMP_IOS" -j"$JOBS" --gamecube --backend llvm \
+      ${REL_ARGS[@]+"${REL_ARGS[@]}"} "$dol" "$out" \
       </dev/null 2>&1 | tee "$out/recompile.log" | strip_colour
   if [ "${PIPESTATUS[0]}" -ne 0 ] || [ ! -f "$generated/generated.h" ]; then
     rm -rf "$out"
@@ -849,6 +879,7 @@ recompile_game() {  # <disc id> <name> <game root> <first step index> <total ste
   local out="$MODULES_DIR/$disc_id.building"
   local generated="$out/generated"
   local dol="$root/sys/main.dol"
+  set_rel_args "$root"
   local want; want="$(module_stamp "$dol" "$disc_id")"
 
   if [ "$PROFILE" -eq 1 ]; then

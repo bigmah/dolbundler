@@ -47,6 +47,17 @@ savestate and three profiles, about 90 MB.
 - `LLVM_CHUNK_INSTRUCTIONS` sets the function size the recompiler cuts the game
   into, for the phone build and for any profile collection alike. A profile is
   keyed per function and a function is a chunk, so the two have to agree.
+- `REL_DIR` and `REL_BASE` put the game's RELs in the module as well as its DOL.
+  `REL_DIR` is relative to the game root (`files/dll` for a GameCube disc);
+  `REL_BASE` is the address the game loads a REL at. It is opt-in per title and
+  the address is not optional: a REL's code is relocated against where it is
+  loaded, so a module built for any other address holds bytes that differ from
+  guest RAM, and the chassis verifies every one of those chunks as failed and
+  hands them back to the interpreter -- a much larger module for nothing. Find
+  the address by running the game with `MODERNGEKKO_RAM_DUMP=<path>` and matching
+  the dump against the .rel files. `REL_BSS_BASE` overrides where .bss is taken
+  to be, for a game the default rule (past the image, 32-byte grain, past a
+  32-byte block header) does not fit.
 - The record's identity is folded into the module's stamp, so a re-tuned title
   is rebuilt on its next send.
 
