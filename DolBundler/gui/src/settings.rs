@@ -161,6 +161,12 @@ pub struct Iphone {
     /// first", which is the one whose profile already covers the phone.
     #[serde(default)]
     pub team: String,
+    /// Whether a send also copies the memory cards kept for a title in
+    /// ~/Library/Application Support/DolBundler/saves/<ID>/. Off by default and
+    /// remembered when turned on: a .gci is the whole card, so this replaces
+    /// whatever has been played on the phone rather than merging with it.
+    #[serde(default)]
+    pub send_saves: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

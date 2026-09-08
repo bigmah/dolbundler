@@ -422,6 +422,9 @@ fn app() -> Element {
             args.push("--disc-id".into());
             args.push(disc_id.clone());
         }
+        if store.peek().iphone.send_saves {
+            args.push("--with-saves".into());
+        }
         log.write().push(Line {
             text: format!("$ recompios {}", args.join(" ")),
             kind: "dim",
@@ -911,6 +914,7 @@ fn app() -> Element {
                     teams: teams.read().clone(),
                     device: phone_device.clone(),
                     team: store.read().iphone.team.clone(),
+                    send_saves: store.read().iphone.send_saves,
                     games: games
                         .read()
                         .iter()
@@ -935,6 +939,15 @@ fn app() -> Element {
                     },
                     on_team: move |value: String| {
                         store.write().iphone.team = value;
+                        if let Err(err) = settings::save(&store.read()) {
+                            log.write().push(Line {
+                                text: format!("Could not save settings: {err}"),
+                                kind: "bad",
+                            });
+                        }
+                    },
+                    on_send_saves: move |value: bool| {
+                        store.write().iphone.send_saves = value;
                         if let Err(err) = settings::save(&store.read()) {
                             log.write().push(Line {
                                 text: format!("Could not save settings: {err}"),
@@ -1501,11 +1514,13 @@ fn IPhonePanel(
     teams: Vec<iphone::Team>,
     device: String,
     team: String,
+    send_saves: bool,
     games: Vec<(Game, iphone::State)>,
     installed: Option<String>,
     busy: bool,
     on_device: EventHandler<String>,
     on_team: EventHandler<String>,
+    on_send_saves: EventHandler<bool>,
     on_rescan: EventHandler<()>,
     on_send: EventHandler<()>,
     on_drop: EventHandler<Game>,
@@ -1632,6 +1647,18 @@ fn IPhonePanel(
                         "The first send builds the whole phone app and takes a while; later ones
                          relink it. Recompiling a game and copying its disc are both skipped when
                          neither has changed."
+                    }
+
+                    label { class: "notice",
+                        title: "Copies the memory cards kept in ~/Library/Application Support/DolBundler/saves/<disc id>/",
+                        input {
+                            r#type: "checkbox",
+                            checked: send_saves,
+                            disabled: busy,
+                            onchange: move |event| on_send_saves.call(event.checked()),
+                        }
+                        " Also copy saved games. A memory card file is the whole card, so this
+                          replaces what has been played on the phone rather than merging with it."
                     }
                 }
 
