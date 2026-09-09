@@ -412,6 +412,13 @@ DOLRECOMP_IOS="$REPO_ROOT/build-dolrecomp-llvm20/dolrecomp"
 
 ensure_recompiler() {
   if [ -x "$DOLRECOMP_IOS" ] && [ "$FORCE" -eq 0 ]; then
+    # A checkout can have newer compiler sources than this binary. Checking
+    # that the executable exists would keep emitting the old code after a
+    # performance fix; Ninja's incremental check is cheap when it is current.
+    if [ -f "${DOLRECOMP_IOS%/*}/build.ninja" ]; then
+      cmake --build "${DOLRECOMP_IOS%/*}" --target dolrecomp 2>&1 | strip_colour
+      [ "${PIPESTATUS[0]}" -eq 0 ] || die "could not update the iPhone recompiler"
+    fi
     note "$DOLRECOMP_IOS"
     return 0
   fi
