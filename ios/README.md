@@ -175,6 +175,11 @@ rather than allowed to sit at 100% while the extractor is still working.
 
 ## The library
 
+Mario Party 7 has a **Nearby Multiplayer** option for two to four iPhones.
+See [setup, implementation and validation](NEARBY_MULTIPLAYER.md). Each phone
+runs its own copy of the game and exchanges controller inputs over local or
+peer-to-peer Wi-Fi.
+
 Every card shows the disc's own art. A GameCube disc carries `opening.bnr` at
 the root of its filesystem -- a 96x32 picture plus the game's name, maker and a
 two-line description, which is what the console's own menu shows for an

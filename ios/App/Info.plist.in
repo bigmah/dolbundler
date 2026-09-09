@@ -56,5 +56,11 @@
 
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Find nearby friends and play Mario Party 7 together over Wi-Fi.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_dbmp7._udp</string>
+  </array>
 </dict>
 </plist>

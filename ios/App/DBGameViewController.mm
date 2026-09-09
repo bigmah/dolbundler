@@ -13,6 +13,7 @@
 #import "DBTouchPadView.h"
 
 #include "dolbundler_run.h"
+#import "DBNetplaySession.h"
 
 namespace
 {
@@ -364,7 +365,9 @@ CGFloat GameDrawableScale(CGSize bounds)
     NSString* message = ok ? nil : @(err);
     dispatch_async(dispatch_get_main_queue(), ^{
       UIApplication.sharedApplication.idleTimerDisabled = NO;
-      if (message)
+      if (self.nearbyCompletion)
+        [self dismissViewControllerAnimated:YES completion:^{ self.nearbyCompletion(message); }];
+      else if (message)
         [self showFailure:message];
       else
         [self dismissViewControllerAnimated:YES completion:nil];
@@ -414,6 +417,19 @@ CGFloat GameDrawableScale(CGSize bounds)
   if (_menu || _editing)
     return;
   [self wakeHUD];
+
+  if (self.nearbyCompletion)
+  {
+    [_pad releaseAll];
+    UIAlertController* menu = [UIAlertController alertControllerWithTitle:@"Nearby Multiplayer"
+        message:@"The game keeps running while this menu is open. Leaving ends the game for everyone."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Keep Playing" style:UIAlertActionStyleCancel handler:nil]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Leave Game" style:UIAlertActionStyleDestructive
+        handler:^(UIAlertAction* action) { db_request_stop(); }]];
+    [self presentViewController:menu animated:YES completion:nil];
+    return;
+  }
 
   // Pause before the panel is on screen. Presenting first would let the game
   // run for the length of the animation with its controls already covered.
@@ -584,6 +600,7 @@ CGFloat GameDrawableScale(CGSize bounds)
 
 - (void)applicationDidEnterBackground
 {
+  if (self.nearbyCompletion) { db_request_stop(); return; }
   if (!db_is_running() || db_is_paused())
     return;
   db_set_paused(1);

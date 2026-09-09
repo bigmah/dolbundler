@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "dolbundler_run.h"
+#import "DBNetplaySession.h"
 
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
@@ -85,6 +86,9 @@ void run_log(const char* fmt, ...)
 // emulation thread is still inside Create().
 std::mutex s_runtime_mutex;
 std::unique_ptr<moderngekko::Runtime> s_runtime;
+// A stop can arrive while Create() is inspecting the disc and no runtime has
+// been published yet. Keep it under the same lock as the runtime handoff.
+bool s_stop_requested = false;
 std::atomic<bool> s_running{false};
 std::atomic<bool> s_paused{false};
 
@@ -256,6 +260,16 @@ int db_has_native_module(const char* disc_id)
   return 0;
 }
 
+const ModernGekkoModuleDesc* db_native_descriptor(const char* disc_id)
+{
+#ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
+  for (const auto& module : kDolBundlerNativeModules)
+    if (std::strcmp(disc_id, module.game_id) == 0)
+      return module.get_module();
+#endif
+  return nullptr;
+}
+
 int db_native_module_count(void)
 {
 #ifdef DOLBUNDLER_HAVE_NATIVE_MODULES
@@ -279,9 +293,19 @@ const char* db_native_module_id(int index)
 int db_run_game(const char* game_root, const char* user_dir,
                 const char* title, char* err, size_t err_size)
 {
-  if (s_running.exchange(true))
   {
-    set_err(err, err_size, "A game is already running.");
+    std::lock_guard<std::mutex> lock(s_runtime_mutex);
+    if (s_running.exchange(true))
+    {
+      set_err(err, err_size, "A game is already running.");
+      return 0;
+    }
+    s_stop_requested = false;
+  }
+  if (db_netplay_active() && !db_netplay_can_boot())
+  {
+    set_err(err, err_size, "The nearby room is not ready to start or has closed.");
+    s_running.store(false);
     return 0;
   }
   s_paused.store(false);
@@ -390,6 +414,8 @@ int db_run_game(const char* game_root, const char* user_dir,
   if (const char* dual = getenv("DOLBUNDLER_DUAL_CORE"))
     if (dual[0] == '1')
       config.cpu_thread = true;
+  if (db_netplay_active())
+    config.cpu_thread = false;
 
   config.window_title = title ? std::string(title) : std::string();
   config.fullscreen = true;
@@ -411,7 +437,7 @@ int db_run_game(const char* game_root, const char* user_dir,
   // a state pushed over devicectl lands in.
   if (const char* state = getenv("DOLBUNDLER_LOAD_STATE"))
   {
-    if (state[0] != '\0')
+    if (state[0] != '\0' && !db_netplay_active())
     {
       std::string path = state;
       if (path.front() != '/')
@@ -435,9 +461,19 @@ int db_run_game(const char* game_root, const char* user_dir,
     return 0;
   }
 
+  bool cancelled;
   {
     std::lock_guard<std::mutex> lock(s_runtime_mutex);
-    s_runtime = std::move(created.runtime);
+    cancelled = s_stop_requested;
+    if (!cancelled)
+      s_runtime = std::move(created.runtime);
+  }
+  if (cancelled)
+  {
+    run_log("game stopped during runtime creation; cancelling boot");
+    created.runtime.reset();
+    s_running.store(false);
+    return 1;
   }
 
   StartPerfLog(&s_running);
@@ -476,13 +512,19 @@ int db_run_game(const char* game_root, const char* user_dir,
 
 void db_request_stop(void)
 {
+  db_netplay_stop();
   std::lock_guard<std::mutex> lock(s_runtime_mutex);
+  s_stop_requested = true;
   if (s_runtime)
     s_runtime->RequestStop();
 }
 
 void db_set_paused(int paused)
 {
+  // A local pause would starve the other phones of inputs. The nearby menu
+  // leaves play running; leaving the app ends the session for everyone.
+  if (db_netplay_active())
+    return;
   std::lock_guard<std::mutex> lock(s_runtime_mutex);
   if (!s_runtime)
     return;
@@ -510,6 +552,12 @@ int db_is_paused(void)
 int db_is_running(void)
 {
   return s_running.load() ? 1 : 0;
+}
+
+void db_request_screenshot(void)
+{
+  if (db_is_running())
+    Core::SaveScreenShot();
 }
 
 void db_get_performance(double* fps, double* speed)

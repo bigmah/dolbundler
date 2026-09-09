@@ -40,4 +40,7 @@
 // defaults.
 - (void)resetLayout;
 
+// Release held input when a modal covers the pad during nearby play.
+- (void)releaseAll;
+
 @end

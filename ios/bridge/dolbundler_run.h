@@ -82,6 +82,8 @@ int db_is_paused(void);
 // 1.0 is full speed and 0.5 is half. Either may be NULL. Safe to call when
 // nothing is running, in which case both come back as zero.
 void db_get_performance(double* fps, double* speed);
+// Development capture, written by Dolphin into the user's screenshot folder.
+void db_request_screenshot(void);
 
 // Feed the on-screen controls. Analog axes take -1.0..1.0, buttons 0.0 or 1.0.
 // Physical controllers do not go through here -- SDL picks those up directly.

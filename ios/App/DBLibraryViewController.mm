@@ -7,6 +7,7 @@
 #import "DBBanner.h"
 #import "DBGameCell.h"
 #import "DBGameViewController.h"
+#import "DBNearbyViewController.h"
 #import "DBLibrary.h"
 #import "DBSettings.h"
 #import "DBSettingsViewController.h"
@@ -380,6 +381,16 @@ static const NSTimeInterval kImportPollInterval = 1.0;
   // The UI preview walks into the first game's screen the same way, without
   // starting it. See DBSettings.uiPreviewMode.
   NSString* preview = DBSettings.uiPreviewMode;
+  if ([preview isEqualToString:@"nearby"])
+  {
+    autoplay_done = YES;
+    DBGameEntry* entry = [DBGameEntry new];
+    entry.discID = @"GP7E01";
+    entry.title = @"Mario Party 7";
+    entry.gameRoot = @"";
+    [self nearby:entry];
+    return;
+  }
   if ([preview isEqualToString:@"settings"])
   {
     autoplay_done = YES;
@@ -408,7 +419,10 @@ static const NSTimeInterval kImportPollInterval = 1.0;
       NSLog(@"DOLBUNDLER_AUTOPLAY=%@ but this build has no native module for it", wanted);
       return;
     }
-    [self play:entry];
+    if (getenv("DOLBUNDLER_NEARBY_TEST") && [entry.discID hasPrefix:@"GP7"])
+      [self nearby:entry];
+    else
+      [self play:entry];
     return;
   }
   NSLog(@"DOLBUNDLER_AUTOPLAY=%@ but no such game in the library", wanted);
@@ -682,7 +696,18 @@ static const NSTimeInterval kImportPollInterval = 1.0;
     [self explainUnplayable:entry importedJustNow:NO];
     return;
   }
-  [self play:entry];
+  if ([entry.discID hasPrefix:@"GP7"])
+  {
+    UIAlertController* choice = [UIAlertController alertControllerWithTitle:entry.displayTitle message:nil
+        preferredStyle:UIAlertControllerStyleAlert];
+    [choice addAction:[UIAlertAction actionWithTitle:@"Play" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction* action) { [self play:entry]; }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"Nearby Multiplayer" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction* action) { [self nearby:entry]; }]];
+    [choice addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:choice animated:YES completion:nil];
+  }
+  else [self play:entry];
 }
 
 - (UIContextMenuConfiguration*)collectionView:(UICollectionView*)collectionView
@@ -709,6 +734,10 @@ static const NSTimeInterval kImportPollInterval = 1.0;
                                                             handler:^(UIAction* action) {
                                                               [self play:entry];
                                                             }]];
+                       if ([entry.discID hasPrefix:@"GP7"])
+                         [actions addObject:[UIAction actionWithTitle:@"Nearby Multiplayer"
+                             image:[UIImage systemImageNamed:@"person.2.wave.2"] identifier:nil
+                             handler:^(UIAction* action) { [self nearby:entry]; }]];
                      }
 
                      // Deleting a game means re-extracting from an ISO that
@@ -726,6 +755,14 @@ static const NSTimeInterval kImportPollInterval = 1.0;
 
                      return [UIMenu menuWithTitle:@"" children:actions];
                    }];
+}
+
+- (void)nearby:(DBGameEntry*)entry
+{
+  DBNearbyViewController* nearby = [[DBNearbyViewController alloc] initWithGame:entry];
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:nearby];
+  nav.modalPresentationStyle = UIModalPresentationFullScreen;
+  [self presentViewController:nav animated:YES completion:nil];
 }
 
 // Tapping the lifted preview is the same as tapping the card.

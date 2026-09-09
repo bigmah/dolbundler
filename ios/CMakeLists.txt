@@ -43,6 +43,7 @@ add_executable(DolBundler MACOSX_BUNDLE
   App/DBLibraryViewController.mm
   App/DBGameCell.mm
   App/DBGameViewController.mm
+  App/DBNearbyViewController.mm
   App/DBBanner.mm
   App/DBPauseMenuView.mm
   App/DBSettings.mm
@@ -51,6 +52,9 @@ add_executable(DolBundler MACOSX_BUNDLE
   App/DBTouchPadView.mm
   bridge/dolbundler_core.c
   bridge/dolbundler_run.mm
+  bridge/DBNetplaySession.mm
+  bridge/DBNearbyTransport.mm
+  ../ModernGekko/tools/netplay_compatibility.cpp
   App/Assets.xcassets
 )
 
@@ -67,10 +71,15 @@ target_include_directories(DolBundler PRIVATE
   ${DOLRECOMP_DIR}/src
   ${DOLPHIN_CORE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/tools
+  ${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../ModernGekko/vendor/dolphin/GXRuntime/include
 )
 
 target_link_libraries(DolBundler PRIVATE
   ModernGekko::Runtime
+  core
+  uicommon
   # GXRuntime's guest CPU helpers, compiled against the chassis's CPUState. An
   # embedded native module leaves these out of its own objects and resolves
   # them here; see module-template's RECOMPCORE_MODULE_EMBEDDED.
@@ -202,6 +211,12 @@ if(_native_module_specs)
 endif()
 
 target_compile_definitions(DolBundler PRIVATE MODERNGEKKO_HAVE_UIKIT=1)
+target_compile_definitions(DolBundler PRIVATE _ARCH_64=1)
+if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+  target_compile_definitions(DolBundler PRIVATE _M_X86_64=1)
+else()
+  target_compile_definitions(DolBundler PRIVATE _M_ARM_64=1)
+endif()
 
 # Porting to iOS means compiling out whole platform implementations, which
 # leaves #if/#elif chains with no branch taken. A non-void function whose body
@@ -219,6 +234,7 @@ target_link_libraries(DolBundler PRIVATE
   "-framework CoreImage"
   "-framework AVFoundation"
   "-framework GameController"
+  "-framework Network"
   "-framework UniformTypeIdentifiers"
   "-framework AudioToolbox"
 )
