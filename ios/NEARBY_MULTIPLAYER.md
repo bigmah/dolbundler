@@ -53,23 +53,45 @@ retained until runtime shutdown finishes, so the alert explains why play ended.
   Nearby sessions request a five-second ENet peer timeout; other callers retain
   the existing thirty-second default.
 
-Each phone runs the full recompiled game locally. The input buffer starts at two
-polls and adapts to the two slowest host links and measured jitter. Missing inputs
-block simulation, so every phone must sustain the game's speed. This is delayed
-input synchronization, with no video streaming or speculative replay.
+Each phone runs the full recompiled game locally. GameCube rooms start with six
+buffered controller polls and adapt up to twelve. Link latency can raise the
+target, and actual input waits can raise it beyond what low ping alone suggests.
+A wait of at least 16 ms, or recurring shorter waits, requests two to four extra
+polls, at most once per second per client. Isolated waits shorter than 16 ms do
+not immediately add latency. The host broadcasts one shared target to every peer.
+
+The buffer never automatically shrinks while the game is running, including
+between minigames. This avoids repeatedly losing learned headroom during quiet
+sections. In the lobby it can decrease one poll per thirty seconds; a new room
+starts fresh. The twelve-poll limit bounds added button delay. Polls are not
+necessarily video frames, so this is not a fixed millisecond latency guarantee.
+Existing desktop Wii buffering retains its previous behavior.
+
+Missing inputs still block simulation, so every phone must sustain the game's
+speed. Buffering can absorb brief interruptions; it cannot hide a device that
+consistently runs below full speed or an arbitrarily long network outage. This
+is delayed input synchronization, with no video streaming or speculative replay.
 
 ## Verification
 
 Run the portable GameCube protocol tests with loopback networking available:
 
 ```sh
-cmake --build ModernGekko/build --target moderngekko_netplay_protocol_test -j 4
-ctest --test-dir ModernGekko/build -R moderngekko.netplay_protocol --output-on-failure --timeout 30
+cmake --build ModernGekko/build --target moderngekko_netplay_protocol_test moderngekko_netplay_buffer_test -j 4
+ctest --test-dir ModernGekko/build -R 'moderngekko.netplay_(protocol|buffer)' --output-on-failure --timeout 40
 ```
 
 They exercise four GameCube players, identical input delivery to remote ports,
 ready gating, a full room, incompatible controller modes/builds, disconnect slot
 reuse, and rejection of another player's inputs. Existing Wii tests run too.
+The protocol test also checks four-client agreement on the six-poll starting
+buffer, a stall-driven increase beyond the old low-ping cap, retention beyond
+the old four-second expiry, and enforcement of the twelve-poll cap.
+
+The buffer policy test uses a controlled clock to exercise recurring short
+stalls, substantial waits, feedback cooldowns, stale requests, thirty minutes
+of active play, gradual lobby recovery and a fresh room. It needs no game data,
+network access or simulator.
 
 Run the actual Apple transport on macOS:
 
@@ -103,6 +125,10 @@ They append snapshots, input-wait totals, FPS and speed to
 `Documents/moderngekko/nearby-test.jsonl` (under the app's Dolphin user directory).
 The same file records explicit `background`, `leave`, `gameFinished` and `failure`
 events, so an intentional session exit can be distinguished from a network error.
+Snapshots include cumulative `waitCount`, `longWaitCount` (completed waits of at
+least 50 ms), and `maximumWaitMilliseconds`, in addition to total input waiting.
+Compare counter differences across matching gameplay windows to assess large
+stalls; median FPS alone can hide them. Counters reset when a game starts/stops.
 `DOLBUNDLER_RUN_SECONDS` stops a run; `DOLBUNDLER_PERF_LOG=1` and
 `DOLBUNDLER_SCREENSHOT_AFTER` enable the existing runtime diagnostics.
 
@@ -229,3 +255,30 @@ iPhone 13 remains excluded from testing.
 
 Device captures, logs, input timing and the Snow Ride statistics are under
 `/tmp/dolbundler-nearby-phone15-validation` on the development Mac.
+
+### Buffering follow-up, September 9, 2026
+
+Reviewing those recordings after the report of large mid-minigame slowdowns
+showed why the median was insufficient. During the quiet Snow Ride window,
+two-second phone log samples contained peak frame intervals of 45–65 ms despite
+roughly 57.7 FPS overall. The earlier race, which included development transfers,
+had severe drops with substantial input waiting while reported pings remained
+low. Waiting establishes that inputs were unavailable; it does not identify
+whether radio delay, scheduling or a peer's emulation/rendering caused it.
+
+The previous feedback grew by one poll at most every two seconds, was capped
+at the ping recommendation plus two, and expired after four seconds. On this
+low-ping session that meant repeatedly stalling with a four-poll buffer. The
+six-to-twelve-poll policy above gives more initial headroom, responds faster to
+completed stalls, and retains it throughout play. This trades additional button
+delay for more consistent simulation. The new four-client regression failed
+against the previous implementation at its initial-buffer check (exit 44).
+After the change, the buffer policy and four-client GameCube/Wii protocol tests
+both passed (20.92 seconds combined). The iPhoneOS and simulator builds passed,
+and the iPhone app's signature verified. The buffering build was installed on
+the iPhone 15 Pro Max. That phone required its passcode when checked, so no
+gameplay comparison was run in this follow-up; the iPhone 13 was not used.
+
+These policy changes still need a matching physical gameplay comparison to
+measure their effect on large stalls and input responsiveness. The earlier
+phone FPS measurements describe the previous buffer policy.

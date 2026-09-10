@@ -27,7 +27,7 @@ public:
   std::shared_ptr<UICommon::GameFile> game;
   bool hosting = false;
   std::atomic<bool> start{false}, ended{false};
-  std::atomic<u32> buffer{2};
+  std::atomic<u32> buffer{NetPlay::GameCubeBufferPolicy::MIN_SIZE};
   std::mutex mutex;
   std::string error, status;
   std::unique_ptr<BootSessionData> boot;
@@ -160,7 +160,7 @@ void db_netplay_stop(void) {
         NetPlay::NetTraversalConfig{}, NetPlay::ControllerMode::GameCube, true, std::chrono::seconds(5));
     if (!_server->is_connected) return fail(@"Could not create the nearby room.");
     _server->SetHostInputAuthority(false);
-    _server->AdjustPadBufferSize(2);
+    _server->AdjustPadBufferSize(NetPlay::GameCubeBufferPolicy::MIN_SIZE);
     _server->SetAdaptiveBuffer(true);
     _server->ChangeGame(_ui->game->GetSyncIdentifier(), game.game_name);
     port = _server->GetPort();
@@ -195,7 +195,9 @@ void db_netplay_stop(void) {
   return @{@"players": players, @"canStart": @(canStart),
     @"buffer": @(_ui->buffer.load()), @"ended": @(_ui->ended.load()),
     @"error": @(_ui->error.c_str()), @"status": @(_ui->status.c_str()),
-    @"waitMilliseconds": @(telemetry.total_wait_ns / 1000000)};
+    @"waitMilliseconds": @(telemetry.total_wait_ns / 1000000),
+    @"waitCount": @(telemetry.wait_count), @"longWaitCount": @(telemetry.long_wait_count),
+    @"maximumWaitMilliseconds": @(telemetry.maximum_wait_ns / 1000000)};
 }
 - (void)setReady:(BOOL)ready { if (_client) _client->SetReady(ready); }
 - (void)start {
