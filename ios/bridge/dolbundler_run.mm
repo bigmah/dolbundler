@@ -2,21 +2,26 @@
 
 #include "dolbundler_run.h"
 
+#include "Common/Config/Config.h"
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
-#include "Core/Config/MainSettings.h"  // BACKEND_NULLSOUND
+#include "Core/Config/MainSettings.h"  // BACKEND_NULLSOUND, GetInfoForSIDevice
 #include "Core/Core.h"
 #include "Core/HW/GCPad.h"
+#include "Core/HW/SI/SI.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 #include "InputCommon/InputConfig.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#include "VideoCommon/Present.h"
 #include "moderngekko/runtime.hpp"
 
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <ctime>
@@ -88,31 +93,62 @@ std::unique_ptr<moderngekko::Runtime> s_runtime;
 std::atomic<bool> s_running{false};
 std::atomic<bool> s_paused{false};
 
-// Pad 0 is the only one the on-screen controls drive. A physical controller
-// paired over Bluetooth arrives through the SDL backend as its own device and
-// does not need an overrider.
-constexpr int kTouchPadIndex = 0;
+// The console's four controller ports. The on-screen controls drive port 0,
+// and each Bluetooth controller the port DBControllers gave it, every one
+// through an overrider of its own. None of them goes through a Dolphin
+// controller backend, so no port needs a device mapped to it.
+constexpr int kPortCount = DB_PAD_PORTS;
 
-// The overrider can only be attached once the emulated pads exist, which does
+// Whether each port has a controller plugged in, as the game sees it. Port 0
+// always does.
+std::atomic<bool> s_port_plugged_in[kPortCount] = {true, false, false, false};
+
+SerialInterface::SIDevices DeviceForPort(int port)
+{
+  return s_port_plugged_in[port].load() ? SerialInterface::SIDEVICE_GC_CONTROLLER :
+                                          SerialInterface::SIDEVICE_NONE;
+}
+
+// The overriders can only be attached once the emulated pads exist, which does
 // not happen until Pad::LoadConfig() runs inside BootCore(). Attaching earlier
 // indexes an empty vector through InputConfig::GetController()'s .at(), which
 // is a hard crash rather than an error. So registration waits for the core to
-// report Running, and every touch is dropped until then.
-std::atomic<bool> s_overrider_ready{false};
+// report Running, and all input is dropped until then.
+//
+// Running is reported by the CPU loop as it starts, after the serial interface
+// and the renderer exist too, so the same flag gates the calls that reach into
+// either.
+std::atomic<bool> s_core_ready{false};
 Common::EventHook s_state_hook;
 
-void AttachOverriderWhenPadsExist(Core::State state)
+void AttachOverridersWhenPadsExist(Core::State state)
 {
   run_log("core state -> %d (pads: %d)", (int)state, Pad::GetConfig()->GetControllerCount());
   if (state == Core::State::Uninitialized || state == Core::State::Stopping)
     return;
-  if (s_overrider_ready.load())
+  if (s_core_ready.load())
     return;
-  if (Pad::GetConfig()->GetControllerCount() <= kTouchPadIndex)
+  if (Pad::GetConfig()->GetControllerCount() < kPortCount)
     return;
 
-  ciface::Touch::RegisterGameCubeInputOverrider(kTouchPadIndex);
-  s_overrider_ready.store(true);
+  for (int port = 0; port < kPortCount; ++port)
+    ciface::Touch::RegisterGameCubeInputOverrider(port);
+  s_core_ready.store(true);
+
+  // A controller that connected while the game booted was recorded after the
+  // ports were configured, and before there was a console to plug it into.
+  // Replaying every port catches it; the console only acts on a port whose
+  // device differs. This sets the flag and then reads the ports, while
+  // db_set_port_plugged_in() records the port and then reads the flag, so one
+  // side or the other always sees both.
+  SerialInterface::SerialInterfaceManager& si = Core::System::GetInstance().GetSerialInterface();
+  for (int port = 0; port < kPortCount; ++port)
+    si.ChangeDevice(DeviceForPort(port), port);
+
+  // Likewise the layer, which may have moved to a TV after the renderer first
+  // read its size.
+  if (g_presenter)
+    g_presenter->ResizeSurface();
 }
 
 // Turn Dolphin's file log on directly, after UICommon::Init() has built the
@@ -421,6 +457,13 @@ int db_run_game(const char* game_root, const char* user_dir,
     }
   }
 
+  // Keep SDL's GameController driver away from Bluetooth controllers.
+  // DBControllers reads them itself, one port each; SDL would enumerate the
+  // same controllers as devices nothing on iOS maps to a port, and renumber
+  // their player lights while it did. SDL takes hints from the environment,
+  // and reads this one when the input interface starts inside Create().
+  setenv("SDL_JOYSTICK_MFI", "0", 1);
+
   run_log("Runtime::Create ...");
   auto created = moderngekko::Runtime::Create(std::move(config));
   run_log("Runtime::Create returned");
@@ -443,18 +486,27 @@ int db_run_game(const char* game_root, const char* user_dir,
   StartPerfLog(&s_running);
   StartRunTimer(&s_running);
 
+  // Which ports have a controller in them is up to what is connected to the
+  // phone, not to whatever Dolphin.ini said last time. The console reads this
+  // once, as it boots; db_set_port_plugged_in() covers anything after that.
+  for (int port = 0; port < kPortCount; ++port)
+    Config::SetBase(Config::GetInfoForSIDevice(port), DeviceForPort(port));
+
   // Installed before Run() so no boot state transition is missed, but it only
-  // attaches the overrider once the pads actually exist.
-  s_overrider_ready.store(false);
-  s_state_hook = Core::AddOnStateChangedCallback(&AttachOverriderWhenPadsExist);
+  // attaches the overriders once the pads actually exist.
+  s_core_ready.store(false);
+  s_state_hook = Core::AddOnStateChangedCallback(&AttachOverridersWhenPadsExist);
 
   run_log("Runtime::Run ... (blocks until the game stops)");
   const moderngekko::RuntimeRunResult result = s_runtime->Run();
   run_log("Runtime::Run returned: reason=%d %s", (int)result.reason,
           result.error ? result.error->message.c_str() : "");
 
-  if (s_overrider_ready.exchange(false))
-    ciface::Touch::UnregisterGameCubeInputOverrider(kTouchPadIndex);
+  if (s_core_ready.exchange(false))
+  {
+    for (int port = 0; port < kPortCount; ++port)
+      ciface::Touch::UnregisterGameCubeInputOverrider(port);
+  }
   s_state_hook.reset();
 
   {
@@ -531,20 +583,56 @@ void db_get_performance(double* fps, double* speed)
     *speed = metrics.GetSpeed();
 }
 
+void db_set_port_control(int port, DBPadControl control, double state)
+{
+  // Dropped rather than queued: input that lands during boot is stale by the
+  // time the game reads it.
+  if (port < 0 || port >= kPortCount || !s_core_ready.load())
+    return;
+  ciface::Touch::SetControlState(port, static_cast<ciface::Touch::ControlID>(control), state);
+}
+
+void db_clear_port_control(int port, DBPadControl control)
+{
+  if (port < 0 || port >= kPortCount || !s_core_ready.load())
+    return;
+  ciface::Touch::ClearControlState(port, static_cast<ciface::Touch::ControlID>(control));
+}
+
 void db_set_control(DBPadControl control, double state)
 {
-  // Dropped rather than queued: a touch that lands during boot is stale by the
-  // time the game reads it.
-  if (!s_overrider_ready.load())
-    return;
-  ciface::Touch::SetControlState(kTouchPadIndex, static_cast<ciface::Touch::ControlID>(control),
-                                 state);
+  db_set_port_control(0, control, state);
 }
 
 void db_clear_control(DBPadControl control)
 {
-  if (!s_overrider_ready.load())
+  db_clear_port_control(0, control);
+}
+
+void db_set_port_plugged_in(int port, int plugged_in)
+{
+  if (port <= 0 || port >= kPortCount)
     return;
-  ciface::Touch::ClearControlState(kTouchPadIndex,
-                                   static_cast<ciface::Touch::ControlID>(control));
+  // Record first, then look at the flag: see AttachOverridersWhenPadsExist().
+  s_port_plugged_in[port].store(plugged_in != 0);
+  if (!s_core_ready.load())
+    return;
+  // Only a request: the console applies it on its own thread, the next time it
+  // polls its controllers.
+  Core::System::GetInstance().GetSerialInterface().ChangeDevice(DeviceForPort(port), port);
+}
+
+void db_render_surface_resized(void)
+{
+  // Before the renderer exists there is nothing to tell: it reads the layer as
+  // it starts, and is asked again once the game is running.
+  if (!s_core_ready.load())
+    return;
+  if (g_presenter)
+    g_presenter->ResizeSurface();
+}
+
+void db_set_frame_pacing(double seconds)
+{
+  VideoCommon::SetMinimumPresentInterval(seconds);
 }

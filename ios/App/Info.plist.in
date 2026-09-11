@@ -56,5 +56,17 @@
 
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
+
+  <!-- Game Mode (iOS 18 and later): when the system turns it on, Bluetooth
+       controllers are polled more often and background work is held back.
+       Two controllers and an AirPlay stream all share the phone's radio, so
+       this is worth having. The OS only considers apps in a games category;
+       LSSupportsGameMode is the newer spelling of the same switch. -->
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.games</string>
+  <key>GCSupportsGameMode</key>
+  <true/>
+  <key>LSSupportsGameMode</key>
+  <true/>
 </dict>
 </plist>

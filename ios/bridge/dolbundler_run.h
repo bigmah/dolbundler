@@ -83,10 +83,41 @@ int db_is_paused(void);
 // nothing is running, in which case both come back as zero.
 void db_get_performance(double* fps, double* speed);
 
-// Feed the on-screen controls. Analog axes take -1.0..1.0, buttons 0.0 or 1.0.
-// Physical controllers do not go through here -- SDL picks those up directly.
+// The console's controller ports. Port 0 is player 1.
+#define DB_PAD_PORTS 4
+
+// Feed one player's controller. Analog axes take -1.0..1.0, buttons 0.0 or
+// 1.0. The on-screen controls drive port 0; each Bluetooth controller drives
+// the port DBControllers gave it. Input that arrives before the game is
+// running is dropped: it would be stale by the time the game read it.
+void db_set_port_control(int port, DBPadControl control, double state);
+void db_clear_port_control(int port, DBPadControl control);
+
+// Port 0, for the on-screen controls.
 void db_set_control(DBPadControl control, double state);
 void db_clear_control(DBPadControl control);
+
+// Whether a controller is plugged into `port`, as far as the game can tell.
+// Games count players by what is plugged in, so a second controller has to
+// plug in port 1 before anyone can pick two players. Callable before a run,
+// which decides what the console boots with, and during one, which plugs it
+// in live. Port 0 is always plugged in -- the on-screen controls stand in
+// whenever no controller holds it -- and requests for it are ignored.
+void db_set_port_plugged_in(int port, int plugged_in);
+
+// The layer handed to db_set_render_layer() changed size or contents scale:
+// it moved to the TV, or back. The renderer reads the layer's geometry only
+// when told to, and without this it keeps drawing at the old shape while
+// Core Animation stretches that to the new one. Safe from any thread, and a
+// no-op when nothing is running.
+void db_render_surface_resized(void);
+
+// Show no more than one frame every `seconds`, or every frame with 0. See
+// VideoCommon::SetMinimumPresentInterval: a TV mirrored to over AirPlay is
+// sent about 30 frames a second, and an even every-other frame looks smooth
+// there where the full 60 judders. Safe from any thread, at any time,
+// including before a run.
+void db_set_frame_pacing(double seconds);
 
 #ifdef __cplusplus
 }

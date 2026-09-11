@@ -44,6 +44,8 @@ add_executable(DolBundler MACOSX_BUNDLE
   App/DBGameCell.mm
   App/DBGameViewController.mm
   App/DBBanner.mm
+  App/DBControllers.mm
+  App/DBExternalDisplay.mm
   App/DBPauseMenuView.mm
   App/DBSettings.mm
   App/DBSettingsViewController.mm

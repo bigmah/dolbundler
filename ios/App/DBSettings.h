@@ -33,6 +33,12 @@
 // measured, and PERFORMANCE.md's whole method is reading that number.
 @property(nonatomic, assign) BOOL showsPerformance;
 
+// While the game is on a TV, show an even 30 frames a second rather than every
+// frame. AirPlay sends a mirrored screen at about 30, and a 60 frame game fed
+// to it unpaced judders as the stream catches an uneven pick of frames. On by
+// default; off is for a TV on a cable, which really does show all 60.
+@property(nonatomic, assign) BOOL steadyTVMotion;
+
 // Where each control has been dragged to, as a fraction of the pad's safe
 // rectangle -- (0, 0) is its top-left corner, (1, 1) the bottom-right -- so a
 // layout made on one phone lands in about the same place on another. A
@@ -43,10 +49,13 @@
 // Forget every dragged position and the size multiplier.
 - (void)resetPadLayout;
 
-// Test hook. DOLBUNDLER_UI_PREVIEW=library|settings|game|menu|edit walks the app to
-// that screen without a game running: every library entry reads as playable,
+// Test hook. DOLBUNDLER_UI_PREVIEW=library|settings|game|menu|edit|tv walks the app
+// to that screen without a game running: every library entry reads as playable,
 // the game screen opens without booting anything, and the pad stays visible
-// whether or not a controller is attached. It exists because there is no way
+// whether or not a controller is attached. `tv` is the phone's screen while the
+// game is on a TV, with two made-up controllers as players 1 and 2; a TV the
+// simulator really has attached (I/O > External Displays) gets the game
+// window as well. It exists because there is no way
 // to tap the simulator from a script, and the only way to look at a screen
 // that sits behind two taps is to have the app take them itself.
 @property(class, nonatomic, readonly) NSString* uiPreviewMode;

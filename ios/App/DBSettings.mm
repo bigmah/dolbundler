@@ -11,6 +11,7 @@ NSString* const kPadScaleKey = @"DBPadScale";
 NSString* const kPadLayoutKey = @"DBPadLayout";
 NSString* const kHapticsKey = @"DBHapticsEnabled";
 NSString* const kPerformanceKey = @"DBShowsPerformance";
+NSString* const kSteadyTVMotionKey = @"DBSteadyTVMotion";
 
 constexpr CGFloat kMinPadOpacity = 0.25;
 constexpr CGFloat kMaxPadOpacity = 1.0;
@@ -45,6 +46,7 @@ constexpr CGFloat kMaxPadScale = 1.4;
     kPadScaleKey : @1.0,
     kHapticsKey : @YES,
     kPerformanceKey : @YES,
+    kSteadyTVMotionKey : @YES,
   }];
   return self;
 }
@@ -101,6 +103,16 @@ constexpr CGFloat kMaxPadScale = 1.4;
 - (void)setShowsPerformance:(BOOL)showsPerformance
 {
   [NSUserDefaults.standardUserDefaults setBool:showsPerformance forKey:kPerformanceKey];
+}
+
+- (BOOL)steadyTVMotion
+{
+  return [NSUserDefaults.standardUserDefaults boolForKey:kSteadyTVMotionKey];
+}
+
+- (void)setSteadyTVMotion:(BOOL)steadyTVMotion
+{
+  [NSUserDefaults.standardUserDefaults setBool:steadyTVMotion forKey:kSteadyTVMotionKey];
 }
 
 #pragma mark - Layout

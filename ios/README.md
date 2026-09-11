@@ -312,11 +312,36 @@ only reports it and pumps Dolphin's host job queue. UIKit owns the run loop, and
 `Runtime::Run()` blocks, so it runs on its own `QOS_CLASS_USER_INTERACTIVE`
 thread.
 
-**Input.** Physical controllers work through Dolphin's existing SDL backend —
-SDL3 builds for iOS and handles MFi and Bluetooth pads. The on-screen pad feeds
-`ciface::Touch`, the same input overrider the Android overlay uses, which
-carries no Android dependencies. The overlay hides itself whenever a real
-controller is connected, and drops whatever it was holding as it goes.
+**Input.** The on-screen pad feeds `ciface::Touch`, the same input overrider
+the Android overlay uses, which carries no Android dependencies. Bluetooth
+controllers go through the same overrider rather than a Dolphin backend:
+`DBControllers` reads each one with the GameController framework and gives it
+a port of its own, in the order they connect, so two controllers are players 1
+and 2 with no mapping file. A port is plugged into the emulated console once a
+controller has used it and stays plugged in until the game ends, because a
+controller that goes to sleep should not look to the game like one being
+pulled out. SDL3 is still built, but its GameController driver is switched
+off (`SDL_JOYSTICK_MFI=0`): nothing on iOS mapped its devices to a port, and it
+renumbered the controllers' player lights. The overlay hides itself while
+player 1 has a controller, and drops whatever it was holding as it goes.
+
+**TV.** While the phone mirrors to an Apple TV or an AirPlay TV (or a display
+on a cable), `DBExternalDisplay` gives the second screen a window of the app's
+own for as long as a game is up. That ends mirroring: the game fills the TV at
+the TV's shape, and the phone shows who is playing with what -- or the pad,
+while player 1 has no controller. Leaving the game hands the TV back to
+mirroring. It uses UIScreen's connect notifications, deprecated since iOS 16
+in favour of scenes but still delivered to an app without them.
+
+Mirroring to a TV with AirPlay built in runs at about 30 fps, and a game that
+presents 60 frames at the emulator's own moments judders there: the stream
+catches an uneven pick of them. So while a game is on a TV the renderer shows
+an even every other frame -- `db_set_frame_pacing`, which sets
+`VideoCommon::SetMinimumPresentInterval` -- judged on each frame's intended
+presentation time rather than the clock, so the pattern is exact and a game
+already running at 30 keeps every frame. Emulation speed is untouched: on the
+Mac, the same savestate reads 59.9 fps against 30.0 with speed at 100% both
+ways. A switch on the phone's TV card turns it off, for a TV on a cable.
 
 Every control the hardware has is on screen: both analog sticks, the D-pad, A,
 B, X, Y, Z, L, R and Start. They are laid out and coloured the way a GameCube

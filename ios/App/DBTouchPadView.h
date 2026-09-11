@@ -11,9 +11,9 @@
 // each control owns a CAShapeLayer, so pressing a button repaints that button
 // and not the whole overlay sitting on top of a running game.
 //
-// A physical controller paired over Bluetooth does not come through here --
-// SDL picks those up on its own -- so the overlay hides itself when one is
-// connected.
+// The pad is player 1's controller. A Bluetooth controller does not come
+// through here -- DBControllers feeds it into a port of its own -- and the
+// game screen hides the overlay while player 1 has one.
 //
 // Every control can be moved. In layout-editing mode a touch drags whatever it
 // lands on instead of pressing it, and where it is dropped is kept in
