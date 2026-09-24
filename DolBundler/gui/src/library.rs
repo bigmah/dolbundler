@@ -50,6 +50,10 @@ struct Index {
 }
 
 pub fn support_dir() -> PathBuf {
+    // Agrees with recompgc, which honours the same override.
+    if let Some(dir) = std::env::var_os("DOLBUNDLER_HOME").filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(home).join("Library/Application Support/DolBundler")
 }

@@ -172,7 +172,7 @@ source "$CONF"
 REPO_ROOT="${REPO_ROOT:-$(dirname "$MG_SRC")}"
 
 BUNDLE_ID="${DOLBUNDLER_BUNDLE_ID:-com.bigmah.dolbundler}"
-SUPPORT_DIR="$HOME/Library/Application Support/DolBundler"
+SUPPORT_DIR="${DOLBUNDLER_HOME:-$HOME/Library/Application Support/DolBundler}"
 LIBRARY="$SUPPORT_DIR/library.json"
 IOS_DIR="$SUPPORT_DIR/iphone"
 MODULES_DIR="$IOS_DIR/modules"

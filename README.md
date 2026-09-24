@@ -56,6 +56,26 @@ changes. Edit them in place; `DolBundler/forks.sh` pushes through the chain:
 
 [`THIRD_PARTY.md`](THIRD_PARTY.md) lists every piece with its license.
 
+## Embedding it
+
+`bundler.json` at the top of the checkout describes DolBundler to a program
+that drives it instead of the window -- a launcher that holds several consoles
+at once, say. It names the build to run (`build.sh --no-window`, which stops
+before the window and leaves `toolchain.conf` beside `recompgc`), the pipeline,
+the command that plays a library entry, and which directories hold memory
+cards and Wii saves. Paths in it are relative to the checkout; `{data}`,
+`{cache}` and `{build}` are wherever the embedding program keeps generated
+files, and reach the tools as four variables:
+
+- `DOLBUNDLER_HOME` moves the library and covers out of
+  `~/Library/Application Support/DolBundler`.
+- `XDG_DATA_HOME` moves ModernGekko's user directory -- extracted discs,
+  logs, `GC/` memory cards and the `Wii/` NAND -- out of `~/.local/share`.
+- `XDG_CACHE_HOME` moves the recompiled modules out of `~/.cache`.
+- `DOLBUNDLER_BUILD_DIR` moves the ModernGekko build out of `ModernGekko/build`.
+
+Unset, each is where it always was.
+
 ## Legal
 
 **No game data ships here, ever.** No disc image, extracted asset, key or

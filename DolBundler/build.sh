@@ -5,21 +5,30 @@
 #   ./build.sh              build what is missing, then install to ~/Applications
 #   ./build.sh --rebuild    force a full ModernGekko rebuild first
 #   ./build.sh --no-install leave DolBundler.app here instead of installing it
+#   ./build.sh --no-window  stop after the runtime and the driver, leaving out
+#                           the window and the app
+#
+# --no-window is everything src/recompgc needs to extract, recompile and play a
+# disc from a shell or from a program that drives it (see bundler.json), and
+# nothing that is only for the window. DOLBUNDLER_BUILD_DIR puts the ModernGekko
+# build somewhere other than ModernGekko/build.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 MG_SRC="$ROOT/ModernGekko"
-MG_BUILD="$MG_SRC/build"
+MG_BUILD="${DOLBUNDLER_BUILD_DIR:-$MG_SRC/build}"
 APP="$HERE/DolBundler.app"
 INSTALL_DIR="$HOME/Applications"
 
 REBUILD=0
 INSTALL=1
+NO_WINDOW=0
 for arg in "$@"; do
   case "$arg" in
     --rebuild) REBUILD=1 ;;
     --no-install) INSTALL=0 ;;
+    --no-window) NO_WINDOW=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -116,6 +125,33 @@ else
   echo "    $GC_CONTROLLER did not build; the pipe controller option will not work" >&2
 fi
 
+# Where everything is, for recompgc. It sits next to the script as well as
+# inside the app, because the script is the pipeline and the bundle is one way of
+# reaching it: a --no-window build has no bundle at all.
+step "Writing the toolchain configuration"
+cat > "$HERE/src/toolchain.conf" <<CONF
+# Written by DolBundler/build.sh. Absolute paths to the ModernGekko build that
+# extracts, recompiles, and runs discs. Re-run build.sh if the checkout moves.
+# REPO_ROOT is the checkout itself: recompios builds the iPhone app out of it,
+# which needs ios/ and the sources beneath it, not only the built tools.
+REPO_ROOT=$(printf '%q' "$ROOT")
+MG_SRC=$(printf '%q' "$MG_SRC")
+MG_BUILD=$(printf '%q' "$MG_BUILD")
+APPS_DIR=$(printf '%q' "$INSTALL_DIR")
+GRAPHICS_BACKEND=Metal
+GC_CONTROLLER=$(printf '%q' "$GC_CONTROLLER")
+# Where cmake and ninja were found. A Finder-launched app gets launchd's
+# PATH, which has no Homebrew on it, so recompgc puts these back itself.
+TOOLCHAIN_PATH=$(printf '%q' "$TOOLCHAIN_PATH")
+CONF
+echo "    $HERE/src/toolchain.conf"
+
+if [ "$NO_WINDOW" -eq 1 ]; then
+  printf '\n%sRuntime built.%s Recompile a disc and put it in the library with:\n' "$bold" "$off"
+  printf '  %s "<disc.iso>"\n' "$HERE/src/recompgc"
+  exit 0
+fi
+
 step "Building the DolBundler window"
 cargo build --release --manifest-path "$HERE/gui/Cargo.toml"
 GUI_BIN="$HERE/gui/target/release/DolBundler"
@@ -134,21 +170,7 @@ install -m 755 "$HERE/src/tunegame" "$RES/tunegame"
 install -m 644 "$HERE/src/make_game_app.py" "$RES/make_game_app.py"
 python3 "$HERE/src/make_app_icon.py" --out "$RES/icon.icns" >/dev/null
 
-cat > "$RES/toolchain.conf" <<CONF
-# Written by DolBundler/build.sh. Absolute paths to the ModernGekko build that
-# extracts, recompiles, and runs discs. Re-run build.sh if the checkout moves.
-# REPO_ROOT is the checkout itself: recompios builds the iPhone app out of it,
-# which needs ios/ and the sources beneath it, not only the built tools.
-REPO_ROOT=$(printf '%q' "$ROOT")
-MG_SRC=$(printf '%q' "$MG_SRC")
-MG_BUILD=$(printf '%q' "$MG_BUILD")
-APPS_DIR=$(printf '%q' "$INSTALL_DIR")
-GRAPHICS_BACKEND=Metal
-GC_CONTROLLER=$(printf '%q' "$GC_CONTROLLER")
-# Where cmake and ninja were found. A Finder-launched app gets launchd's
-# PATH, which has no Homebrew on it, so recompgc puts these back itself.
-TOOLCHAIN_PATH=$(printf '%q' "$TOOLCHAIN_PATH")
-CONF
+install -m 644 "$HERE/src/toolchain.conf" "$RES/toolchain.conf"
 
 # Written whole rather than patched: PlistBuddy has no upsert and the key set
 # here is fixed.

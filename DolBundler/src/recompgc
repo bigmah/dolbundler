@@ -133,7 +133,11 @@ source "$CONF"
 [ -n "$ARG_GRAPHICS" ] && GRAPHICS_BACKEND="$ARG_GRAPHICS"
 AUDIO_BACKEND="$ARG_AUDIO"
 USER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/moderngekko"
-SUPPORT_DIR="$HOME/Library/Application Support/DolBundler"
+# DOLBUNDLER_HOME moves the library and its covers; USER_DIR above already
+# follows XDG_DATA_HOME, and the recompiled modules follow XDG_CACHE_HOME. With
+# all three set, a program embedding DolBundler (see bundler.json) keeps every
+# game, module and memory card in a tree of its own.
+SUPPORT_DIR="${DOLBUNDLER_HOME:-$HOME/Library/Application Support/DolBundler}"
 LIBRARY="$SUPPORT_DIR/library.json"
 COVERS="$SUPPORT_DIR/covers"
 

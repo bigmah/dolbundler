@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "gamecube",
+  "name": "GameCube & Wii",
+  "short_name": "GC / Wii",
+  "media": "disc image",
+  "extensions": ["iso", "gcm", "wbfs", "rvz", "ciso", "gcz"],
+  "tool": "DolBundler/src/recompgc",
+  "env": {
+    "DOLBUNDLER_HOME": "{data}/DolBundler",
+    "DOLBUNDLER_BUILD_DIR": "{build}",
+    "XDG_DATA_HOME": "{data}",
+    "XDG_CACHE_HOME": "{cache}"
+  },
+  "build": {
+    "command": ["DolBundler/build.sh", "--no-window"],
+    "produces": ["DolBundler/src/toolchain.conf", "{build}/moderngekko-run", "{build}/moderngekko-port"]
+  },
+  "add": ["--porcelain", "{file}"],
+  "library": {
+    "path": "{data}/DolBundler/library.json",
+    "id": "disc_id",
+    "source": "source_image",
+    "requires": ["game_root", "module"]
+  },
+  "play": ["play", "--disc-id", "{disc_id}", "--game-root", "{game_root}", "--module", "{module}", "--title", "{name}"],
+  "make_app": ["make-app", "--porcelain", "--disc-id", "{disc_id}", "--game-root", "{game_root}", "--module", "{module}", "--title", "{name}", "--platform", "{platform}"],
+  "log": "{data}/moderngekko/Logs/{disc_id}.log",
+  "saves": {
+    "{data}/moderngekko/GC": "GC",
+    "{data}/moderngekko/Wii": "Wii"
+  }
+}

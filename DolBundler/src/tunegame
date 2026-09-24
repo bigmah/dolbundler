@@ -129,7 +129,8 @@ for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
     if os.path.isdir(extra) and extra not in os.environ.get("PATH", "").split(":"):
         os.environ["PATH"] = os.environ["PATH"] + ":" + extra
 
-SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/DolBundler")
+SUPPORT_DIR = os.environ.get("DOLBUNDLER_HOME") or os.path.expanduser(
+    "~/Library/Application Support/DolBundler")
 LIBRARY = os.path.join(SUPPORT_DIR, "library.json")
 STORE_ROOT = os.path.join(SUPPORT_DIR, "tuning")
 RECORD_ROOT = os.path.join(REPO_ROOT, "DolBundler", "tuning")

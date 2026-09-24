@@ -21,6 +21,9 @@ __pycache__/
 # Rust / CMake build output
 target/
 build/
+# Written by DolBundler/build.sh beside recompgc; every path in it is absolute
+# to whoever built it.
+DolBundler/src/toolchain.conf
 # ios/build.sh and the simulator recipe in ios/README.md
 build-ios/
 build-sim/
